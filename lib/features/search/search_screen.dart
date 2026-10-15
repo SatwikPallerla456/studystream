@@ -32,6 +32,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   _SearchFilter _filter = _SearchFilter.all;
   _SearchSort _sort = _SearchSort.recent;
   bool _failed = false;
+  int _request = 0;
 
   @override
   void dispose() {
@@ -42,12 +43,14 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   }
 
   void _changed(String value) {
+    _request++;
     setState(() {});
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 240), () => _search(value));
   }
 
   void _clear() {
+    _request++;
     _controller.clear();
     _debounce?.cancel();
     setState(() {
@@ -62,19 +65,20 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
       if (mounted) _clear();
       return;
     }
+    final request = ++_request;
     setState(() {
       _searching = true;
       _failed = false;
     });
     try {
       final results = await ref.read(appDatabaseProvider).searchAll(query);
-      if (!mounted || query != _controller.text) return;
+      if (!mounted || request != _request || query != _controller.text) return;
       setState(() {
         _results = results;
         _searching = false;
       });
     } catch (_) {
-      if (!mounted || query != _controller.text) return;
+      if (!mounted || request != _request || query != _controller.text) return;
       setState(() {
         _failed = true;
         _searching = false;
@@ -84,7 +88,10 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
   void _open(GlobalSearchEntry entry) {
     final item = entry.item;
-    if (item == null) return;
+    if (item == null) {
+      if (entry.libraryId != null) context.push('/library/${entry.libraryId}');
+      return;
+    }
     final path = switch (item.itemType) {
       'video' || 'audio' => Uri(
         path: '/player/${item.id}',
@@ -130,50 +137,54 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         },
         const SingleActivator(LogicalKeyboardKey.escape): _clear,
       },
-      child: StudyPage(
-        maxWidth: 1120,
-        scrollable: false,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const StudyPageHeader(
-              eyebrow: 'Across your learning',
-              title: 'Search',
-              description:
-                  'Find a lesson, a saved thought, or the exact page and moment you need.',
-            ),
-            const SizedBox(height: AppSpace.lg),
-            Semantics(
-              textField: true,
-              label: 'Search lessons, notes, and bookmarks',
-              child: StudySearchField(
-                controller: _controller,
-                focusNode: _focusNode,
-                autofocus:
-                    MediaQuery.sizeOf(context).width >= AppBreakpoints.expanded,
-                hintText: 'Search lessons, notes, and bookmarks',
-                onChanged: _changed,
-                onSubmitted: _search,
+      child: Focus(
+        autofocus: true,
+        child: StudyPage(
+          maxWidth: 1120,
+          scrollable: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const StudyPageHeader(
+                eyebrow: 'Across your learning',
+                title: 'Search',
+                description:
+                    'Find a lesson, a saved thought, or the exact page and moment you need.',
               ),
-            ),
-            const SizedBox(height: AppSpace.sm),
-            _SearchControls(
-              filter: _filter,
-              sort: _sort,
-              resultCount: results.length,
-              hasQuery: _controller.text.trim().isNotEmpty,
-              onFilter: (value) => setState(() => _filter = value),
-              onSort: (value) => setState(() => _sort = value),
-            ),
-            if (_searching) ...[
+              const SizedBox(height: AppSpace.lg),
+              Semantics(
+                textField: true,
+                label: 'Search lessons, notes, and bookmarks',
+                child: StudySearchField(
+                  controller: _controller,
+                  focusNode: _focusNode,
+                  autofocus:
+                      MediaQuery.sizeOf(context).width >=
+                      AppBreakpoints.expanded,
+                  hintText: 'Search lessons, notes, and bookmarks',
+                  onChanged: _changed,
+                  onSubmitted: _search,
+                ),
+              ),
               const SizedBox(height: AppSpace.sm),
-              const LinearProgressIndicator(
-                semanticsLabel: 'Searching your libraries',
+              _SearchControls(
+                filter: _filter,
+                sort: _sort,
+                resultCount: results.length,
+                hasQuery: _controller.text.trim().isNotEmpty,
+                onFilter: (value) => setState(() => _filter = value),
+                onSort: (value) => setState(() => _sort = value),
               ),
+              if (_searching) ...[
+                const SizedBox(height: AppSpace.sm),
+                const LinearProgressIndicator(
+                  semanticsLabel: 'Searching your libraries',
+                ),
+              ],
+              const SizedBox(height: AppSpace.lg),
+              Expanded(child: _body(results)),
             ],
-            const SizedBox(height: AppSpace.lg),
-            Expanded(child: _body(results)),
-          ],
+          ),
         ),
       ),
     );
@@ -228,7 +239,9 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           final entry = results[index];
           return _SearchResultRow(
             entry: entry,
-            onTap: entry.item == null || entry.item!.unavailable
+            onTap:
+                (entry.item == null && entry.libraryId == null) ||
+                    entry.item?.unavailable == true
                 ? null
                 : () => _open(entry),
           );
@@ -317,56 +330,58 @@ class _SearchStartState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return StudySurface(
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 620),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 72,
-                height: 72,
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(AppRadius.xl),
-                ),
-                child: Icon(
-                  Icons.manage_search_rounded,
-                  size: 34,
-                  color: Theme.of(context).colorScheme.onPrimaryContainer,
-                ),
-              ),
-              const SizedBox(height: AppSpace.lg),
-              Text(
-                'Everything is within reach',
-                style: Theme.of(context).textTheme.headlineSmall,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: AppSpace.xs),
-              Text(
-                'Search titles and filenames, the notes you wrote, and the bookmarks you saved.',
-                style: Theme.of(context).textTheme.bodyLarge,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: AppSpace.lg),
-              Wrap(
-                alignment: WrapAlignment.center,
-                spacing: AppSpace.xs,
-                runSpacing: AppSpace.xs,
-                children: const [
-                  StudyStatusBadge(
-                    label: 'Lessons',
-                    icon: Icons.play_circle_outline_rounded,
+      child: SingleChildScrollView(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(AppRadius.xl),
                   ),
-                  StudyStatusBadge(label: 'Notes', icon: Icons.notes_rounded),
-                  StudyStatusBadge(
-                    label: 'Bookmarks',
-                    icon: Icons.bookmark_outline_rounded,
+                  child: Icon(
+                    Icons.manage_search_rounded,
+                    size: 34,
+                    color: Theme.of(context).colorScheme.onPrimaryContainer,
                   ),
-                  StudyShortcutHint(keys: '/ to focus'),
-                ],
-              ),
-            ],
+                ),
+                const SizedBox(height: AppSpace.lg),
+                Text(
+                  'Everything is within reach',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: AppSpace.xs),
+                Text(
+                  'Search titles and filenames, the notes you wrote, and the bookmarks you saved.',
+                  style: Theme.of(context).textTheme.bodyLarge,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: AppSpace.lg),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: AppSpace.xs,
+                  runSpacing: AppSpace.xs,
+                  children: const [
+                    StudyStatusBadge(
+                      label: 'Lessons',
+                      icon: Icons.play_circle_outline_rounded,
+                    ),
+                    StudyStatusBadge(label: 'Notes', icon: Icons.notes_rounded),
+                    StudyStatusBadge(
+                      label: 'Bookmarks',
+                      icon: Icons.bookmark_outline_rounded,
+                    ),
+                    StudyShortcutHint(keys: '/ to focus'),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -463,6 +478,8 @@ class _SearchResultRow extends StatelessWidget {
   }
 
   static String _typeLabel(String kind) => switch (kind) {
+    'library' => 'Library',
+    'section' => 'Section',
     'note' => 'Note',
     'bookmark' => 'Bookmark',
     _ => 'Lesson',

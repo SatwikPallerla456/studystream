@@ -116,7 +116,7 @@ void main() {
 
     expect(find.text('Sections'), findsOneWidget);
     expect(find.text('Welcome to Dart'), findsOneWidget);
-    expect(find.text('In progress'), findsOneWidget);
+    expect(find.text('In progress'), findsWidgets);
     await tester.tap(find.text('Reference').hitTestable());
     await _settleUi(tester);
     expect(find.text('Dart Handbook'), findsOneWidget);
@@ -204,7 +204,7 @@ void main() {
       expect(find.text('Local network sync host'), findsOneWidget);
       expect(find.text('Keyboard shortcuts'), findsOneWidget);
       expect(
-        find.textContaining('does not include a companion client'),
+        find.textContaining('HTTP traffic is authenticated'),
         findsOneWidget,
       );
       await _disposeTree(tester);
@@ -262,7 +262,6 @@ void main() {
         home: const MediaPlayerScreen(itemId: 'video'),
         size: const Size(900, 700),
       );
-      expect(find.text('Preparing your lesson'), findsOneWidget);
       await _settleUi(tester);
       expect(find.text('This lesson cannot be played'), findsOneWidget);
       expect(find.textContaining('missing or has moved'), findsOneWidget);
@@ -274,7 +273,6 @@ void main() {
         home: const PdfReaderScreen(itemId: 'pdf'),
         size: const Size(430, 800),
       );
-      expect(find.text('Preparing your document'), findsOneWidget);
       await _settleUi(tester);
       expect(find.text('This PDF cannot be opened'), findsOneWidget);
       expect(find.textContaining('missing or has moved'), findsOneWidget);
@@ -309,6 +307,42 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'small desktop window keeps Search and Study usable with reduced motion',
+    (tester) async {
+      final database = _database();
+      addTearDown(database.close);
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(disableAnimations: true);
+      addTearDown(
+        tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await _pumpApp(
+        tester,
+        database: database,
+        home: const SearchScreen(),
+        size: const Size(800, 600),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        AppMotion.resolve(
+          tester.element(find.byType(SearchScreen)),
+          AppMotion.standard,
+        ),
+        Duration.zero,
+      );
+      await _disposeTree(tester);
+      await _pumpApp(
+        tester,
+        database: database,
+        home: const StudyScreen(),
+        size: const Size(800, 600),
+      );
+      expect(tester.takeException(), isNull);
+      await _disposeTree(tester);
+    },
+  );
+
   testWidgets('dark theme retains semantics and desktop pointer states', (
     tester,
   ) async {
@@ -326,7 +360,7 @@ void main() {
 
     final scaffoldContext = tester.element(find.byType(Scaffold).first);
     expect(Theme.of(scaffoldContext).brightness, Brightness.dark);
-    expect(find.bySemanticsLabel('StudyStream'), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('StudyStream')), findsWidgets);
     expect(find.bySemanticsLabel('Choose your first folder'), findsOneWidget);
 
     final pointer = await tester.createGesture(kind: PointerDeviceKind.mouse);

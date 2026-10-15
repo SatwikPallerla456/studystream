@@ -1,7 +1,23 @@
+import 'dart:convert';
+import '../../core/utils/id_utils.dart';
+
 class SyncConflictResolver {
   const SyncConflictResolver._();
 
   static Map<String, dynamic> mergeProgress(
+    Map<String, dynamic> local,
+    Map<String, dynamic> remote,
+  ) {
+    final selected = _mergeProgress(local, remote);
+    final localActivity = (local['lastOpenedAt'] as num?)?.toInt() ?? 0;
+    final remoteActivity = (remote['lastOpenedAt'] as num?)?.toInt() ?? 0;
+    selected['lastOpenedAt'] = localActivity > remoteActivity
+        ? localActivity
+        : remoteActivity;
+    return selected;
+  }
+
+  static Map<String, dynamic> _mergeProgress(
     Map<String, dynamic> local,
     Map<String, dynamic> remote,
   ) {
@@ -45,18 +61,20 @@ class SyncConflictResolver {
   ) {
     if (local['content'] == remote['content'] &&
         local['title'] == remote['title'] &&
-        local['description'] == remote['description']) {
+        local['description'] == remote['description'] &&
+        local['positionSeconds'] == remote['positionSeconds'] &&
+        local['pageNumber'] == remote['pageNumber']) {
+      return [mergeMetadata(local, remote)];
+    }
+    if (local['deviceId'] == remote['deviceId'] &&
+        local['version'] != remote['version']) {
       return [mergeMetadata(local, remote)];
     }
     final winner = mergeMetadata(local, remote);
-    final winnerIsLocal =
-        winner['updatedAt'] == local['updatedAt'] &&
-        winner['version'] == local['version'] &&
-        (winner['deviceId'] ?? '') == (local['deviceId'] ?? '');
+    final winnerIsLocal = _canonical(winner) == _canonical(local);
     final loser = winnerIsLocal ? remote : local;
     final conflict = Map<String, dynamic>.of(loser);
-    conflict['id'] =
-        '${loser['id']}-conflict-${loser['deviceId'] ?? 'device'}-${loser['version'] ?? 1}';
+    conflict['id'] = '${loser['id']}-conflict-${stableId(_canonical(loser))}';
     return [winner, conflict];
   }
 
@@ -78,7 +96,16 @@ class SyncConflictResolver {
         .toString();
     final remoteDevice = (remote['deviceId'] ?? remote['updatedByDevice'] ?? '')
         .toString();
-    return Map.of(localDevice.compareTo(remoteDevice) >= 0 ? local : remote);
+    final compare = localDevice.compareTo(remoteDevice);
+    if (compare != 0) return Map.of(compare > 0 ? local : remote);
+    return Map.of(
+      _canonical(local).compareTo(_canonical(remote)) >= 0 ? local : remote,
+    );
+  }
+
+  static String _canonical(Map<String, dynamic> value) {
+    final keys = value.keys.toList()..sort();
+    return jsonEncode({for (final key in keys) key: value[key]});
   }
 
   static double _progressPercent(Map<String, dynamic> value) =>

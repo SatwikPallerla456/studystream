@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -59,13 +60,27 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   }
 
   Future<void> _load() async {
+    Player? initializing;
     try {
+      if (_player != null) {
+        for (final subscription in _subscriptions) {
+          await subscription.cancel();
+        }
+        _subscriptions.clear();
+        await _progressWriter?.dispose();
+        await _player?.dispose();
+        _player = null;
+        _videoController = null;
+        _progressWriter = null;
+      }
+      _completionHandled = false;
       final item = await _database.getItemById(widget.itemId);
       if (item == null) throw StateError('This lesson no longer exists.');
       if (item.unavailable) {
         throw StateError('This file is missing. Relink it from the library.');
       }
       final isRemote =
+          item.filePath.startsWith('remote:') ||
           item.filePath.startsWith('http://') ||
           item.filePath.startsWith('https://');
       if (!isRemote && !await File(item.filePath).exists()) {
@@ -77,7 +92,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       final preferences = await ref
           .read(appPreferencesRepositoryProvider)
           .load();
-      final player = Player();
+      if (!mounted) return;
+      final source = await ref.read(lanSyncClientProvider).sourceFor(item);
+      if (!mounted) return;
+      final player = initializing = Player();
       final controller = VideoController(player);
       final speed = saved?.playbackSpeed ?? preferences.defaultPlaybackSpeed;
       final exactPosition = widget.initialPositionSeconds;
@@ -90,10 +108,34 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
               rewindSeconds: preferences.resumeRewindSeconds,
             )
           : exactPosition.clamp(0, double.infinity);
-      await player.open(Media(item.filePath), play: false);
+      await player.open(
+        Media(
+          source.uri.scheme == 'file' ? item.filePath : source.uri.toString(),
+          httpHeaders: source.headers,
+        ),
+        play: false,
+      );
+      if (!mounted) {
+        await player.dispose();
+        return;
+      }
+      // Opening enqueues a native load; seeking before duration arrives can be ignored.
+      if (player.state.duration == Duration.zero) {
+        await player.stream.duration
+            .firstWhere((duration) => duration > Duration.zero)
+            .timeout(const Duration(seconds: 15));
+      }
+      if (!mounted) {
+        await player.dispose();
+        return;
+      }
       await player.setRate(speed);
       if (resume > 0) {
         await player.seek(Duration(milliseconds: (resume * 1000).round()));
+      }
+      if (!mounted) {
+        await player.dispose();
+        return;
       }
       final writer =
           MediaProgressWriter(
@@ -101,15 +143,22 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             item: item,
             completionThreshold: preferences.completionThreshold,
             resumeRewindSeconds: preferences.resumeRewindSeconds,
+            onError: (error) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Progress could not be saved. Check available storage and try again.',
+                    ),
+                  ),
+                );
+              }
+            },
           )..seed(
-            position: Duration(
-              milliseconds:
-                  ((exactPosition ?? saved?.lastPositionSeconds ?? 0) * 1000)
-                      .round(),
-            ),
+            position: Duration(milliseconds: (resume * 1000).round()),
             duration: Duration(
               milliseconds:
-                  ((saved?.durationSeconds ?? item.durationSeconds ?? 0) * 1000)
+                  ((player.state.duration.inMilliseconds / 1000) * 1000)
                       .round(),
             ),
             speed: speed,
@@ -126,7 +175,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         )
         ..add(
           player.stream.playing.listen((playing) {
-            WakelockPlus.toggle(enable: playing);
+            unawaited(_setWakelock(playing));
             if (!playing) unawaited(writer.flush());
           }),
         )
@@ -154,6 +203,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         await player.dispose();
         return;
       }
+      initializing = null;
       setState(() {
         _item = item;
         _player = player;
@@ -163,6 +213,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         _loading = false;
       });
     } catch (error) {
+      await initializing?.dispose();
       if (!mounted) return;
       setState(() {
         _error = _friendlyPlaybackError(error.toString());
@@ -182,6 +233,9 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         message.contains('codec') ||
         message.contains('format')) {
       return 'This media format is not supported by the player on this device.';
+    }
+    if (message.contains('host') || message.contains('connect')) {
+      return 'Connect to this library’s desktop host in Settings, then reopen the lesson.';
     }
     return 'StudyStream could not start this lesson. Check that the file is accessible and try again.';
   }
@@ -251,6 +305,14 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
 
   Future<void> _setSpeed(double speed) async {
     await _player?.setRate(speed);
+    final player = _player;
+    if (player != null) {
+      _progressWriter?.schedule(
+        position: player.state.position,
+        duration: player.state.duration,
+        speed: speed,
+      );
+    }
     if (mounted) setState(() => _speed = speed);
   }
 
@@ -429,17 +491,40 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
 
   void _togglePlay() => _player?.playOrPause();
 
+  Future<void> _setWakelock(bool enabled) async {
+    try {
+      await WakelockPlus.toggle(enable: enabled);
+    } on PlatformException {
+      // Playback remains usable when keeping the display awake is unavailable.
+    } on MissingPluginException {
+      // Some desktop hosts and test harnesses do not expose this capability.
+    }
+  }
+
   void _seekRelative(int seconds) {
     final player = _player;
     if (player == null) return;
     final target = player.state.position + Duration(seconds: seconds);
-    player.seek(target < Duration.zero ? Duration.zero : target);
+    final end = player.state.duration;
+    player.seek(
+      target < Duration.zero
+          ? Duration.zero
+          : end > Duration.zero && target > end
+          ? end
+          : target,
+    );
   }
 
   void _toggleMute() {
     final player = _player;
     if (player == null) return;
     player.setVolume(player.state.volume == 0 ? 100 : 0);
+  }
+
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await _progressWriter?.flush();
+    return AppExitResponse.exit;
   }
 
   @override
@@ -453,7 +538,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }
-    unawaited(WakelockPlus.disable());
+    if (_player != null) unawaited(_setWakelock(false));
     unawaited(_progressWriter?.dispose());
     unawaited(_player?.dispose());
     super.dispose();
@@ -757,7 +842,7 @@ class _AudioSurface extends StatelessWidget {
                   StudyArtwork(
                     path: item.thumbnailPath,
                     kind: 'audio',
-                    size: AppBreakpoints.isCompact(context) ? 148 : 188,
+                    size: MediaQuery.sizeOf(context).height < 750 ? 84 : 128,
                     radius: AppRadius.xl,
                   ),
                   const SizedBox(height: AppSpace.lg),
@@ -778,7 +863,9 @@ class _AudioSurface extends StatelessWidget {
                   ),
                   const SizedBox(height: AppSpace.xxs),
                   Text(
-                    'Local audio · Progress saves automatically',
+                    item.filePath.startsWith('remote:')
+                        ? 'Desktop audio · Progress saves automatically'
+                        : 'Local audio · Progress saves automatically',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: const Color(0xFFB8C6BF),

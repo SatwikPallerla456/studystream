@@ -11,7 +11,10 @@ class ResumeService {
     final safePosition = lastPositionSeconds
         .clamp(0, double.infinity)
         .toDouble();
-    if (durationSeconds > 0 && safePosition >= durationSeconds - 5) return 0;
+    final endWindow = durationSeconds > 100 ? 5.0 : durationSeconds * .05;
+    if (durationSeconds > 0 && safePosition >= durationSeconds - endWindow) {
+      return 0;
+    }
     if (safePosition <= rewindSeconds + 5) return safePosition;
     return (safePosition - rewindSeconds).clamp(0, double.infinity).toDouble();
   }

@@ -2,6 +2,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:study_stream/domain/services/resume_service.dart';
 
 void main() {
+  test('short media keeps meaningful middle progress', () {
+    expect(ResumeService.mediaResumeSeconds(4, durationSeconds: 8), 4);
+    expect(ResumeService.mediaResumeSeconds(7.9, durationSeconds: 8), 0);
+  });
   group('media resume', () {
     test('rewinds established progress by ten seconds', () {
       expect(ResumeService.mediaResumeSeconds(80, durationSeconds: 300), 70);

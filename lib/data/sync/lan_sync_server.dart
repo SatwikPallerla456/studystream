@@ -10,6 +10,7 @@ import 'package:drift/drift.dart' as drift;
 import '../../core/utils/id_utils.dart';
 import '../db/app_database.dart';
 import 'sync_snapshot_merger.dart';
+import 'lan_discovery.dart';
 
 class LanSyncState {
   const LanSyncState({
@@ -31,6 +32,8 @@ class LanSyncServer {
   final AppDatabase database;
   final _states = StreamController<LanSyncState>.broadcast();
   final _random = Random.secure();
+  final _discovery = LanDiscovery();
+  final _pairAttempts = <String, (int, int)>{};
   HttpServer? _server;
   StreamSubscription<HttpRequest>? _requestSubscription;
   Timer? _pairingTimer;
@@ -50,9 +53,19 @@ class LanSyncServer {
         shared: true,
       );
       _server = server;
+      await _discovery.advertise(server.port);
       regeneratePairingCode();
       _requestSubscription = server.listen(
-        (request) => unawaited(_handle(request)),
+        (request) => unawaited(
+          _handle(request).catchError((Object error) async {
+            // A client can disconnect after response headers or streaming began.
+            try {
+              await request.response.close();
+            } catch (_) {
+              /* Socket already closed. */
+            }
+          }),
+        ),
         onError: (Object error, StackTrace stack) => _emit(
           LanSyncState(
             running: true,
@@ -94,6 +107,7 @@ class LanSyncServer {
 
   Future<void> stop() async {
     _pairingTimer?.cancel();
+    _discovery.close();
     await _requestSubscription?.cancel();
     await _server?.close(force: true);
     _server = null;
@@ -113,13 +127,13 @@ class LanSyncServer {
         ..set('Cache-Control', 'no-store');
       final path = request.uri.pathSegments;
       if (request.method == 'GET' && request.uri.path == '/v1/health') {
-        return _json(request, HttpStatus.ok, {
+        return await _json(request, HttpStatus.ok, {
           'service': 'StudyStream',
           'version': 1,
         });
       }
       if (request.method == 'POST' && request.uri.path == '/v1/pair') {
-        return _pair(request);
+        return await _pair(request);
       }
       final device = await _authorise(request);
       if (device == null) return;
@@ -139,7 +153,7 @@ class LanSyncServer {
           device.id,
           address: request.connectionInfo?.remoteAddress.address,
         );
-        return _json(request, HttpStatus.ok, snapshot);
+        return await _json(request, HttpStatus.ok, snapshot);
       }
       if (request.method == 'POST' && request.uri.path == '/v1/snapshot') {
         final body = await _readJson(request);
@@ -148,32 +162,46 @@ class LanSyncServer {
           device.id,
           address: request.connectionInfo?.remoteAddress.address,
         );
-        return _json(request, HttpStatus.ok, {'status': 'merged'});
+        return await _json(request, HttpStatus.ok, {'status': 'merged'});
       }
       if ((request.method == 'GET' || request.method == 'HEAD') &&
           path.length == 3 &&
           path[0] == 'v1' &&
           path[1] == 'media') {
-        return _serveMedia(request, path[2]);
+        return await _serveMedia(request, path[2]);
       }
-      _json(request, HttpStatus.notFound, {'error': 'Not found'});
+      await _json(request, HttpStatus.notFound, {'error': 'Not found'});
     } on FormatException catch (error) {
-      _json(request, HttpStatus.badRequest, {'error': error.message});
+      await _json(request, HttpStatus.badRequest, {'error': error.message});
     } on _PayloadTooLargeException {
-      _json(request, HttpStatus.requestEntityTooLarge, {
+      await _json(request, HttpStatus.requestEntityTooLarge, {
         'error': 'Request body is too large',
       });
     } catch (_) {
-      _json(request, HttpStatus.internalServerError, {
+      await _json(request, HttpStatus.internalServerError, {
         'error': 'Request failed',
       });
     }
   }
 
   Future<void> _pair(HttpRequest request) async {
+    final address = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final nowAt = DateTime.now().millisecondsSinceEpoch;
+    final attempt = _pairAttempts[address];
+    final count = attempt != null && nowAt - attempt.$1 < 60000
+        ? attempt.$2 + 1
+        : 1;
+    if (_pairAttempts.length > 256) _pairAttempts.clear();
+    _pairAttempts[address] = (count == 1 ? nowAt : attempt!.$1, count);
+    if (count > 10) {
+      await _json(request, HttpStatus.tooManyRequests, {
+        'error': 'Try pairing again in one minute',
+      });
+      return;
+    }
     final body = await _readJson(request);
     if (_pairingCode == null || body['code']?.toString() != _pairingCode) {
-      return _json(request, HttpStatus.unauthorized, {
+      return await _json(request, HttpStatus.unauthorized, {
         'error': 'Invalid or expired pairing code',
       });
     }
@@ -201,13 +229,18 @@ class LanSyncServer {
       ),
     );
     regeneratePairingCode();
-    _json(request, HttpStatus.created, {'deviceId': deviceId, 'token': token});
+    await _json(request, HttpStatus.created, {
+      'deviceId': deviceId,
+      'token': token,
+    });
   }
 
   Future<KnownDevice?> _authorise(HttpRequest request) async {
     final header = request.headers.value(HttpHeaders.authorizationHeader);
     if (header == null || !header.startsWith('Bearer ')) {
-      _json(request, HttpStatus.unauthorized, {'error': 'Approval required'});
+      await _json(request, HttpStatus.unauthorized, {
+        'error': 'Approval required',
+      });
       return null;
     }
     final tokenHash = sha256
@@ -215,7 +248,7 @@ class LanSyncServer {
         .toString();
     final device = await database.getDeviceByTokenHash(tokenHash);
     if (device == null) {
-      _json(request, HttpStatus.forbidden, {
+      await _json(request, HttpStatus.forbidden, {
         'error': 'Device access has been revoked',
       });
     }
@@ -225,19 +258,19 @@ class LanSyncServer {
   Future<void> _serveMedia(HttpRequest request, String itemId) async {
     final item = await database.getItemById(itemId);
     if (item == null || item.unavailable) {
-      return _json(request, HttpStatus.notFound, {
+      return await _json(request, HttpStatus.notFound, {
         'error': 'Media unavailable',
       });
     }
     final library = await database.getLibraryById(item.libraryId);
     if (library == null) {
-      return _json(request, HttpStatus.notFound, {
+      return await _json(request, HttpStatus.notFound, {
         'error': 'Library unavailable',
       });
     }
     if (!await File(item.filePath).exists() ||
         !await Directory(library.rootFolderPath).exists()) {
-      return _json(request, HttpStatus.notFound, {
+      return await _json(request, HttpStatus.notFound, {
         'error': 'Media unavailable',
       });
     }
@@ -247,7 +280,7 @@ class LanSyncServer {
     final canonicalFile = await File(item.filePath).resolveSymbolicLinks();
     if (canonicalFile != canonicalRoot &&
         !canonicalFile.startsWith('$canonicalRoot${Platform.pathSeparator}')) {
-      return _json(request, HttpStatus.forbidden, {
+      return await _json(request, HttpStatus.forbidden, {
         'error': 'File is outside the approved library',
       });
     }
@@ -330,12 +363,12 @@ class LanSyncServer {
     return value;
   }
 
-  void _json(HttpRequest request, int status, Object body) {
+  Future<void> _json(HttpRequest request, int status, Object body) async {
     request.response
       ..statusCode = status
       ..headers.contentType = ContentType.json
-      ..write(jsonEncode(body))
-      ..close();
+      ..write(jsonEncode(body));
+    await request.response.close();
   }
 
   List<int> _randomBytes(int length) =>

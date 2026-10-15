@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'sync_client_section.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -50,7 +52,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       builder: (_) => const StudyConfirmDialog(
         title: 'Restore a StudyStream backup?',
         message:
-            'Valid records will be merged with data on this device. Matching records are updated; your source media files are not included or changed.',
+            'Valid records will be merged with data on this device. Newer local progress and settings are kept. Conflicting notes and bookmarks are preserved as copies. Source media files are not included or changed.',
         confirmLabel: 'Choose backup',
         icon: Icons.restore_rounded,
       ),
@@ -60,6 +62,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       final path = await BackupService(database).importBackup();
       if (mounted && path != null) {
+        ref.invalidate(appPreferencesProvider);
+        ref.invalidate(themeModeProvider);
         _message(
           'Backup restored. Libraries, progress, notes, bookmarks, and settings were merged.',
           success: true,
@@ -268,6 +272,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               onMessage: _message,
             ),
           ),
+          const SizedBox(height: AppSpace.md),
+          const SyncClientSection(),
           const SizedBox(height: AppSpace.md),
           _DevicesSection(
             database: database,
@@ -535,7 +541,7 @@ class _SyncSection extends StatelessWidget {
                 const SizedBox(width: AppSpace.sm),
                 Expanded(
                   child: Text(
-                    'Use this only on a network you trust. StudyStream hosts data; this app does not include a companion client.',
+                    'Use this only on a network you trust. Pair a device using the address and code shown here. HTTP traffic is authenticated but not encrypted.',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ),

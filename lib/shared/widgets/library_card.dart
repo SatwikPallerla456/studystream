@@ -4,6 +4,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import 'study_ui.dart';
+import 'item_artwork.dart';
 
 enum LibraryCardLayout { grid, list }
 
@@ -43,10 +44,8 @@ class LibraryCard extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                StudyArtwork(
-                  path: library.coverPath,
-                  kind: 'library',
-                  unavailable: library.unavailable,
+                LibraryArtwork(
+                  library: library,
                   size: double.infinity,
                   radius: 0,
                 ),
@@ -105,12 +104,7 @@ class LibraryCard extends StatelessWidget {
       padding: const EdgeInsets.all(AppSpace.md),
       child: Row(
         children: [
-          StudyArtwork(
-            path: library.coverPath,
-            kind: 'library',
-            unavailable: library.unavailable,
-            size: 76,
-          ),
+          LibraryArtwork(library: library, size: 76),
           const SizedBox(width: AppSpace.md),
           Expanded(
             child: Column(

@@ -4,6 +4,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import 'study_ui.dart';
+import 'item_artwork.dart';
 
 class ContinueItemTile extends StatelessWidget {
   const ContinueItemTile({
@@ -32,12 +33,7 @@ class ContinueItemTile extends StatelessWidget {
           Stack(
             alignment: Alignment.center,
             children: [
-              StudyArtwork(
-                path: entry.item.thumbnailPath,
-                kind: entry.item.itemType,
-                unavailable: entry.item.unavailable,
-                size: compact ? 58 : 76,
-              ),
+              ItemArtwork(item: entry.item, size: compact ? 58 : 76),
               if (!entry.item.unavailable &&
                   (entry.item.itemType == 'video' ||
                       entry.item.itemType == 'audio'))

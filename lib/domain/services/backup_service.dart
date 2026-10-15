@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 
@@ -11,14 +12,19 @@ class BackupService {
   final AppDatabase database;
 
   Future<String?> exportBackup() async {
+    final snapshot = await database.exportData();
+    final bytes = Uint8List.fromList(
+      utf8.encode(const JsonEncoder.withIndent('  ').convert(snapshot)),
+    );
     final path = await FilePicker.platform.saveFile(
+      bytes: bytes,
       dialogTitle: 'Export StudyStream backup',
       fileName: 'studystream-backup-${_dateStamp()}.json',
       type: FileType.custom,
       allowedExtensions: const ['json'],
     );
     if (path == null) return null;
-    final snapshot = await database.exportData();
+    if (Platform.isAndroid || Platform.isIOS) return path;
     final target = path.toLowerCase().endsWith('.json') ? path : '$path.json';
     await File(target).writeAsString(
       const JsonEncoder.withIndent('  ').convert(snapshot),
@@ -37,7 +43,13 @@ class BackupService {
     );
     final path = picked?.files.single.path;
     if (path == null) return null;
-    final decoded = jsonDecode(await File(path).readAsString());
+    final file = File(path);
+    if (await file.length() > 64 * 1024 * 1024) {
+      throw const FormatException(
+        'This backup is too large to restore safely.',
+      );
+    }
+    final decoded = jsonDecode(await file.readAsString());
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('This is not a valid StudyStream backup.');
     }

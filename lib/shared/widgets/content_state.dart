@@ -125,23 +125,25 @@ class ContentLoadingState extends StatelessWidget {
       liveRegion: true,
       label: label,
       child: StudySurface(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const StudySkeleton(width: 180, height: 22),
-            const SizedBox(height: AppSpace.md),
-            const StudySkeleton(height: 15),
-            const SizedBox(height: AppSpace.xs),
-            const StudySkeleton(width: 280, height: 15),
-            const SizedBox(height: AppSpace.lg),
-            Row(
-              children: const [
-                Expanded(child: StudySkeleton(height: 76)),
-                SizedBox(width: AppSpace.sm),
-                Expanded(child: StudySkeleton(height: 76)),
-              ],
-            ),
-          ],
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const StudySkeleton(width: 180, height: 22),
+              const SizedBox(height: AppSpace.md),
+              const StudySkeleton(height: 15),
+              const SizedBox(height: AppSpace.xs),
+              const StudySkeleton(width: 280, height: 15),
+              const SizedBox(height: AppSpace.lg),
+              Row(
+                children: const [
+                  Expanded(child: StudySkeleton(height: 76)),
+                  SizedBox(width: AppSpace.sm),
+                  Expanded(child: StudySkeleton(height: 76)),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );

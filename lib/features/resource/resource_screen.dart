@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_html/flutter_html.dart';
@@ -34,6 +37,7 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
   ReadingProgressWriter? _writer;
   Timer? _saveTimer;
   String? _content;
+  Uint8List? _image;
   String? _externalUrl;
   String? _error;
   bool _loading = true;
@@ -54,11 +58,45 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
       final item = await _database.getItemById(widget.itemId);
       if (item == null) throw StateError('This resource no longer exists.');
       _item = item;
-      if (item.unavailable || !await File(item.filePath).exists()) {
+      final remote = item.filePath.startsWith('remote:');
+      if (item.unavailable ||
+          (!remote && !await File(item.filePath).exists())) {
         throw StateError(
           'This file is missing. Rescan or relink it from the library.',
         );
       }
+      String? remoteText;
+      if (remote && ['txt', 'html', 'link', 'image'].contains(item.itemType)) {
+        final source = await ref.read(lanSyncClientProvider).sourceFor(item);
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 8);
+        try {
+          final request = await client.getUrl(source.uri);
+          request.followRedirects = false;
+          source.headers.forEach(request.headers.set);
+          final response = await request.close();
+          if (response.statusCode != 200) {
+            throw StateError('The host could not open this resource.');
+          }
+          final bytes = BytesBuilder();
+          await for (final chunk in response.timeout(
+            const Duration(seconds: 15),
+          )) {
+            if (bytes.length + chunk.length > 16 * 1024 * 1024) {
+              throw StateError('This resource is too large to display.');
+            }
+            bytes.add(chunk);
+          }
+          if (item.itemType == 'image') {
+            _image = bytes.takeBytes();
+          } else {
+            remoteText = utf8.decode(bytes.takeBytes());
+          }
+        } finally {
+          client.close(force: true);
+        }
+      }
+      if (!mounted) return;
       final saved = await _database.getReadingByItemId(item.id);
       final preferences = await ref
           .read(appPreferencesRepositoryProvider)
@@ -76,9 +114,17 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
       switch (item.itemType) {
         case 'txt':
         case 'html':
-          _content = await File(item.filePath).readAsString();
+          if (!remote &&
+              await File(item.filePath).length() > 16 * 1024 * 1024) {
+            throw StateError('This text resource is too large to display.');
+          }
+          _content = remoteText ?? await File(item.filePath).readAsString();
         case 'link':
-          _content = await File(item.filePath).readAsString();
+          if (!remote &&
+              await File(item.filePath).length() > 16 * 1024 * 1024) {
+            throw StateError('This text resource is too large to display.');
+          }
+          _content = remoteText ?? await File(item.filePath).readAsString();
           _externalUrl = _extractUrl(_content!);
       }
       if (!mounted) return;
@@ -176,15 +222,26 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
   Future<void> _openExternal() async {
     final item = _item;
     if (item == null) return;
+    if (item.filePath.startsWith('remote:') && item.itemType != 'link') {
+      _message(
+        'Open this file on the desktop host. Its protected URL cannot be handed to another app.',
+      );
+      return;
+    }
     final uri = item.itemType == 'link'
         ? Uri.tryParse(_externalUrl ?? '')
         : Uri.file(item.filePath);
-    if (uri == null) {
+    if (uri == null ||
+        (item.itemType == 'link' && !['https', 'http'].contains(uri.scheme))) {
       _message('This resource does not contain a valid link.');
       return;
     }
-    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (mounted && !opened) _message('No application could open this file.');
+    try {
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (mounted && !opened) _message('No application could open this file.');
+    } catch (_) {
+      if (mounted) _message('No application could open this file.');
+    }
   }
 
   void _showTools() {
@@ -197,6 +254,12 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await _writer?.save();
+    return AppExitResponse.exit;
   }
 
   @override
@@ -351,8 +414,10 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
             minScale: 0.5,
             maxScale: 5,
             child: Center(
-              child: Image.file(
-                File(item.filePath),
+              child: Image(
+                image: _image == null
+                    ? FileImage(File(item.filePath))
+                    : MemoryImage(_image!),
                 fit: BoxFit.contain,
                 errorBuilder: (_, _, _) => const ContentState(
                   icon: Icons.broken_image_outlined,

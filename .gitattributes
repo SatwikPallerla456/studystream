@@ -1,0 +1,3 @@
+# Preserve document and media fixtures byte-for-byte.
+*.pdf binary
+*.wav binary

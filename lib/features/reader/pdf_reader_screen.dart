@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +11,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
+import '../../data/sync/lan_sync_client.dart';
 import '../../domain/services/progress_writer.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
@@ -37,6 +39,10 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   PdfTextSearcher? _searcher;
   Timer? _saveTimer;
   String? _filePath;
+  RemoteMediaSource? _remoteSource;
+  bool _restoring = true;
+  double _savedZoom = 1;
+  double _savedOffset = 0;
   String? _error;
   int _currentPage = 1;
   int _totalPages = 0;
@@ -49,6 +55,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _database = ref.read(appDatabaseProvider);
+    _controller.addListener(_viewChanged);
     _load();
   }
 
@@ -57,16 +64,26 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       final item = await _database.getItemById(widget.itemId);
       if (item == null) throw StateError('This document no longer exists.');
       _item = item;
-      if (item.unavailable || !await File(item.filePath).exists()) {
+      final remote = item.filePath.startsWith('remote:');
+      if (item.unavailable ||
+          (!remote && !await File(item.filePath).exists())) {
         throw StateError(
           'This PDF is missing. Rescan or relink it from the library.',
         );
+      }
+      if (remote) {
+        _remoteSource = await ref.read(lanSyncClientProvider).sourceFor(item);
       }
       final saved = await _database.getReadingByItemId(item.id);
       final preferences = await ref
           .read(appPreferencesRepositoryProvider)
           .load();
       _currentPage = widget.initialPage ?? saved?.resumePage ?? 1;
+      _savedZoom = saved?.zoom ?? 1;
+      _savedOffset = widget.initialPage == null
+          ? saved?.resumeScrollOffset ?? 0
+          : 0;
+      if (!mounted) return;
       _visitedPages.add(_currentPage);
       _filePath = item.filePath;
       _writer =
@@ -76,6 +93,8 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
               completionThreshold: preferences.completionThreshold,
             )
             ..currentPage = _currentPage
+            ..scrollOffset = saved?.resumeScrollOffset ?? 0
+            ..pagesVisited = (saved?.percentRead ?? 0) > 0 ? 2 : 1
             ..zoom = saved?.zoom ?? 1
             ..readingMode = saved?.readingMode ?? 'fitWidth';
       if (mounted) setState(() {});
@@ -102,9 +121,46 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     _searcher ??= PdfTextSearcher(controller)..addListener(_searchChanged);
     _ready = true;
     Future.microtask(() async {
-      if (_currentPage > 1) await controller.goToPage(pageNumber: _currentPage);
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      _currentPage = _currentPage.clamp(1, _totalPages);
+      await controller.goToPage(
+        pageNumber: _currentPage,
+        duration: Duration.zero,
+      );
+      if (!mounted) return;
+      await controller.goToPosition(
+        documentOffset: Offset(
+          controller.visibleRect.left,
+          _savedOffset > 0 ? _savedOffset : controller.visibleRect.top,
+        ),
+        zoom: _savedZoom,
+        duration: Duration.zero,
+      );
+      if (mounted) {
+        _restoring = false;
+        setState(() {});
+      }
     });
+  }
+
+  void _viewChanged() {
+    if (!_ready || _restoring || !_controller.isReady) return;
+    _saveTimer?.cancel();
+    _saveTimer = Timer(
+      const Duration(milliseconds: 700),
+      () => unawaited(_saveProgress()),
+    );
+  }
+
+  Future<void> _fit(bool width) async {
+    if (!_ready) return;
+    _writer?.readingMode = width ? 'fitWidth' : 'fitPage';
+    await _controller.goToPage(
+      pageNumber: _currentPage,
+      anchor: width ? PdfPageAnchor.top : PdfPageAnchor.all,
+      duration: AppMotion.resolve(context, AppMotion.standard),
+    );
+    await _saveProgress();
   }
 
   void _searchChanged() {
@@ -112,7 +168,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   }
 
   void _pageChanged(int? page) {
-    if (page == null || page == _currentPage) return;
+    if (!mounted || _restoring || page == null || page == _currentPage) return;
     setState(() => _currentPage = page);
     _visitedPages.add(page);
     final writer = _writer;
@@ -131,8 +187,10 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
 
   Future<void> _saveProgress() async {
     final writer = _writer;
-    if (writer == null) return;
-    if (_ready) writer.zoom = _controller.currentZoom;
+    if (writer == null || !_ready || _restoring || !_controller.isReady) return;
+    writer
+      ..zoom = _controller.currentZoom
+      ..scrollOffset = _controller.visibleRect.top;
     await writer.save();
   }
 
@@ -142,6 +200,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       final text = TextEditingController(text: '$_currentPage');
       final value = await showStudyAdaptiveModal<int>(
         context: context,
+        disposeOnClose: [text],
         builder: (modalContext) => StudyModalFrame(
           title: 'Go to page',
           icon: Icons.find_in_page_outlined,
@@ -167,7 +226,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
           ),
         ),
       );
-      text.dispose();
+
       page = value;
     }
     if (page == null || !_ready) return;
@@ -216,6 +275,12 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   }
 
   @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await _saveProgress();
+    return AppExitResponse.exit;
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) unawaited(_saveProgress());
   }
@@ -224,10 +289,15 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
+    _controller.removeListener(_viewChanged);
     _searcher?.removeListener(_searchChanged);
     _searcher?.dispose();
     _searchController.dispose();
-    if (_ready) _writer?.zoom = _controller.currentZoom;
+    if (_ready && !_restoring && _controller.isReady) {
+      _writer
+        ?..zoom = _controller.currentZoom
+        ..scrollOffset = _controller.visibleRect.top;
+    }
     unawaited(_writer?.dispose());
     super.dispose();
   }
@@ -247,6 +317,14 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
               showHome: true,
               onBack: _back,
               actions: [
+                PopupMenuButton<bool>(
+                  tooltip: 'Fit document',
+                  onSelected: _fit,
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: true, child: Text('Fit width')),
+                    PopupMenuItem(value: false, child: Text('Fit page')),
+                  ],
+                ),
                 if (_ready && !compact)
                   TextButton.icon(
                     onPressed: _jumpToPage,
@@ -368,12 +446,25 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
           child: Stack(
             children: [
               Positioned.fill(
-                child: PdfViewer.file(
-                  _filePath!,
+                child: PdfViewer(
+                  _remoteSource == null
+                      ? PdfDocumentRefFile(_filePath!)
+                      : PdfDocumentRefUri(
+                          _remoteSource!.uri,
+                          headers: _remoteSource!.headers,
+                        ),
                   controller: _controller,
                   params: PdfViewerParams(
                     enableKeyboardNavigation: true,
                     onViewerReady: _viewerReady,
+                    onDocumentLoadFinished: (documentRef, succeeded) {
+                      if (!succeeded && mounted) {
+                        setState(
+                          () => _error =
+                              'This PDF could not be loaded. Check the file or the desktop connection and try again.',
+                        );
+                      }
+                    },
                     onPageChanged: _pageChanged,
                     pagePaintCallbacks: _searcher == null
                         ? null

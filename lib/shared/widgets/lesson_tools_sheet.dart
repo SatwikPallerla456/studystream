@@ -64,6 +64,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
     var valid = controller.text.trim().isNotEmpty;
     final result = await showStudyAdaptiveModal<String>(
       context: context,
+      disposeOnClose: [controller],
       builder: (modalContext) => StatefulBuilder(
         builder: (context, setModalState) => StudyModalFrame(
           title: title,
@@ -94,7 +95,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
         ),
       ),
     );
-    controller.dispose();
+
     return result;
   }
 
@@ -112,7 +113,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
         pageNumber: drift.Value(widget.currentPage),
         createdAt: now,
         updatedAt: now,
-        deviceId: 'local',
+        deviceId: await widget.database.getDeviceId(),
       ),
     );
   }
@@ -128,6 +129,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
       note
           .copyWith(
             content: content,
+            deviceId: await widget.database.getDeviceId(),
             updatedAt: DateTime.now().millisecondsSinceEpoch,
             version: note.version + 1,
           )
@@ -153,7 +155,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
         pageNumber: drift.Value(widget.currentPage),
         createdAt: now,
         updatedAt: now,
-        deviceId: 'local',
+        deviceId: await widget.database.getDeviceId(),
       ),
     );
   }
@@ -169,6 +171,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
       bookmark
           .copyWith(
             title: value.title,
+            deviceId: await widget.database.getDeviceId(),
             description: drift.Value(value.description),
             updatedAt: DateTime.now().millisecondsSinceEpoch,
             version: bookmark.version + 1,
@@ -190,6 +193,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
     final result =
         await showStudyAdaptiveModal<({String title, String? description})>(
           context: context,
+          disposeOnClose: [titleController, descriptionController],
           builder: (modalContext) => StatefulBuilder(
             builder: (context, setModalState) => StudyModalFrame(
               title: title,
@@ -242,8 +246,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             ),
           ),
         );
-    titleController.dispose();
-    descriptionController.dispose();
+
     return result;
   }
 

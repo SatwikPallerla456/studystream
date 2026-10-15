@@ -104,6 +104,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
     var valid = controller.text.trim().isNotEmpty;
     final result = await showStudyAdaptiveModal<String>(
       context: context,
+      disposeOnClose: [controller],
       builder: (modalContext) => StatefulBuilder(
         builder: (context, setModalState) => StudyModalFrame(
           title: 'Edit note',
@@ -136,12 +137,13 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
         ),
       ),
     );
-    controller.dispose();
+
     if (result == null) return;
     await database.upsertNote(
       note
           .copyWith(
             content: result,
+            deviceId: await database.getDeviceId(),
             updatedAt: DateTime.now().millisecondsSinceEpoch,
             version: note.version + 1,
           )
@@ -159,6 +161,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
     final result =
         await showStudyAdaptiveModal<({String title, String? description})>(
           context: context,
+          disposeOnClose: [titleController, descriptionController],
           builder: (modalContext) => StatefulBuilder(
             builder: (context, setModalState) => StudyModalFrame(
               title: 'Edit bookmark',
@@ -209,13 +212,13 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
             ),
           ),
         );
-    titleController.dispose();
-    descriptionController.dispose();
+
     if (result == null) return;
     await database.upsertBookmark(
       bookmark
           .copyWith(
             title: result.title,
+            deviceId: await database.getDeviceId(),
             description: drift.Value(result.description),
             updatedAt: DateTime.now().millisecondsSinceEpoch,
             version: bookmark.version + 1,
@@ -723,6 +726,7 @@ class _StudyFilters extends StatelessWidget {
               SizedBox(
                 width: width,
                 child: DropdownButtonFormField<_StudyKind>(
+                  isExpanded: true,
                   initialValue: kind,
                   decoration: const InputDecoration(labelText: 'Location type'),
                   items: const [
@@ -751,6 +755,7 @@ class _StudyFilters extends StatelessWidget {
               SizedBox(
                 width: width,
                 child: DropdownButtonFormField<_StudySort>(
+                  isExpanded: true,
                   initialValue: sort,
                   decoration: const InputDecoration(labelText: 'Sort by'),
                   items: const [

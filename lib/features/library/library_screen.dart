@@ -7,13 +7,17 @@ import 'package:go_router/go_router.dart';
 import 'package:path/path.dart' as p;
 
 import '../../core/theme/app_theme.dart';
+import '../../core/constants/supported_extensions.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/indexer/library_indexer.dart';
+import '../../data/platform/folder_access.dart';
+import '../../shared/widgets/item_artwork.dart';
 import '../../data/providers/app_providers.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/study_motion.dart';
 
 enum _LessonFilter { all, inProgress, completed, missing }
 
@@ -85,13 +89,29 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   Future<void> _rescan() async {
     final library = _library;
     if (library == null || _rescanning) return;
+    if (library.rootFolderPath.startsWith('remote:')) {
+      await ref.read(lanSyncClientProvider).sync();
+      if (mounted) _message('Remote library refreshed');
+      return;
+    }
+    var root = library.rootFolderPath;
+    if (!await Directory(root).exists()) {
+      final selected = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Locate the moved library folder',
+      );
+      if (selected == null || !mounted) return;
+      await FolderAccess.retain(selected);
+      root = selected;
+    }
+    if (!mounted) return;
     setState(() => _rescanning = true);
     try {
       final result = await ref
           .read(libraryIndexerProvider)
           .scanRootFolder(
-            rootFolderPath: library.rootFolderPath,
+            rootFolderPath: root,
             title: library.title,
+            existingLibraryId: library.id,
           );
       if (!mounted) return;
       _message(
@@ -123,6 +143,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           ({String title, String description, String? coverPath})
         >(
           context: context,
+          disposeOnClose: [titleController, descriptionController],
           builder: (modalContext) => StatefulBuilder(
             builder: (context, setModalState) => StudyModalFrame(
               title: 'Edit library',
@@ -220,8 +241,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             ),
           ),
         );
-    titleController.dispose();
-    descriptionController.dispose();
+
     if (result == null) return;
     await ref
         .read(appDatabaseProvider)
@@ -252,6 +272,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
     final result = await showStudyAdaptiveModal<String>(
       context: context,
+      disposeOnClose: [controller],
       builder: (modalContext) => StudyModalFrame(
         title: 'Edit lesson title',
         description:
@@ -278,7 +299,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         ),
       ),
     );
-    controller.dispose();
+
     if (result == null) return;
     await ref.read(appDatabaseProvider).updateItemTitle(item.id, result);
     if (mounted) _message('Lesson title updated');
@@ -292,6 +313,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
     final path = picked?.files.single.path;
     if (path == null) return;
+    if (!isSupportedImportFile(path) ||
+        inferItemType(path).name != item.itemType) {
+      if (mounted) _message('Choose a supported file of the same lesson type.');
+      return;
+    }
     final file = File(path);
     try {
       final library = _library;
@@ -777,10 +803,8 @@ class _LibraryHero extends StatelessWidget {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 700;
-          final artwork = StudyArtwork(
-            path: library.coverPath,
-            kind: 'library',
-            unavailable: library.unavailable,
+          final artwork = LibraryArtwork(
+            library: library,
             size: compact ? 92 : 136,
             radius: AppRadius.lg,
           );
@@ -1095,82 +1119,85 @@ class _LessonList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<List<ItemProgressEntry>>(
-      stream: database.watchItemProgressForSection(section.id),
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return const ContentState(
-            icon: Icons.error_outline_rounded,
-            title: 'Lessons could not load',
-            message:
-                'This section is temporarily unavailable. Try again shortly.',
-            tone: ContentStateTone.error,
-            compact: true,
+    return StudyPageTransition(
+      selection: section.id,
+      child: StreamBuilder<List<ItemProgressEntry>>(
+        stream: database.watchItemProgressForSection(section.id),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return const ContentState(
+              icon: Icons.error_outline_rounded,
+              title: 'Lessons could not load',
+              message:
+                  'This section is temporarily unavailable. Try again shortly.',
+              tone: ContentStateTone.error,
+              compact: true,
+            );
+          }
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const ContentLoadingState(label: 'Loading lessons');
+          }
+          final all = snapshot.data ?? const [];
+          if (all.isEmpty) {
+            return const ContentState(
+              icon: Icons.inbox_outlined,
+              title: 'This section is empty',
+              message:
+                  'Add supported files to the folder and rescan the library.',
+              compact: true,
+            );
+          }
+          final normalized = query.trim().toLowerCase();
+          final entries = all.where((entry) {
+            final item = entry.item;
+            final matchesQuery =
+                normalized.isEmpty ||
+                cleanDisplayTitle(
+                  item.userTitle ?? item.title,
+                ).toLowerCase().contains(normalized) ||
+                item.filename.toLowerCase().contains(normalized);
+            final matchesFilter = switch (filter) {
+              _LessonFilter.all => true,
+              _LessonFilter.inProgress =>
+                !entry.completed &&
+                    entry.progressPercent > 0 &&
+                    !item.unavailable,
+              _LessonFilter.completed => entry.completed,
+              _LessonFilter.missing => item.unavailable,
+            };
+            return matchesQuery && matchesFilter;
+          }).toList();
+          if (entries.isEmpty) {
+            return const ContentState(
+              icon: Icons.filter_alt_off_rounded,
+              title: 'No matching lessons',
+              message:
+                  'Try another search or choose a different progress filter.',
+              compact: true,
+            );
+          }
+          return StudySurface(
+            padding: EdgeInsets.zero,
+            child: ListView.separated(
+              padding: const EdgeInsets.all(AppSpace.xs),
+              itemCount: entries.length,
+              separatorBuilder: (_, _) =>
+                  const Divider(indent: 76, endIndent: AppSpace.sm),
+              itemBuilder: (context, index) {
+                final entry = entries[index];
+                return _LessonRow(
+                  index: index,
+                  entry: entry,
+                  onOpen: () => onOpen(entry.item),
+                  onCompletion: (completed) =>
+                      onCompletion(entry.item, completed),
+                  onEditTitle: () => onEditTitle(entry.item),
+                );
+              },
+            ),
           );
-        }
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const ContentLoadingState(label: 'Loading lessons');
-        }
-        final all = snapshot.data ?? const [];
-        if (all.isEmpty) {
-          return const ContentState(
-            icon: Icons.inbox_outlined,
-            title: 'This section is empty',
-            message:
-                'Add supported files to the folder and rescan the library.',
-            compact: true,
-          );
-        }
-        final normalized = query.trim().toLowerCase();
-        final entries = all.where((entry) {
-          final item = entry.item;
-          final matchesQuery =
-              normalized.isEmpty ||
-              cleanDisplayTitle(
-                item.userTitle ?? item.title,
-              ).toLowerCase().contains(normalized) ||
-              item.filename.toLowerCase().contains(normalized);
-          final matchesFilter = switch (filter) {
-            _LessonFilter.all => true,
-            _LessonFilter.inProgress =>
-              !entry.completed &&
-                  entry.progressPercent > 0 &&
-                  !item.unavailable,
-            _LessonFilter.completed => entry.completed,
-            _LessonFilter.missing => item.unavailable,
-          };
-          return matchesQuery && matchesFilter;
-        }).toList();
-        if (entries.isEmpty) {
-          return const ContentState(
-            icon: Icons.filter_alt_off_rounded,
-            title: 'No matching lessons',
-            message:
-                'Try another search or choose a different progress filter.',
-            compact: true,
-          );
-        }
-        return StudySurface(
-          padding: EdgeInsets.zero,
-          child: ListView.separated(
-            padding: const EdgeInsets.all(AppSpace.xs),
-            itemCount: entries.length,
-            separatorBuilder: (_, _) =>
-                const Divider(indent: 76, endIndent: AppSpace.sm),
-            itemBuilder: (context, index) {
-              final entry = entries[index];
-              return _LessonRow(
-                index: index,
-                entry: entry,
-                onOpen: () => onOpen(entry.item),
-                onCompletion: (completed) =>
-                    onCompletion(entry.item, completed),
-                onEditTitle: () => onEditTitle(entry.item),
-              );
-            },
-          ),
-        );
-      },
+        },
+      ),
     );
   }
 }

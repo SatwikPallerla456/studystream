@@ -45,9 +45,12 @@ class StudyPage extends StatelessWidget {
         child: Padding(padding: resolvedPadding, child: child),
       ),
     );
-    return scrollable
-        ? SingleChildScrollView(primary: true, child: content)
-        : content;
+    return Material(
+      color: Colors.transparent,
+      child: scrollable
+          ? SingleChildScrollView(primary: false, child: content)
+          : content,
+    );
   }
 }
 
@@ -438,7 +441,13 @@ class StudyProgress extends StatelessWidget {
           ],
           ClipRRect(
             borderRadius: BorderRadius.circular(AppRadius.pill),
-            child: LinearProgressIndicator(value: safe, minHeight: height),
+            child: TweenAnimationBuilder<double>(
+              duration: AppMotion.resolve(context, AppMotion.standard),
+              curve: Curves.easeOutCubic,
+              tween: Tween<double>(begin: 0, end: safe),
+              builder: (context, value, _) =>
+                  LinearProgressIndicator(value: value, minHeight: height),
+            ),
           ),
         ],
       ),
@@ -612,6 +621,12 @@ class StudyArtwork extends StatelessWidget {
       borderRadius: BorderRadius.circular(radius),
       child: Image.file(
         File(path!),
+        cacheWidth: size.isFinite
+            ? (size * MediaQuery.devicePixelRatioOf(context)).round().clamp(
+                1,
+                1200,
+              )
+            : 1200,
         width: size,
         height: size,
         fit: BoxFit.cover,
@@ -673,6 +688,7 @@ Future<T?> showStudyAdaptiveModal<T>({
   required BuildContext context,
   required WidgetBuilder builder,
   bool dismissible = true,
+  List<ChangeNotifier> disposeOnClose = const [],
 }) {
   if (AppBreakpoints.isCompact(context)) {
     return showModalBottomSheet<T>(
@@ -685,15 +701,40 @@ Future<T?> showStudyAdaptiveModal<T>({
         padding: EdgeInsets.only(
           bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
         ),
-        child: builder(sheetContext),
+        child: _ModalResources(
+          resources: disposeOnClose,
+          child: builder(sheetContext),
+        ),
       ),
     );
   }
   return showDialog<T>(
     context: context,
     barrierDismissible: dismissible,
-    builder: builder,
+    builder: (context) =>
+        _ModalResources(resources: disposeOnClose, child: builder(context)),
   );
+}
+
+class _ModalResources extends StatefulWidget {
+  const _ModalResources({required this.resources, required this.child});
+  final List<ChangeNotifier> resources;
+  final Widget child;
+  @override
+  State<_ModalResources> createState() => _ModalResourcesState();
+}
+
+class _ModalResourcesState extends State<_ModalResources> {
+  @override
+  void dispose() {
+    for (final resource in widget.resources) {
+      resource.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class StudyConfirmDialog extends StatelessWidget {
@@ -728,8 +769,10 @@ class StudyConfirmDialog extends StatelessWidget {
             const SizedBox(height: AppSpace.xs),
             Text(message, style: Theme.of(context).textTheme.bodyLarge),
             const SizedBox(height: AppSpace.lg),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: AppSpace.xs,
+              runSpacing: AppSpace.xs,
               children: [
                 TextButton(
                   onPressed: () => Navigator.pop(context, false),

@@ -111,6 +111,7 @@ class _CompactShell extends StatelessWidget {
       bottomNavigationBar: SafeArea(
         top: false,
         child: NavigationBar(
+          height: 80 + (MediaQuery.textScalerOf(context).scale(14) - 14) * 2,
           selectedIndex: index,
           onDestinationSelected: onDestinationSelected,
           destinations: [
@@ -205,7 +206,7 @@ class _SidebarShell extends StatelessWidget {
       body: Row(
         children: [
           Container(
-            width: 248,
+            width: 248 + (MediaQuery.textScalerOf(context).scale(16) - 16) * 8,
             decoration: BoxDecoration(
               color: context.studyColors.surfaceRaised,
               border: Border(
@@ -297,38 +298,45 @@ class _SidebarDestination extends StatelessWidget {
     return Semantics(
       selected: selected,
       button: true,
-      child: Material(
-        color: selected ? colors.primaryContainer : Colors.transparent,
-        borderRadius: BorderRadius.circular(AppRadius.sm),
-        child: InkWell(
+      child: AnimatedContainer(
+        duration: AppMotion.resolve(context, AppMotion.quick),
+        decoration: BoxDecoration(
+          color: selected ? colors.primaryContainer : Colors.transparent,
           borderRadius: BorderRadius.circular(AppRadius.sm),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AppSpace.md,
-              vertical: AppSpace.sm,
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  selected ? destination.selectedIcon : destination.icon,
-                  color: selected
-                      ? colors.onPrimaryContainer
-                      : context.studyColors.textMuted,
-                ),
-                const SizedBox(width: AppSpace.sm),
-                Expanded(
-                  child: Text(
-                    destination.label,
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: selected
-                          ? colors.onPrimaryContainer
-                          : colors.onSurfaceVariant,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppRadius.sm),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpace.md,
+                vertical: AppSpace.sm,
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    selected ? destination.selectedIcon : destination.icon,
+                    color: selected
+                        ? colors.onPrimaryContainer
+                        : context.studyColors.textMuted,
+                  ),
+                  const SizedBox(width: AppSpace.sm),
+                  Expanded(
+                    child: Text(
+                      destination.label,
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: selected
+                            ? colors.onPrimaryContainer
+                            : colors.onSurfaceVariant,
+                      ),
                     ),
                   ),
-                ),
-                if (selected) StudyShortcutHint(keys: shortcut),
-              ],
+                  if (selected) StudyShortcutHint(keys: shortcut),
+                ],
+              ),
             ),
           ),
         ),
@@ -345,8 +353,10 @@ class _Brand extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Semantics(
+      container: true,
       header: true,
       label: 'StudyStream',
+      excludeSemantics: true,
       child: Row(
         mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
         children: [

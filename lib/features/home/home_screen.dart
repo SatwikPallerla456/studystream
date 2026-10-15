@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,12 +9,14 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/indexer/library_indexer.dart';
+import '../../data/platform/folder_access.dart';
 import '../../data/providers/app_providers.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/continue_item_tile.dart';
 import '../../shared/widgets/library_card.dart';
 import '../../shared/widgets/study_shell.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/study_motion.dart';
 import '../search/search_screen.dart';
 import '../settings/settings_screen.dart';
 import '../study/study_screen.dart';
@@ -61,14 +64,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool get _scanning => _scanToken != null;
 
   Future<void> _pickFolder() async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      setState(() => _destination = 4);
+      _showMessage(
+        'Connect to your desktop to browse its folders. Persistent mobile folder import is not available on this device.',
+      );
+      return;
+    }
     final path = await FilePicker.platform.getDirectoryPath(
       dialogTitle: 'Choose a course or library folder',
     );
-    if (path == null || path.isEmpty) return;
+    if (path == null || path.isEmpty || !mounted) return;
+    await FolderAccess.retain(path);
+    if (!mounted) return;
     await _scan(path: path, title: cleanDisplayTitle(p.basename(path)));
   }
 
   Future<void> _scan({required String path, required String title}) async {
+    if (_scanning || !mounted) return;
     final token = ScanCancellationToken();
     setState(() {
       _scanToken = token;
@@ -171,6 +184,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   @override
+  void dispose() {
+    _scanToken?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final database = ref.watch(appDatabaseProvider);
     final pages = [
@@ -199,7 +218,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       index: _destination,
       onDestinationSelected: (value) => setState(() => _destination = value),
       destinations: _destinations,
-      child: IndexedStack(index: _destination, children: pages),
+      child: StudyPageTransition(
+        selection: _destination,
+        child: IndexedStack(index: _destination, children: pages),
+      ),
     );
   }
 }
@@ -505,27 +527,20 @@ class _LearningOverview extends StatelessWidget {
             ],
           );
           final mark = Container(
-            width: 116,
-            height: 116,
+            width: 72,
+            height: 72,
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.primaryContainer,
               borderRadius: BorderRadius.circular(AppRadius.xl),
             ),
             child: Icon(
               Icons.slow_motion_video_rounded,
-              size: 52,
+              size: 36,
               color: Theme.of(context).colorScheme.onPrimaryContainer,
             ),
           );
           if (constraints.maxWidth < 620) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                content,
-                const SizedBox(height: AppSpace.lg),
-                mark,
-              ],
-            );
+            return content;
           }
           return Row(
             children: [
@@ -589,7 +604,9 @@ class _ContinueSection extends StatelessWidget {
                   itemCount: visible.length,
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: columns,
-                    mainAxisExtent: 124,
+                    mainAxisExtent:
+                        180 +
+                        (MediaQuery.textScalerOf(context).scale(16) - 16) * 5,
                     crossAxisSpacing: AppSpace.sm,
                     mainAxisSpacing: AppSpace.sm,
                   ),
@@ -628,7 +645,8 @@ class _QuickLibraries extends StatelessWidget {
           itemCount: libraries.length.clamp(0, columns == 3 ? 3 : 4),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columns,
-            mainAxisExtent: 390,
+            mainAxisExtent:
+                430 + (MediaQuery.textScalerOf(context).scale(16) - 16) * 10,
             crossAxisSpacing: AppSpace.sm,
             mainAxisSpacing: AppSpace.sm,
           ),
@@ -999,7 +1017,8 @@ class _LibraryCollection extends StatelessWidget {
           itemCount: libraries.length,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columns,
-            mainAxisExtent: 390,
+            mainAxisExtent:
+                430 + (MediaQuery.textScalerOf(context).scale(16) - 16) * 10,
             crossAxisSpacing: AppSpace.md,
             mainAxisSpacing: AppSpace.md,
           ),
