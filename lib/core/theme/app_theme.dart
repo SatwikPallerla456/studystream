@@ -1,7 +1,7 @@
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
 
-/// StudyStream's layout rhythm. Values are intentionally limited so screens
+/// The shared Tangerine layout rhythm. Values are intentionally limited so screens
 /// stay visually related at every window size.
 abstract final class AppSpace {
   static const double hairline = 2;
@@ -17,11 +17,11 @@ abstract final class AppSpace {
 }
 
 abstract final class AppRadius {
-  static const double xs = 8;
-  static const double sm = 12;
-  static const double md = 16;
-  static const double lg = 22;
-  static const double xl = 28;
+  static const double xs = 4;
+  static const double sm = 6;
+  static const double md = 8;
+  static const double lg = 12;
+  static const double xl = 16;
   static const double pill = 999;
 }
 
@@ -191,10 +191,10 @@ extension StudyThemeContext on BuildContext {
 abstract final class AppTheme {
   static const _lightScheme = ColorScheme(
     brightness: Brightness.light,
-    primary: Color(0xFF176B5B),
+    primary: Color(0xFFA94F08),
     onPrimary: Color(0xFFFFFFFF),
-    primaryContainer: Color(0xFFD6F2EA),
-    onPrimaryContainer: Color(0xFF0A3B31),
+    primaryContainer: Color(0xFFFFE4CE),
+    onPrimaryContainer: Color(0xFF5B2805),
     secondary: Color(0xFF755A22),
     onSecondary: Color(0xFFFFFFFF),
     secondaryContainer: Color(0xFFFFE9B2),
@@ -208,24 +208,24 @@ abstract final class AppTheme {
     errorContainer: Color(0xFFFEE4E2),
     onErrorContainer: Color(0xFF7A271A),
     surface: Color(0xFFFFFFFF),
-    onSurface: Color(0xFF18211E),
-    onSurfaceVariant: Color(0xFF596560),
-    outline: Color(0xFF7A8781),
-    outlineVariant: Color(0xFFDCE3DF),
-    shadow: Color(0xFF07130F),
-    scrim: Color(0xFF07130F),
-    inverseSurface: Color(0xFF29312E),
-    onInverseSurface: Color(0xFFF0F5F2),
-    inversePrimary: Color(0xFF78D7BE),
-    surfaceTint: Color(0xFF176B5B),
+    onSurface: Color(0xFF252321),
+    onSurfaceVariant: Color(0xFF69645F),
+    outline: Color(0xFF8F8780),
+    outlineVariant: Color(0xFFE2DCD7),
+    shadow: Color(0xFF171310),
+    scrim: Color(0xFF171310),
+    inverseSurface: Color(0xFF35312D),
+    onInverseSurface: Color(0xFFF9F5F2),
+    inversePrimary: Color(0xFFF1A15A),
+    surfaceTint: Color(0xFFA94F08),
   );
 
   static const _darkScheme = ColorScheme(
     brightness: Brightness.dark,
-    primary: Color(0xFF7DD3BA),
-    onPrimary: Color(0xFF00382D),
-    primaryContainer: Color(0xFF0E5144),
-    onPrimaryContainer: Color(0xFFD6F2EA),
+    primary: Color(0xFFD37918),
+    onPrimary: Color(0xFF381A04),
+    primaryContainer: Color(0xFF5B300E),
+    onPrimaryContainer: Color(0xFFFFE4CE),
     secondary: Color(0xFFE8C66F),
     onSecondary: Color(0xFF3D2F00),
     secondaryContainer: Color(0xFF574500),
@@ -238,26 +238,26 @@ abstract final class AppTheme {
     onError: Color(0xFF690005),
     errorContainer: Color(0xFF93000A),
     onErrorContainer: Color(0xFFFFDAD6),
-    surface: Color(0xFF171D1A),
-    onSurface: Color(0xFFEAF1ED),
-    onSurfaceVariant: Color(0xFFB5C0BA),
-    outline: Color(0xFF89958F),
-    outlineVariant: Color(0xFF38443E),
+    surface: Color(0xFF292827),
+    onSurface: Color(0xFFF0ECE8),
+    onSurfaceVariant: Color(0xFFBCB5AF),
+    outline: Color(0xFF958E88),
+    outlineVariant: Color(0xFF46413D),
     shadow: Color(0xFF000000),
     scrim: Color(0xFF000000),
-    inverseSurface: Color(0xFFEAF1ED),
-    onInverseSurface: Color(0xFF29312E),
-    inversePrimary: Color(0xFF176B5B),
-    surfaceTint: Color(0xFF7DD3BA),
+    inverseSurface: Color(0xFFF0ECE8),
+    onInverseSurface: Color(0xFF35312D),
+    inversePrimary: Color(0xFFA94F08),
+    surfaceTint: Color(0xFFD37918),
   );
 
   static const _lightExtras = StudyColors(
-    canvas: Color(0xFFF5F7F4),
+    canvas: Color(0xFFF5F2EF),
     surfaceRaised: Color(0xFFFFFFFF),
-    surfaceSubtle: Color(0xFFEEF2EF),
-    surfaceStrong: Color(0xFFE5ECE8),
-    outlineSoft: Color(0xFFDCE3DF),
-    textMuted: Color(0xFF64716B),
+    surfaceSubtle: Color(0xFFEEE9E5),
+    surfaceStrong: Color(0xFFE6DFD8),
+    outlineSoft: Color(0xFFE2DCD7),
+    textMuted: Color(0xFF756D66),
     success: Color(0xFF247A4D),
     onSuccess: Color(0xFFFFFFFF),
     successContainer: Color(0xFFD8F3E3),
@@ -266,19 +266,19 @@ abstract final class AppTheme {
     warningContainer: Color(0xFFFFEDC2),
     info: Color(0xFF2E6786),
     infoContainer: Color(0xFFDCEFFA),
-    player: Color(0xFF08100D),
-    playerRaised: Color(0xFF121C18),
-    focusRing: Color(0xFF176B5B),
-    hover: Color(0x0F176B5B),
+    player: Color(0xFF0E0E0E),
+    playerRaised: Color(0xFF191919),
+    focusRing: Color(0xFFA94F08),
+    hover: Color(0x0FA94F08),
   );
 
   static const _darkExtras = StudyColors(
-    canvas: Color(0xFF0E1411),
-    surfaceRaised: Color(0xFF1C2420),
-    surfaceSubtle: Color(0xFF212A26),
-    surfaceStrong: Color(0xFF2B3631),
-    outlineSoft: Color(0xFF36433D),
-    textMuted: Color(0xFFAAB7B0),
+    canvas: Color(0xFF191919),
+    surfaceRaised: Color(0xFF222120),
+    surfaceSubtle: Color(0xFF292827),
+    surfaceStrong: Color(0xFF34312F),
+    outlineSoft: Color(0xFF403C38),
+    textMuted: Color(0xFFB3ABA5),
     success: Color(0xFF75D19B),
     onSuccess: Color(0xFF00391F),
     successContainer: Color(0xFF174B31),
@@ -287,10 +287,10 @@ abstract final class AppTheme {
     warningContainer: Color(0xFF4F3C0B),
     info: Color(0xFFA8D5EE),
     infoContainer: Color(0xFF23485B),
-    player: Color(0xFF050A08),
-    playerRaised: Color(0xFF111A16),
-    focusRing: Color(0xFF7DD3BA),
-    hover: Color(0x147DD3BA),
+    player: Color(0xFF0E0E0E),
+    playerRaised: Color(0xFF191919),
+    focusRing: Color(0xFFD37918),
+    hover: Color(0x14D37918),
   );
 
   static ThemeData light() => _theme(_lightScheme, _lightExtras);
@@ -591,30 +591,30 @@ abstract final class AppTheme {
       color: colors.onSurface,
     ),
     headlineLarge: TextStyle(
-      fontSize: 32,
+      fontSize: 26,
       height: 1.2,
-      fontWeight: FontWeight.w700,
+      fontWeight: FontWeight.w600,
       letterSpacing: -.7,
       color: colors.onSurface,
     ),
     headlineMedium: TextStyle(
-      fontSize: 27,
+      fontSize: 23,
       height: 1.22,
-      fontWeight: FontWeight.w700,
+      fontWeight: FontWeight.w500,
       letterSpacing: -.45,
       color: colors.onSurface,
     ),
     headlineSmall: TextStyle(
-      fontSize: 23,
+      fontSize: 20,
       height: 1.28,
-      fontWeight: FontWeight.w700,
+      fontWeight: FontWeight.w500,
       letterSpacing: -.25,
       color: colors.onSurface,
     ),
     titleLarge: TextStyle(
-      fontSize: 20,
+      fontSize: 18,
       height: 1.3,
-      fontWeight: FontWeight.w700,
+      fontWeight: FontWeight.w600,
       letterSpacing: -.1,
       color: colors.onSurface,
     ),
@@ -631,13 +631,13 @@ abstract final class AppTheme {
       color: colors.onSurface,
     ),
     bodyLarge: TextStyle(
-      fontSize: 17,
-      height: 1.55,
+      fontSize: 16,
+      height: 1.5,
       fontWeight: FontWeight.w400,
       color: colors.onSurfaceVariant,
     ),
     bodyMedium: TextStyle(
-      fontSize: 15,
+      fontSize: 14,
       height: 1.5,
       fontWeight: FontWeight.w400,
       color: colors.onSurfaceVariant,

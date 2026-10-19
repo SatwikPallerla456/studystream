@@ -7,9 +7,10 @@ import '../../domain/services/thumbnail_cache.dart';
 import 'study_ui.dart';
 
 final thumbnailCacheProvider = Provider((ref) => ThumbnailCache());
-final _thumbnailProvider = FutureProvider.autoDispose.family<String?, Item>(
-  (ref, item) => ref.read(thumbnailCacheProvider).forItem(item),
-);
+final itemArtworkPathProvider = FutureProvider.autoDispose
+    .family<String?, Item>(
+      (ref, item) => ref.read(thumbnailCacheProvider).forItem(item),
+    );
 final _coverProvider = FutureProvider.autoDispose.family<String?, Library>((
   ref,
   library,
@@ -37,7 +38,8 @@ class ItemArtwork extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) => StudyArtwork(
     path:
-        item.thumbnailPath ?? ref.watch(_thumbnailProvider(item)).asData?.value,
+        item.thumbnailPath ??
+        ref.watch(itemArtworkPathProvider(item)).asData?.value,
     kind: item.itemType,
     unavailable: item.unavailable,
     size: size,

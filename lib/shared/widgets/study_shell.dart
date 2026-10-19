@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_theme.dart';
 import 'study_ui.dart';
@@ -38,9 +39,17 @@ class StudyShell extends StatelessWidget {
       LogicalKeyboardKey.digit3,
       LogicalKeyboardKey.digit4,
       LogicalKeyboardKey.digit5,
+      LogicalKeyboardKey.digit6,
+      LogicalKeyboardKey.digit7,
+      LogicalKeyboardKey.digit8,
+      LogicalKeyboardKey.digit9,
     ];
     final shortcuts = <ShortcutActivator, Intent>{
-      for (var i = 0; i < destinations.length; i++)
+      for (
+        var i = 0;
+        i < destinations.length && i < destinationKeys.length;
+        i++
+      )
         SingleActivator(destinationKeys[i], alt: true):
             _SelectDestinationIntent(i),
     };
@@ -106,6 +115,23 @@ class _CompactShell extends StatelessWidget {
         toolbarHeight: 60,
         titleSpacing: AppSpace.md,
         title: const _Brand(compact: true),
+        actions: [
+          IconButton(
+            tooltip: 'Queue & playlists',
+            onPressed: () => context.push('/playlists'),
+            icon: const Icon(Icons.queue_music),
+          ),
+          IconButton(
+            tooltip: 'Network',
+            onPressed: () => context.push('/network'),
+            icon: const Icon(Icons.lan_outlined),
+          ),
+          IconButton(
+            tooltip: 'Player / Server mode',
+            onPressed: () => context.push('/mode'),
+            icon: const Icon(Icons.swap_horiz_rounded),
+          ),
+        ],
       ),
       body: child,
       bottomNavigationBar: SafeArea(
@@ -177,6 +203,20 @@ class _RailShell extends StatelessWidget {
                       label: Text(destinations[i].label),
                     ),
                 ],
+                trailing: Column(
+                  children: [
+                    IconButton(
+                      tooltip: 'Network',
+                      onPressed: () => context.push('/network'),
+                      icon: const Icon(Icons.lan_outlined),
+                    ),
+                    IconButton(
+                      tooltip: 'Player / Server mode',
+                      onPressed: () => context.push('/mode'),
+                      icon: const Icon(Icons.swap_horiz_rounded),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -239,7 +279,29 @@ class _SidebarShell extends StatelessWidget {
                       ),
                       const SizedBox(height: AppSpace.xxs),
                     ],
+                    const SizedBox(height: AppSpace.md),
+                    Material(
+                      color: Colors.transparent,
+                      child: ListTile(
+                        leading: const Icon(Icons.lan_outlined),
+                        title: const Text('Network'),
+                        onTap: () => context.push('/network'),
+                      ),
+                    ),
+                    Material(
+                      color: Colors.transparent,
+                      child: ListTile(
+                        leading: const Icon(Icons.dns_outlined),
+                        title: const Text('Server'),
+                        onTap: () => context.push('/server'),
+                      ),
+                    ),
                     const Spacer(),
+                    TextButton.icon(
+                      onPressed: () => context.push('/mode'),
+                      icon: const Icon(Icons.swap_horiz_rounded),
+                      label: const Text('Player / Server mode'),
+                    ),
                     Container(
                       padding: const EdgeInsets.all(AppSpace.md),
                       decoration: BoxDecoration(
@@ -261,7 +323,7 @@ class _SidebarShell extends StatelessWidget {
                           ),
                           const SizedBox(height: AppSpace.xxs),
                           Text(
-                            'Your learning files stay where you put them.',
+                            'Your media and learning, on your own devices.',
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -355,7 +417,7 @@ class _Brand extends StatelessWidget {
     return Semantics(
       container: true,
       header: true,
-      label: 'StudyStream',
+      label: 'Tangerine',
       excludeSemantics: true,
       child: Row(
         mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
@@ -364,21 +426,22 @@ class _Brand extends StatelessWidget {
             width: 38,
             height: 38,
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primary,
+              color: Colors.transparent,
               borderRadius: BorderRadius.circular(AppRadius.sm),
             ),
             alignment: Alignment.center,
-            child: Icon(
-              Icons.play_arrow_rounded,
-              color: Theme.of(context).colorScheme.onPrimary,
-              size: 26,
+            child: Image.asset(
+              'assets/brand/tangerine.png',
+              width: 38,
+              height: 38,
+              excludeFromSemantics: true,
             ),
           ),
           if (!compact) ...[
             const SizedBox(width: AppSpace.sm),
             Flexible(
               child: Text(
-                'StudyStream',
+                'Tangerine',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.titleLarge,

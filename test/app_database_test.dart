@@ -6,6 +6,67 @@ import 'package:study_stream/data/db/app_database.dart';
 
 void main() {
   test(
+    'recent playback filters each media type before limiting results',
+    () async {
+      final database = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(database.close);
+      await _seed(database);
+      await database.upsertPlayback(
+        PlaybackProgressCompanion.insert(
+          itemId: 'item',
+          lastOpenedAt: const Value(1),
+          deviceId: 'test',
+        ),
+      );
+      // Newer audio must not push an older video out of its own resume section.
+      for (var i = 0; i < 11; i++) {
+        await database.upsertItem(
+          ItemsCompanion.insert(
+            id: 'audio-$i',
+            libraryId: 'library',
+            sectionId: 'section',
+            title: 'Audio lesson $i',
+            filename: '$i.mp3',
+            filePath: '/course/module/$i.mp3',
+            relativePath: 'module/$i.mp3',
+            itemType: 'audio',
+            orderIndex: i + 1,
+            unavailable: Value(i == 10),
+          ),
+        );
+        await database.upsertPlayback(
+          PlaybackProgressCompanion.insert(
+            itemId: 'audio-$i',
+            lastOpenedAt: Value(100 + i),
+            completed: Value(i == 9),
+            deviceId: 'test',
+          ),
+        );
+      }
+      final videos = await database
+          .watchRecentPlaybackEntries(itemType: 'video', limit: 6)
+          .first;
+      final audio = await database
+          .watchRecentPlaybackEntries(itemType: 'audio', limit: 6)
+          .first;
+      expect(videos.map((entry) => entry.item.id), ['item']);
+      expect(audio.map((entry) => entry.item.id), [
+        'audio-8',
+        'audio-7',
+        'audio-6',
+        'audio-5',
+        'audio-4',
+        'audio-3',
+      ]);
+      final combined = await database
+          .watchRecentPlaybackEntries(limit: 20)
+          .first;
+      expect(combined, hasLength(10));
+      expect(combined.last.item.id, 'item');
+    },
+  );
+
+  test(
     'stores progress, manual completion, notes, bookmarks, and backup data',
     () async {
       final database = AppDatabase.forTesting(NativeDatabase.memory());
@@ -80,7 +141,7 @@ void main() {
     final library = await database.getLibraryById('old');
     expect(library?.title, 'Existing course');
     expect(library?.description, '');
-    expect(database.schemaVersion, 2);
+    expect(database.schemaVersion, 3);
   });
 
   test('rejects malformed and future backup data', () async {

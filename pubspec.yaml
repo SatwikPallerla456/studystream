@@ -1,5 +1,5 @@
 name: study_stream
-description: "A private, folder-based media learning app with local progress and LAN sync."
+description: "Tangerine media server and player with StudyStream libraries, reading, and learning tools."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -40,6 +40,8 @@ dependencies:
   path_provider: ^2.1.5
   file_picker: ^10.3.10
   uuid: ^4.5.3
+  archive: 4.0.9
+  xml: 6.6.1
   crypto: ^3.0.7
   media_kit: ^1.2.6
   media_kit_video: ^2.0.1
@@ -76,6 +78,8 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - assets/brand/tangerine.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

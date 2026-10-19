@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:isolate';
+import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' as drift;
@@ -11,6 +11,9 @@ import '../../core/constants/supported_extensions.dart';
 import '../../core/utils/id_utils.dart';
 import '../../core/utils/sort_utils.dart';
 import '../db/app_database.dart';
+import 'library_source_store.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
 
 typedef ScanProgressCallback = void Function(ScanProgress progress);
 
@@ -38,8 +41,10 @@ class ScanResult {
     required this.missingItems,
     required this.skippedFiles,
     required this.errors,
+    this.outcome = 'complete',
   });
 
+  final String outcome;
   final String libraryId;
   final int importedItems;
   final int missingItems;
@@ -91,18 +96,33 @@ class LibraryIndexer {
     required String rootFolderPath,
     required String title,
     String? existingLibraryId,
+    LibrarySource? source,
     ScanProgressCallback? onProgress,
     ScanCancellationToken? cancellationToken,
   }) {
-    final scan = _queue.then(
-      (_) => _scanRootFolder(
-        rootFolderPath: rootFolderPath,
-        title: title,
-        existingLibraryId: existingLibraryId,
-        onProgress: onProgress,
-        cancellationToken: cancellationToken,
-      ),
-    );
+    final scan = _queue.then((_) async {
+      if(source != null && (existingLibraryId != source.libraryId || !p.equals(p.normalize(rootFolderPath),p.normalize(source.root)))) {
+        throw const FormatException('Scan source ownership does not match');
+      }
+      final libraryId=existingLibraryId ?? stableId(p.canonicalize(p.normalize(rootFolderPath)));
+      final sourceId=source?.id ?? 'legacy:$libraryId';
+      final store=LibrarySourceStore(db);
+      final session=await store.begin(sourceId,rootFolderPath);
+      try {
+        final result=await _scanRootFolder(rootFolderPath:rootFolderPath,title:title,
+          existingLibraryId:existingLibraryId,source:source,onProgress:onProgress,
+          cancellationToken:cancellationToken,sessionId:session);
+        await store.finish(session,result.outcome,discovered:result.importedItems,
+          processed:result.importedItems,errors:jsonEncode(result.errors));
+        return result;
+      } on ScanCancelledException {
+        await store.finish(session,'cancelled');
+        rethrow;
+      } on Object catch(error) {
+        await store.finish(session,'failed',errors:jsonEncode([error.toString()]));
+        rethrow;
+      }
+    });
     _queue = scan.then<void>((_) {}, onError: (Object _) {});
     return scan;
   }
@@ -110,7 +130,9 @@ class LibraryIndexer {
   Future<ScanResult> _scanRootFolder({
     required String rootFolderPath,
     required String title,
+    required String sessionId,
     String? existingLibraryId,
+    LibrarySource? source,
     ScanProgressCallback? onProgress,
     ScanCancellationToken? cancellationToken,
   }) async {
@@ -119,10 +141,16 @@ class LibraryIndexer {
     final libraryId =
         existingLibraryId ?? stableId(p.canonicalize(rootDir.path));
     final now = DateTime.now().millisecondsSinceEpoch;
+    final catalog = MediaCatalogRepository(db);
+    final namespace = source?.namespace ?? '';
+    String sourcePath(String relative) => namespace.isEmpty ? relative : p.join(namespace, relative == '.' ? '' : relative);
+    bool belongs(String relative) => namespace.isEmpty ? !relative.startsWith('@sources${p.separator}') : relative == namespace || p.isWithin(namespace, relative);
 
     if (!await rootDir.exists()) {
       final existing = await db.getLibraryById(libraryId);
-      if (existing != null) await db.markLibraryUnavailable(libraryId, true);
+      if (source != null) {
+        await catalog.setSourceAvailability(source, true);
+      } else if (existing != null) { await db.markLibraryUnavailable(libraryId, true); }
       throw FileSystemException(
         'The selected folder is no longer available.',
         rootDir.path,
@@ -154,6 +182,8 @@ class LibraryIndexer {
           final name = p.basename(entity.path);
           if (_isIgnoredName(name)) {
             skipped++;
+            if(entity is Directory) unreadableDirectories.add(p.normalize(entity.absolute.path));
+            if(entity is File) unreadableFiles.add(p.normalize(entity.absolute.path));
             continue;
           }
           if (entity is Directory) {
@@ -198,7 +228,8 @@ class LibraryIndexer {
       (sum, folder) => sum + folder.files.length,
     );
 
-    final existingItems = await db.getItemsForLibrary(libraryId);
+    final allExistingItems = await db.getItemsForLibrary(libraryId);
+    final existingItems = allExistingItems.where((item) => belongs(item.relativePath)).toList();
     final existingByPath = <String, Item>{};
     for (final item in existingItems) {
       final current = existingByPath[item.relativePath];
@@ -216,7 +247,7 @@ class LibraryIndexer {
     final discoveredPaths = {
       for (final folder in folders)
         for (final file in folder.files)
-          p.relative(file.path, from: rootDir.path),
+          sourcePath(p.relative(file.path, from: rootDir.path)),
     };
     final fingerprints = <String, String>{};
     final fingerprintCounts = <String, int>{};
@@ -224,10 +255,13 @@ class LibraryIndexer {
       for (final file in folder.files) {
         token.throwIfCancelled();
         try {
-          final fingerprint = await fingerprintFile(file);
+          final atPath = existingByPath[sourcePath(p.relative(file.path, from: rootDir.path))];
+          final stat=await file.stat();
+          final cached=atPath?.fingerprint;
+          final fingerprint=cached != null && cached.startsWith('sha256:') &&
+            atPath!.fileSize == stat.size && atPath.modifiedAt == stat.modified.millisecondsSinceEpoch
+            ? cached : await fingerprintFile(file,cancellationToken:token);
           fingerprints[file.path] = fingerprint;
-          final atPath =
-              existingByPath[p.relative(file.path, from: rootDir.path)];
           if (atPath?.fingerprint != fingerprint) {
             fingerprintCounts.update(
               fingerprint,
@@ -262,9 +296,7 @@ class LibraryIndexer {
         folder.directory.path,
         from: rootDir.path,
       );
-      final normalizedRelativeFolder = relativeFolder == '.'
-          ? ''
-          : relativeFolder;
+      final normalizedRelativeFolder = sourcePath(relativeFolder == '.' ? '' : relativeFolder);
       final sectionId = stableId(
         '$libraryId::section::$normalizedRelativeFolder',
       );
@@ -296,10 +328,10 @@ class LibraryIndexer {
         final file = folder.files[itemIndex];
         try {
           final stat = await file.stat();
-          final relativePath = p.relative(file.path, from: rootDir.path);
+          final relativePath = sourcePath(p.relative(file.path, from: rootDir.path));
           final filename = p.basename(file.path);
           final fingerprint =
-              fingerprints[file.path] ?? await fingerprintFile(file);
+              fingerprints[file.path] ?? await fingerprintFile(file,cancellationToken:token);
           var existing = existingByPath[relativePath];
           if (existing?.fingerprint != null &&
               existing!.fingerprint != fingerprint) {
@@ -352,6 +384,7 @@ class LibraryIndexer {
               version: drift.Value(existing?.version ?? 1),
             ),
           );
+        } on ScanCancelledException { rethrow;
         } catch (error) {
           errors.add('${file.path}: $error');
           unreadableFiles.add(p.normalize(file.absolute.path));
@@ -380,7 +413,8 @@ class LibraryIndexer {
         seenItemIds.add(item.id);
       }
     }
-    final existingSections = await db.getSectionsForLibrary(libraryId);
+    final allExistingSections = await db.getSectionsForLibrary(libraryId);
+    final existingSections = allExistingSections.where((section) => belongs(section.relativePath));
     for (final section in existingSections) {
       final absolutePath = p.normalize(
         Directory(section.folderPath).absolute.path,
@@ -394,13 +428,15 @@ class LibraryIndexer {
       if (insideUnreadableDirectory) seenSectionIds.add(section.id);
     }
 
+    await LibrarySourceStore(db).stage(sessionId,itemRows);
     await db.transaction(() async {
+      token.throwIfCancelled();
       await db.upsertLibrary(
         LibrariesCompanion.insert(
           id: libraryId,
           title: existingLibrary?.title ?? title,
           description: drift.Value(existingLibrary?.description ?? ''),
-          rootFolderPath: rootDir.path,
+          rootFolderPath: namespace.isEmpty ? rootDir.path : existingLibrary!.rootFolderPath,
           coverPath: drift.Value(existingLibrary?.coverPath),
           createdAt: existingLibrary?.createdAt ?? now,
           updatedAt: existingLibrary?.updatedAt ?? now,
@@ -416,10 +452,19 @@ class LibraryIndexer {
         libraryId: libraryId,
         scannedSections: sectionRows,
         scannedItems: itemRows,
-        seenSectionIds: seenSectionIds,
-        seenItemIds: seenItemIds,
+        seenSectionIds: {...seenSectionIds, ...allExistingSections.where((s) => !belongs(s.relativePath)).map((s) => s.id)},
+        seenItemIds: {...seenItemIds, ...allExistingItems.where((i) => !belongs(i.relativePath)).map((i) => i.id)},
       );
+      await db.customStatement('INSERT OR IGNORE INTO library_sources(id,library_id,root_path,namespace,updated_at) VALUES(?,?,?,?,?)',
+        [source?.id ?? 'legacy:$libraryId',libraryId,rootDir.path,namespace,now]);
+      await CatalogIdentityStore(db).backfill();
+      for(final row in itemRows) {
+        final item=await db.getItemById(row.id.value);
+        if(item != null) await LibrarySourceStore(db).bind(item,source?.id ?? 'legacy:$libraryId',p.relative(row.filePath.value,from:rootDir.path));
+      }
     });
+    if (source != null) await catalog.setSourceAvailability(source, false);
+    if (namespace.isEmpty) await db.customStatement('UPDATE library_sources SET root_path = ?, unavailable = 0 WHERE id = ?', [rootDir.path, 'legacy:$libraryId']);
     final missingItems = existingItems
         .where((item) => !seenItemIds.contains(item.id))
         .length;
@@ -436,6 +481,7 @@ class LibraryIndexer {
       missingItems: missingItems,
       skippedFiles: skipped,
       errors: errors,
+      outcome: errors.isEmpty ? 'complete' : 'partial',
     );
   }
 }
@@ -460,11 +506,22 @@ bool _isIgnoredName(String name) {
       lower.endsWith('.crdownload');
 }
 
-Future<String> fingerprintFile(File file) async {
-  final path = file.path;
-  return Isolate.run(
-    () async => 'sha256:${await sha256.bind(File(path).openRead()).first}',
-  );
+class _DigestSink implements Sink<Digest> {
+  Digest? value;
+  @override void add(Digest data) {value=data;}
+  @override void close() {}
+}
+Future<String> fingerprintFile(File file,{ScanCancellationToken? cancellationToken}) async {
+  final output=_DigestSink();
+  final sink=sha256.startChunkedConversion(output);
+  try {
+    await for(final chunk in file.openRead()) {
+      cancellationToken?.throwIfCancelled();
+      sink.add(chunk);
+    }
+    cancellationToken?.throwIfCancelled();
+  } finally {sink.close();}
+  return 'sha256:${output.value}';
 }
 
 Future<String> _legacyFingerprintFile(

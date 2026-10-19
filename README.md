@@ -1,8 +1,55 @@
-# StudyStream
+# Tangerine — media server, player, and learning tools
 
-A private Flutter application for learning from folders of video, audio, PDFs,
-text, HTML, images, and externally opened resources. Media stays in its source
-folder. Drift stores learning history, notes, bookmarks, and preferences.
+A single Flutter application with **Player** and **Server** device modes. Tangerine
+provides the core visual language: charcoal surfaces, orange accents, compact
+media controls, sidebar/rail navigation, and video/music/document browsing.
+StudyStream provides course libraries, PDFs, learning progress, notes, bookmarks,
+and device sync inside that interface. Existing app identifiers and database
+records are retained.
+
+The Tangerine update is underway. macOS now uses the original MyVLC libVLC engine
+through a native video/playback boundary. Other native platforms retain the
+explicit interim media_kit backend. Development macOS builds currently require
+VLC 3 at `/Applications/VLC.app`; runtime bundling is still pending.
+
+Settings → **Preview MyVLC import** reads a selected `library.json` and previews
+local media, progress conflicts and playlists before transactional import. Source
+files and credentials remain untouched. Full original MyVLC workflow parity and
+the subsequent typed-library/catalog/comics releases remain open. See the
+[implementation status](docs/TANGERINE_IMPLEMENTATION.md),
+[feature matrix](docs/MYVLC_FEATURE_MATRIX.md), and
+[compatibility baseline](docs/TANGERINE_BASELINE.md).
+
+Run `python3 scripts/verify-tangerine-native.py` for the synthetic audio/video/PDF
+acceptance journey, including protected streaming through libVLC. The video fixture
+is embedded only in the integration build. For comparison during development,
+`--dart-define=TANGERINE_INTERIM_PLAYER=true` explicitly selects the previous player.
+
+## Choose a device mode
+
+On first launch, choose **Player** to browse local media and connect to another
+device through **Network**, or **Server** to open guided setup. Server setup lets
+you name the server, choose a port, add media, and start the actual HTTP service.
+Approved players can browse and stream local folder libraries. Mirrored libraries
+and file-only legacy import collections are not advertised as hosted media.
+
+Server mode shows LAN addresses, a rotating pairing code, approved players, and
+start/stop controls. The server can restart when the app opens if enabled. An
+explicit stop disables that automatic restart; switching to Player stops hosting
+without removing libraries. Server mode can still open media from its libraries.
+
+The same server address opens a **browser player**, with cookie-authenticated
+streaming/range requests, media filtering, resume/progress, notes, and bookmarks.
+No separate frontend service or JavaScript dependencies are required. Browser
+codec and PDF-viewer support varies; native players support additional formats.
+Browsers act as clients, not servers.
+
+Native targets are macOS, Windows, Linux, Android, and iOS. Mobile servers run
+while the app is open; background service/daemon hosting is not implemented.
+Use **Add files** on any native platform to copy selected media into durable app
+storage. Desktop **Add folder** keeps source media in place. See
+[merge architecture and verification](docs/MEDIA_PLATFORM.md) for feature scope,
+platform validation, and the remaining MyVLC capabilities to port.
 
 ## Learning locally
 
@@ -26,8 +73,8 @@ folder. Drift stores learning history, notes, bookmarks, and preferences.
 
 ## Connecting another device
 
-1. On the desktop, open **Settings → Local network sync host → Start host**.
-2. On the companion, use **Settings → Connect to your desktop**. Discover nearby
+1. On the host, choose **Server**, add media, and select **Start server**.
+2. On another device, choose **Player → Network**. Discover nearby
    hosts where subnet broadcasting is supported, or enter the displayed address.
 3. Enter a device name and the host's current six-digit pairing code.
 4. Browse the mirrored libraries using the normal Libraries screen. Protected
@@ -58,8 +105,9 @@ media paths stay local when matching records already exist.
 
 macOS retains user-selected folder permissions using security-scoped bookmarks.
 Unavailable volumes and stale permissions do not cause learning-data deletion.
-Android/iOS currently use the companion workflow: persistent arbitrary-folder
-imports through mobile document providers are not implemented. Background audio
+Android/iOS can import individual files into app storage and connect to another
+server. Persistent arbitrary-folder imports through mobile document providers
+are not implemented. Background audio
 services, OS picture-in-picture and offline media downloads are not integrated.
 
 ## Development and verification

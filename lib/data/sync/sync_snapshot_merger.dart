@@ -8,7 +8,12 @@ class SyncSnapshotMerger {
 
   final AppDatabase database;
 
-  Future<void> merge(Map<String, dynamic> snapshot) async {
+  Future<void> merge(
+    Map<String, dynamic> snapshot, {
+    Set<String>? allowedLibraryIds,
+  }) async {
+    bool allowed(String id) =>
+        allowedLibraryIds == null || allowedLibraryIds.contains(id);
     final schemaVersion = snapshot['schemaVersion'];
     if (schemaVersion is! int ||
         schemaVersion < 1 ||
@@ -30,7 +35,7 @@ class SyncSnapshotMerger {
       for (final row in rows('libraries')) {
         final remote = Library.fromJson(row);
         final local = await database.getLibraryById(remote.id);
-        if (local == null) continue;
+        if (local == null || !allowed(local.id)) continue;
         final selected =
             Library.fromJson(
               SyncConflictResolver.mergeMetadata(
@@ -54,7 +59,11 @@ class SyncSnapshotMerger {
         final local = await (database.select(
           database.sections,
         )..where((table) => table.id.equals(remote.id))).getSingleOrNull();
-        if (local == null) continue;
+        if (local == null ||
+            !allowed(local.libraryId) ||
+            remote.libraryId != local.libraryId) {
+          continue;
+        }
         final selected =
             Section.fromJson(
               SyncConflictResolver.mergeMetadata(
@@ -77,7 +86,11 @@ class SyncSnapshotMerger {
       for (final row in rows('items')) {
         final remote = Item.fromJson(row);
         final local = await database.getItemById(remote.id);
-        if (local == null) continue;
+        if (local == null ||
+            !allowed(local.libraryId) ||
+            remote.libraryId != local.libraryId) {
+          continue;
+        }
         final selected =
             Item.fromJson(
               SyncConflictResolver.mergeMetadata(
@@ -107,7 +120,7 @@ class SyncSnapshotMerger {
       for (final row in rows('playback')) {
         final remote = PlaybackProgressData.fromJson(row);
         final item = await database.getItemById(remote.itemId);
-        if (item == null) continue;
+        if (item == null || !allowed(item.libraryId)) continue;
         affectedSections.add(item.sectionId);
         final local = await database.getPlaybackByItemId(remote.itemId);
         final selected = local == null
@@ -126,7 +139,7 @@ class SyncSnapshotMerger {
       for (final row in rows('reading')) {
         final remote = ReadingProgressData.fromJson(row);
         final item = await database.getItemById(remote.itemId);
-        if (item == null) continue;
+        if (item == null || !allowed(item.libraryId)) continue;
         affectedSections.add(item.sectionId);
         final local = await database.getReadingByItemId(remote.itemId);
         final selected = local == null
@@ -149,6 +162,7 @@ class SyncSnapshotMerger {
             ? null
             : await database.getItemById(remote.itemId!);
         if (library == null ||
+            !allowed(library.id) ||
             (remote.itemId != null &&
                 (item == null || item.libraryId != remote.libraryId))) {
           continue;
@@ -156,6 +170,11 @@ class SyncSnapshotMerger {
         final local = await (database.select(
           database.notes,
         )..where((table) => table.id.equals(remote.id))).getSingleOrNull();
+        if (local != null &&
+            (local.libraryId != remote.libraryId ||
+                local.itemId != remote.itemId)) {
+          throw const FormatException('Study record ownership cannot change');
+        }
         final selected = local == null
             ? [remote]
             : SyncConflictResolver.preserveUserContentConflict(
@@ -172,6 +191,7 @@ class SyncSnapshotMerger {
         final library = await database.getLibraryById(remote.libraryId);
         final item = await database.getItemById(remote.itemId);
         if (library == null ||
+            !allowed(library.id) ||
             item == null ||
             item.libraryId != remote.libraryId) {
           continue;
@@ -179,6 +199,11 @@ class SyncSnapshotMerger {
         final local = await (database.select(
           database.bookmarks,
         )..where((table) => table.id.equals(remote.id))).getSingleOrNull();
+        if (local != null &&
+            (local.libraryId != remote.libraryId ||
+                local.itemId != remote.itemId)) {
+          throw const FormatException('Study record ownership cannot change');
+        }
         final selected = local == null
             ? [remote]
             : SyncConflictResolver.preserveUserContentConflict(
@@ -191,6 +216,10 @@ class SyncSnapshotMerger {
               .insertOnConflictUpdate(bookmark);
         }
       }
+      await database.importMediaRows(
+        snapshot,
+        allowedLibraryIds: allowedLibraryIds,
+      );
       for (final sectionId in affectedSections) {
         await database.refreshSectionCounts(sectionId);
       }

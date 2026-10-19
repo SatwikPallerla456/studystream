@@ -1,108 +1,84 @@
 import 'dart:async';
 import 'dart:io';
-
 import '../db/app_database.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
 import 'library_indexer.dart';
 
-/// Watches only imported local roots. Watch failures leave manual refresh usable.
+/// Each source has its own watcher, cancellation and availability boundary.
 class LibraryWatcher {
-  LibraryWatcher(this.database, this.indexer);
+  LibraryWatcher(this.database,this.indexer);
   final AppDatabase database;
   final LibraryIndexer indexer;
+  final _watches=<String,StreamSubscription<FileSystemEvent>>{};
+  final _paths=<String,String>{};
+  final _timers=<String,Timer>{};
+  final _tokens=<String,ScanCancellationToken>{};
+  final _dirty=<String>{};
   StreamSubscription<List<Library>>? _libraries;
-  final _watches = <String, StreamSubscription<FileSystemEvent>>{};
-  final _timers = <String, Timer>{};
-  final _scanning = <String>{};
-  final _dirty = <String>{};
-  final _tokens = <String, ScanCancellationToken>{};
-  final _paths = <String, String>{};
-  bool _disposed = false;
-
+  Timer? _reconcileTimer;
+  bool _disposed=false,_reconciling=false;
   void start() {
-    _libraries ??= database.watchLibraries().listen((libraries) {
-      if (_disposed) return;
-      final ids = libraries.map((library) => library.id).toSet();
-      for (final id in _paths.keys.toList()) {
-        if (!ids.contains(id)) {
-          _watches.remove(id)?.cancel();
-          _timers.remove(id)?.cancel();
-          _paths.remove(id);
-          _tokens[id]?.cancel();
-        }
-      }
-      for (final library in libraries) {
-        if (library.rootFolderPath.startsWith('remote:') ||
-            _paths[library.id] == library.rootFolderPath) {
-          continue;
-        }
-        _watches.remove(library.id)?.cancel();
-        _paths[library.id] = library.rootFolderPath;
-        try {
-          _watches[library.id] = Directory(library.rootFolderPath)
-              .watch(recursive: true)
-              .listen(
-                (event) {
-                  if (event.path
-                      .split(Platform.pathSeparator)
-                      .last
-                      .startsWith('.')) {
-                    return;
-                  }
-                  _schedule(library);
-                },
-                onError: (Object _) {
-                  _watches.remove(library.id)?.cancel();
-                },
-              );
-        } on FileSystemException {
-          /* Manual refresh is the fallback on unsupported platforms. */
-        }
-      }
-    });
+    _libraries??=database.watchLibraries().listen((_)=>unawaited(_reconcile()));
+    _reconcileTimer??=Timer.periodic(const Duration(seconds:5),(_)=>unawaited(_reconcile()));
   }
-
-  void _schedule(Library library) {
-    if (_disposed) return;
-    _timers.remove(library.id)?.cancel();
-    _timers[library.id] = Timer(
-      const Duration(milliseconds: 900),
-      () => unawaited(_refresh(library)),
-    );
-  }
-
-  Future<void> _refresh(Library library) async {
-    if (_disposed || !_paths.containsKey(library.id)) return;
-    if (!_scanning.add(library.id)) {
-      _dirty.add(library.id);
-      return;
-    }
-    final token = _tokens[library.id] = ScanCancellationToken();
+  Future<void> _reconcile() async {
+    if(_disposed||_reconciling)return;
+    _reconciling=true;
     try {
-      await indexer.scanRootFolder(
-        rootFolderPath: library.rootFolderPath,
-        title: library.title,
-        cancellationToken: token,
-      );
-    } on Object {
-      // Do not remove data when a volume is temporarily unavailable.
-    } finally {
-      _tokens.remove(library.id);
-      _scanning.remove(library.id);
-      if (_dirty.remove(library.id)) _schedule(library);
+      final ids=<String>{};
+      for(final library in await database.watchLibraries().first) {
+        for(final source in await MediaCatalogRepository(database).sources(library.id)) {
+          ids.add(source.id);
+          final available=await Directory(source.root).exists();
+          if(!available) {
+            await MediaCatalogRepository(database).setSourceAvailability(source,true);
+            await _watches.remove(source.id)?.cancel();
+            continue;
+          }
+          if(source.unavailable) {
+            await MediaCatalogRepository(database).setSourceAvailability(source,false);
+            _schedule(library,source);
+          }
+          if(_paths[source.id]==source.root && _watches.containsKey(source.id))continue;
+          await _watches.remove(source.id)?.cancel();
+          _paths[source.id]=source.root;
+          try {
+            _watches[source.id]=Directory(source.root).watch(recursive:true).listen((event) {
+              if(!event.path.split(Platform.pathSeparator).last.startsWith('.')) _schedule(library,source);
+            },onError:(Object _) { _watches.remove(source.id)?.cancel(); });
+          } on FileSystemException { /* Refresh stays available. */ }
+        }
+      }
+      for(final id in _paths.keys.toList()) {
+        if(!ids.contains(id)) {
+          await _watches.remove(id)?.cancel();_paths.remove(id);
+          _timers.remove(id)?.cancel();_tokens[id]?.cancel();
+        }
+      }
+    } finally { _reconciling=false; }
+  }
+  void _schedule(Library library,LibrarySource source) {
+    if(_disposed)return;
+    _timers.remove(source.id)?.cancel();
+    _timers[source.id]=Timer(const Duration(milliseconds:900),()=>unawaited(_refresh(library,source)));
+  }
+  Future<void> _refresh(Library library,LibrarySource source) async {
+    if(_disposed)return;
+    if(_tokens.containsKey(source.id)) {_dirty.add(source.id);return;}
+    final token=_tokens[source.id]=ScanCancellationToken();
+    try {
+      await indexer.scanRootFolder(rootFolderPath:source.root,title:library.title,existingLibraryId:library.id,source:source,cancellationToken:token);
+    } on Object { /* Missing volumes never delete history. */ }
+    finally {
+      _tokens.remove(source.id);
+      if(_dirty.remove(source.id))_schedule(library,source);
     }
   }
-
   Future<void> dispose() async {
-    _disposed = true;
-    for (final timer in _timers.values) {
-      timer.cancel();
-    }
-    for (final token in _tokens.values) {
-      token.cancel();
-    }
+    _disposed=true;_reconcileTimer?.cancel();
+    for(final t in _timers.values){t.cancel();}
+    for(final token in _tokens.values){token.cancel();}
     await _libraries?.cancel();
-    for (final watch in _watches.values) {
-      await watch.cancel();
-    }
+    for(final watch in _watches.values){await watch.cancel();}
   }
 }

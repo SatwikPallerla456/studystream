@@ -30,6 +30,15 @@
 		5496C3DE6983A48D3F31631F /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4AFBBB6331E1BA3355BB470B /* Pods_RunnerTests.framework */; };
 		B1C5924D80A3B7BD987B7F39 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E7726345600573AE1CC6E54B /* Pods_Runner.framework */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
+		AABBCCDDEEFF001122440000 /* MyVLC/VLCEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF001122330000; };
+		AABBCCDDEEFF001122440001 /* MyVLC/Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF001122330001; };
+		AABBCCDDEEFF001122440002 /* MyVLC/OptionLexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF001122330002; };
+		AABBCCDDEEFF001122440003 /* MyVLC/MediaLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF001122330003; };
+		AABBCCDDEEFF001122440004 /* MyVLCBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF001122330004; };
+		AABBCCDDEEFF001122440005 /* MyVLC/VLCOptions.json in Resources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF001122330005; };
+		AABBCCDDEEFF002222440000 /* MyVLC/OutputJobs.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF002222330000; };
+		AABBCCDDEEFF002222440001 /* MyVLCDesktop.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF002222330001; };
+		AABBCCDDEEFF002222440003 /* MyVLCGlobalShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDDEEFF002222330003; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,7 +77,7 @@
 		331C80D7294CF71000263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		333000ED22D3DE5D00554162 /* Warnings.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Warnings.xcconfig; sourceTree = "<group>"; };
 		335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GeneratedPluginRegistrant.swift; sourceTree = "<group>"; };
-		33CC10ED2044A3C60003C045 /* study_stream.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = study_stream.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		33CC10ED2044A3C60003C045 /* Tangerine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tangerine.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		33CC10F02044A3C60003C045 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		33CC10F22044A3C60003C045 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Runner/Assets.xcassets; sourceTree = "<group>"; };
 		33CC10F52044A3C60003C045 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/MainMenu.xib; sourceTree = "<group>"; };
@@ -90,6 +99,15 @@
 		D620FCA0B413A57C23E3EB68 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
 		E7726345600573AE1CC6E54B /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
+		AABBCCDDEEFF001122330000 /* MyVLC/VLCEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLC/VLCEngine.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF001122330001 /* MyVLC/Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLC/Preferences.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF001122330002 /* MyVLC/OptionLexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLC/OptionLexer.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF001122330003 /* MyVLC/MediaLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLC/MediaLibrary.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF001122330004 /* MyVLCBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLCBridge.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF001122330005 /* MyVLC/VLCOptions.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "MyVLC/VLCOptions.json"; sourceTree = "<group>"; };
+		AABBCCDDEEFF002222330000 /* MyVLC/OutputJobs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLC/OutputJobs.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF002222330001 /* MyVLCDesktop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLCDesktop.swift"; sourceTree = "<group>"; };
+		AABBCCDDEEFF002222330003 /* MyVLCGlobalShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyVLCGlobalShortcuts.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -161,7 +179,7 @@
 		33CC10EE2044A3C60003C045 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				33CC10ED2044A3C60003C045 /* study_stream.app */,
+				33CC10ED2044A3C60003C045 /* Tangerine.app */,
 				331C80D5294CF71000263BE5 /* RunnerTests.xctest */,
 			);
 			name = Products;
@@ -195,6 +213,15 @@
 			children = (
 				33CC10F02044A3C60003C045 /* AppDelegate.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
+				AABBCCDDEEFF002222330003 /* MyVLCGlobalShortcuts.swift */,
+				AABBCCDDEEFF002222330001 /* MyVLCDesktop.swift */,
+				AABBCCDDEEFF002222330000 /* MyVLC/OutputJobs.swift */,
+				AABBCCDDEEFF001122330005 /* MyVLC/VLCOptions.json */,
+				AABBCCDDEEFF001122330004 /* MyVLCBridge.swift */,
+				AABBCCDDEEFF001122330003 /* MyVLC/MediaLibrary.swift */,
+				AABBCCDDEEFF001122330002 /* MyVLC/OptionLexer.swift */,
+				AABBCCDDEEFF001122330001 /* MyVLC/Preferences.swift */,
+				AABBCCDDEEFF001122330000 /* MyVLC/VLCEngine.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -248,6 +275,7 @@
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				940CE69BA26F620E2399221B /* [CP] Embed Pods Frameworks */,
+				AABBCCDDEEFF003333440000 /* Bundle libVLC runtime */,
 			);
 			buildRules = (
 			);
@@ -256,7 +284,7 @@
 			);
 			name = Runner;
 			productName = Runner;
-			productReference = 33CC10ED2044A3C60003C045 /* study_stream.app */;
+			productReference = 33CC10ED2044A3C60003C045 /* Tangerine.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -326,6 +354,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				33CC10F32044A3C60003C045 /* Assets.xcassets in Resources */,
+				AABBCCDDEEFF001122440005 /* MyVLC/VLCOptions.json in Resources */,
 				33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -432,6 +461,18 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
+		AABBCCDDEEFF003333440000 /* Bundle libVLC runtime */ = {
+            isa = PBXShellScriptBuildPhase;
+            buildActionMask = 2147483647;
+            files = ();
+            inputPaths = ();
+            outputPaths = ();
+            name = "Bundle libVLC runtime";
+            runOnlyForDeploymentPostprocessing = 0;
+            shellPath = /bin/sh;
+            shellScript = "\"$PROJECT_DIR/../scripts/bundle-vlc-runtime.sh\"";
+            showEnvVarsInLog = 0;
+        };
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -448,6 +489,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */,
+				AABBCCDDEEFF002222440003 /* MyVLCGlobalShortcuts.swift in Sources */,
+				AABBCCDDEEFF002222440001 /* MyVLCDesktop.swift in Sources */,
+				AABBCCDDEEFF002222440000 /* MyVLC/OutputJobs.swift in Sources */,
+				AABBCCDDEEFF001122440004 /* MyVLCBridge.swift in Sources */,
+				AABBCCDDEEFF001122440003 /* MyVLC/MediaLibrary.swift in Sources */,
+				AABBCCDDEEFF001122440002 /* MyVLC/OptionLexer.swift in Sources */,
+				AABBCCDDEEFF001122440001 /* MyVLC/Preferences.swift in Sources */,
+				AABBCCDDEEFF001122440000 /* MyVLC/VLCEngine.swift in Sources */,
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 			);
@@ -492,7 +541,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.studyStream.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/study_stream.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/study_stream";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Tangerine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Tangerine";
 			};
 			name = Debug;
 		};
@@ -507,7 +556,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.studyStream.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/study_stream.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/study_stream";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Tangerine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Tangerine";
 			};
 			name = Release;
 		};
@@ -522,7 +571,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.studyStream.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/study_stream.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/study_stream";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Tangerine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Tangerine";
 			};
 			name = Profile;
 		};

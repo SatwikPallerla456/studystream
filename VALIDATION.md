@@ -180,3 +180,84 @@ manually verified on a physical device.
 
 This handoff describes implemented and tested behaviour; it does not claim full
 production readiness or completion of the external-device acceptance checks.
+
+## Home resume sections follow-up
+
+Home now separates Continue Watching, Continue Listening and Continue Reading.
+Each section queries up to six recent unfinished items independently, retains
+the existing progress cards and player/PDF routes, and has its own empty state.
+Playback filtering happens before the query limit so newer audio cannot displace
+videos. No schema change is required.
+
+Populated large-text checks exposed fixed-height card clipping and a narrow
+section-header overflow. Resume cards now size to their contents; section-header
+actions move below the heading on narrow layouts.
+
+- `dart format` on the changed Dart files: pass.
+- `flutter test test/app_database_test.dart test/widget_test.dart --reporter expanded`:
+  17 tests pass, including media grouping, navigation, completion updates and
+  populated widths 320–1440 with 1.7× text scaling.
+- `flutter test --reporter expanded`: all 56 tests pass.
+- `flutter analyze`: no issues.
+- `git diff --check`: pass.
+
+The native-build and interactive evidence above belongs to the earlier validation
+pass; this follow-up was verified with automated database and widget checks.
+
+## Notes and bookmarks motion follow-up
+
+Study and lesson tools now share a 200 ms fade-and-collapse transition for
+insertions and removals. Existing rows appear immediately on initial load; edits
+retain their keys and scroll position. Removed rows immediately stop accepting
+pointer/keyboard input and leave the accessibility tree while the exit finishes.
+Reduced-motion preferences make changes immediate, including when enabled during
+an exit. Rapid reinsertion cancels pending removal, and cleanup also handles
+offscreen rows and disposal.
+
+Automated checks cover intermediate transitions, rapid remove/reinsert, reduced
+motion, scroll retention, offscreen cleanup and disposal. The existing editor and
+Study tests now also delete the final bookmark through each interface and verify
+the empty state.
+
+- `dart format` on changed Dart files: pass.
+- `flutter test --reporter expanded`: all 60 tests pass.
+- `flutter analyze`: no issues.
+- `git diff --check`: pass.
+
+This follow-up adds no dependency or database migration. Verification used widget
+and database tests; native builds and interactive inspection were not repeated.
+
+## Library section expansion follow-up
+
+Desktop Library Detail now follows indexed parent-folder relationships with
+indented, expandable sections. Folder controls expose expanded/collapsed semantics
+and use the shared 200 ms list transition with immediate reduced-motion updates.
+Rows remain lazily rendered, and indentation is capped for deeply nested folders.
+Legacy sections without usable parents remain reachable.
+
+Collapsing a folder retains the selected section and its lesson pane. Collapsed
+folders also survive section changes and streamed-data rebuilds. Compact layouts
+retain the section picker, including nested sections.
+
+The new widget acceptance check selects a nested section, collapses/reopens its
+parent, switches sections, then selects the nested section through the compact
+picker. Existing shared-transition tests cover rapid reversal, reduced motion,
+input exclusion, scroll retention and cleanup.
+
+- `dart format` on changed Dart files: pass.
+- `flutter test --reporter expanded`: all 61 tests pass.
+- `flutter analyze`: no issues.
+- `git diff --check`: pass.
+
+No dependency or database migration was added. This follow-up used automated
+widget checks; native builds and interactive inspection were not repeated.
+
+## Tangerine execution — 19 October 2026
+
+Current results and limitations are recorded in `docs/TANGERINE_IMPLEMENTATION.md`;
+previous entries remain historical evidence. Fresh verification passes formatting,
+analyzer, 82 unit/widget tests, both real-libVLC macOS integration journeys, and
+macOS/Android/iOS-simulator builds. Native verification includes decoded/displayed
+video counters, authenticated remote streaming, the actual merged player screen,
+effects tools and durable automatic progress. Logs: `.verification/tangerine/`.
+The full roadmap and original MyVLC workflow preservation are not complete.

@@ -81,7 +81,7 @@ class LibraryCard extends StatelessWidget {
                 const SizedBox(height: AppSpace.xxs),
                 Text(
                   library.description.trim().isEmpty
-                      ? 'Local learning library'
+                      ? 'Media library'
                       : library.description.trim(),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,

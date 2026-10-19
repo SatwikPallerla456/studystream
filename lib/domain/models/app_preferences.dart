@@ -1,3 +1,17 @@
+const playbackSpeeds = [
+  0.25,
+  0.5,
+  0.75,
+  1.0,
+  1.25,
+  1.5,
+  1.75,
+  2.0,
+  2.5,
+  3.0,
+  4.0,
+];
+
 class AppPreferences {
   const AppPreferences({
     this.defaultPlaybackSpeed = 1,

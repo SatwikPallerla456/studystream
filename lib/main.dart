@@ -8,11 +8,15 @@ import 'app.dart';
 import 'data/providers/app_providers.dart';
 import 'data/platform/folder_access.dart';
 import 'dart:async';
+import 'dart:io';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await FolderAccess.restore();
-  MediaKit.ensureInitialized();
+  if (!Platform.isMacOS ||
+      const bool.fromEnvironment('TANGERINE_INTERIM_PLAYER')) {
+    MediaKit.ensureInitialized();
+  }
   await pdfrxFlutterInitialize();
   PaintingBinding.instance.imageCache.maximumSizeBytes = 64 * 1024 * 1024;
   final container = ProviderContainer();

@@ -12,6 +12,7 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    MyVLCBridge.register(with: flutterViewController.registrar(forPlugin: "MyVLCBridge"))
 
     let channel = FlutterMethodChannel(name: "studystream/folder_access", binaryMessenger: flutterViewController.engine.binaryMessenger)
     channel.setMethodCallHandler { [weak self] call, result in

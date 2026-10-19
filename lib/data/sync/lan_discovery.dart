@@ -7,7 +7,7 @@ class LanDiscovery {
   static const port = 45832;
   RawDatagramSocket? _socket;
 
-  Future<void> advertise(int httpPort) async {
+  Future<void> advertise(int httpPort, {String? name}) async {
     try {
       final socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
@@ -29,7 +29,7 @@ class LanDiscovery {
               jsonEncode({
                 'service': 'StudyStream',
                 'port': httpPort,
-                'name': Platform.localHostname,
+                'name': name ?? Platform.localHostname,
               }),
             ),
             packet.address,
@@ -66,7 +66,7 @@ class LanDiscovery {
           return;
         }
         hosts[Uri(scheme: 'http', host: packet.address.address, port: value)] =
-            data['name'] as String? ?? 'StudyStream host';
+            data['name'] as String? ?? 'Tangerine host';
       } on Object {
         /* Ignore unrelated datagrams. */
       }

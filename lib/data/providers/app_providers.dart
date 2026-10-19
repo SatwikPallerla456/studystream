@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models/app_preferences.dart';
+import '../../domain/services/player_library_repository.dart';
 import '../../domain/services/app_preferences_repository.dart';
 import '../db/app_database.dart';
+import '../playback/remote_playback_controller.dart';
 import '../indexer/library_indexer.dart';
 import '../indexer/library_watcher.dart';
 import '../sync/lan_sync_server.dart';
@@ -31,8 +33,15 @@ final libraryWatcherProvider = Provider<LibraryWatcher>((ref) {
   return watcher;
 });
 
+final remotePlaybackControllerProvider = Provider<RemotePlaybackController>(
+  (ref) => RemotePlaybackController(),
+);
+
 final lanSyncServerProvider = Provider<LanSyncServer>((ref) {
-  final server = LanSyncServer(ref.watch(appDatabaseProvider));
+  final server = LanSyncServer(
+    ref.watch(appDatabaseProvider),
+    playbackController: ref.watch(remotePlaybackControllerProvider),
+  );
   ref.onDispose(server.dispose);
   return server;
 });
@@ -84,7 +93,7 @@ class ThemeModeController extends Notifier<ThemeMode> {
   @override
   ThemeMode build() {
     _load();
-    return ThemeMode.system;
+    return ThemeMode.dark;
   }
 
   Future<void> _load() async {
@@ -93,7 +102,8 @@ class ThemeModeController extends Notifier<ThemeMode> {
     state = switch (value) {
       'light' => ThemeMode.light,
       'dark' => ThemeMode.dark,
-      _ => ThemeMode.system,
+      'system' => ThemeMode.system,
+      _ => ThemeMode.dark,
     };
   }
 
@@ -103,3 +113,10 @@ class ThemeModeController extends Notifier<ThemeMode> {
     await ref.read(appDatabaseProvider).setSetting('themeMode', mode.name);
   }
 }
+
+final playerLibraryRepositoryProvider = Provider<PlayerLibraryRepository>(
+  (ref) => PlayerLibraryRepository(ref.watch(appDatabaseProvider)),
+);
+final playerLibraryStateProvider = StreamProvider<PlayerLibraryState>(
+  (ref) => ref.watch(playerLibraryRepositoryProvider).watch(),
+);

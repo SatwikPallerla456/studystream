@@ -105,7 +105,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
         () => _error =
             message.contains('missing') || message.contains('no longer exists')
             ? 'The PDF file is missing or has moved. Relink it from the library to keep your saved reading progress.'
-            : 'StudyStream could not open this PDF. The file may be damaged, inaccessible, or unsupported.',
+            : 'Tangerine could not open this PDF. The file may be damaged, inaccessible, or unsupported.',
       );
     }
   }

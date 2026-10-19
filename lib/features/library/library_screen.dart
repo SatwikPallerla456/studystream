@@ -16,6 +16,7 @@ import '../../shared/widgets/item_artwork.dart';
 import '../../data/providers/app_providers.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
+import '../../shared/widgets/study_animated_list.dart';
 import '../../shared/widgets/study_ui.dart';
 import '../../shared/widgets/study_motion.dart';
 
@@ -94,6 +95,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       if (mounted) _message('Remote library refreshed');
       return;
     }
+    if (library.rootFolderPath.startsWith('import:')) {
+      _message(
+        'This collection contains individually imported files. Relink missing files individually; folder refresh requires linked source folders.',
+      );
+      return;
+    }
     var root = library.rootFolderPath;
     if (!await Directory(root).exists()) {
       final selected = await FilePicker.platform.getDirectoryPath(
@@ -148,7 +155,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             builder: (context, setModalState) => StudyModalFrame(
               title: 'Edit library',
               description:
-                  'Update the way this collection appears in StudyStream.',
+                  'Update the way this collection appears in Tangerine.',
               icon: Icons.edit_outlined,
               primaryAction: FilledButton(
                 onPressed: validTitle
@@ -322,17 +329,20 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     try {
       final library = _library;
       if (library == null) return;
-      final canonicalRoot = await Directory(
-        library.rootFolderPath,
-      ).resolveSymbolicLinks();
+      final importedFiles = library.rootFolderPath.startsWith('import:');
+      final canonicalRoot = importedFiles
+          ? null
+          : await Directory(library.rootFolderPath).resolveSymbolicLinks();
       final canonicalFile = await file.resolveSymbolicLinks();
-      if (canonicalFile != canonicalRoot &&
+      if (canonicalRoot != null &&
+          canonicalFile != canonicalRoot &&
           !canonicalFile.startsWith(
             '$canonicalRoot${Platform.pathSeparator}',
           )) {
         _message('Choose a file inside this library folder.');
         return;
       }
+      if (importedFiles) await FolderAccess.retain(path);
       final stat = await file.stat();
       final fingerprint = await fingerprintFile(file);
       await ref
@@ -341,7 +351,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             itemId: item.id,
             filePath: path,
             filename: p.basename(path),
-            relativePath: p.relative(path, from: library.rootFolderPath),
+            relativePath: importedFiles
+                ? canonicalFile
+                : p.relative(path, from: library.rootFolderPath),
             modifiedAt: stat.modified.millisecondsSinceEpoch,
             fileSize: stat.size,
             fingerprint: fingerprint,
@@ -438,7 +450,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               ),
             );
           }
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
             return const StudyPage(
               child: ContentLoadingState(label: 'Loading library sections'),
             );
@@ -941,7 +954,7 @@ class _LibraryHero extends StatelessWidget {
   }
 }
 
-class _SectionNavigation extends StatelessWidget {
+class _SectionNavigation extends StatefulWidget {
   const _SectionNavigation({
     required this.sections,
     required this.selectedId,
@@ -953,7 +966,54 @@ class _SectionNavigation extends StatelessWidget {
   final ValueChanged<String> onSelect;
 
   @override
+  State<_SectionNavigation> createState() => _SectionNavigationState();
+}
+
+class _SectionNavigationState extends State<_SectionNavigation> {
+  final _collapsed = <String>{};
+
+  List<_SectionNode> _tree() {
+    final ids = widget.sections.map((entry) => entry.section.id).toSet();
+    final children = <String?, List<SectionProgressEntry>>{};
+    for (final entry in widget.sections) {
+      final parent = entry.section.parentSectionId;
+      final validParent = parent != entry.section.id && ids.contains(parent);
+      children.putIfAbsent(validParent ? parent : null, () => []).add(entry);
+    }
+    final visited = <String>{};
+    _SectionNode node(SectionProgressEntry entry) {
+      visited.add(entry.section.id);
+      return _SectionNode(entry, [
+        for (final child in children[entry.section.id] ?? const [])
+          if (!visited.contains(child.section.id)) node(child),
+      ]);
+    }
+
+    final roots = [for (final entry in children[null] ?? const []) node(entry)];
+    // Keep imported legacy/orphaned sections reachable, including malformed
+    // cyclic parent links, without recursing into a folder twice.
+    for (final entry in widget.sections) {
+      if (!visited.contains(entry.section.id)) roots.add(node(entry));
+    }
+    return roots;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final roots = _tree();
+    final visible = <({_SectionNode node, int depth})>[];
+    void append(_SectionNode node, int depth) {
+      visible.add((node: node, depth: depth));
+      if (!_collapsed.contains(node.entry.section.id)) {
+        for (final child in node.children) {
+          append(child, depth + 1);
+        }
+      }
+    }
+
+    for (final root in roots) {
+      append(root, 0);
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AppSpace.lg,
@@ -967,58 +1027,92 @@ class _SectionNavigation extends StatelessWidget {
           Text('Sections', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: AppSpace.xxs),
           Text(
-            '${sections.length} ${sections.length == 1 ? 'section' : 'sections'}',
+            '${widget.sections.length} ${widget.sections.length == 1 ? 'section' : 'sections'}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: AppSpace.md),
           Expanded(
-            child: ListView.separated(
-              itemCount: sections.length,
+            child: StudyAnimatedList<({_SectionNode node, int depth})>(
+              items: visible,
+              itemId: (row) => row.node.entry.section.id,
+              emptyState: const SizedBox.shrink(),
               separatorBuilder: (_, _) => const SizedBox(height: AppSpace.xs),
-              itemBuilder: (context, index) {
-                final entry = sections[index];
-                final selected = entry.section.id == selectedId;
-                return StudySurface(
-                  selected: selected,
-                  padding: const EdgeInsets.all(AppSpace.sm),
-                  onTap: () => onSelect(entry.section.id),
-                  semanticLabel:
-                      '${cleanDisplayTitle(entry.section.title)}, ${entry.completedItems} of ${entry.totalItems} lessons complete',
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              cleanDisplayTitle(entry.section.title),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleSmall,
-                            ),
-                          ),
-                          const SizedBox(width: AppSpace.xs),
-                          Text(
-                            '${entry.completedItems}/${entry.totalItems}',
-                            style: Theme.of(context).textTheme.labelMedium,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: AppSpace.xs),
-                      StudyProgress(
-                        value: entry.progressPercent / 100,
-                        height: 5,
-                      ),
-                    ],
-                  ),
-                );
-              },
+              itemBuilder: (context, row) =>
+                  _branch(context, row.node, row.depth),
             ),
           ),
         ],
       ),
     );
   }
+
+  Widget _branch(BuildContext context, _SectionNode node, int depth) {
+    final entry = node.entry;
+    final id = entry.section.id;
+    final title = cleanDisplayTitle(entry.section.title);
+    final expanded = !_collapsed.contains(id);
+    return Padding(
+      padding: EdgeInsets.only(left: depth.clamp(0, 3) * AppSpace.sm),
+      child: StudySurface(
+        key: ValueKey('section-$id'),
+        selected: id == widget.selectedId,
+        padding: const EdgeInsets.all(AppSpace.sm),
+        onTap: () => widget.onSelect(id),
+        semanticLabel:
+            '$title, ${entry.completedItems} of ${entry.totalItems} lessons complete',
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: AppSpace.xxs),
+                  Text(
+                    '${entry.completedItems}/${entry.totalItems}',
+                    style: Theme.of(context).textTheme.labelMedium,
+                  ),
+                  const SizedBox(height: AppSpace.xs),
+                  StudyProgress(value: entry.progressPercent / 100, height: 5),
+                ],
+              ),
+            ),
+            if (node.children.isNotEmpty)
+              Semantics(
+                expanded: expanded,
+                child: IconButton(
+                  tooltip: '${expanded ? 'Collapse' : 'Expand'} $title',
+                  onPressed: () => setState(() {
+                    if (expanded) {
+                      _collapsed.add(id);
+                    } else {
+                      _collapsed.remove(id);
+                    }
+                  }),
+                  icon: Icon(
+                    expanded
+                        ? Icons.expand_more_rounded
+                        : Icons.chevron_right_rounded,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionNode {
+  const _SectionNode(this.entry, this.children);
+
+  final SectionProgressEntry entry;
+  final List<_SectionNode> children;
 }
 
 class _LessonToolbar extends StatelessWidget {

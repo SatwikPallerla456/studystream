@@ -11,6 +11,7 @@ import '../../data/db/app_database.dart';
 import '../../data/indexer/library_indexer.dart';
 import '../../data/platform/folder_access.dart';
 import '../../data/providers/app_providers.dart';
+import '../../domain/services/media_import_service.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/continue_item_tile.dart';
 import '../../shared/widgets/library_card.dart';
@@ -20,6 +21,7 @@ import '../../shared/widgets/study_motion.dart';
 import '../search/search_screen.dart';
 import '../settings/settings_screen.dart';
 import '../study/study_screen.dart';
+import '../media/cinematic_home_section.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -32,6 +34,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   int _destination = 0;
   ScanProgress? _progress;
   ScanCancellationToken? _scanToken;
+  bool _importing = false;
 
   static const _destinations = [
     StudyShellDestination(
@@ -61,14 +64,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     ),
   ];
 
-  bool get _scanning => _scanToken != null;
+  bool get _scanning => _scanToken != null || _importing;
+
+  Future<void> _pickFiles() async {
+    if (_scanning) return;
+    setState(() => _importing = true);
+    try {
+      final result = await MediaImportService(
+        ref.read(libraryIndexerProvider),
+      ).pickFiles();
+      if (mounted && result != null) {
+        _showMessage(
+          '${result.importedItems} media files are ready',
+          success: true,
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        _showMessage(
+          'The files could not be imported. Check access and available storage.',
+          error: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _importing = false);
+    }
+  }
 
   Future<void> _pickFolder() async {
     if (Platform.isAndroid || Platform.isIOS) {
-      setState(() => _destination = 4);
-      _showMessage(
-        'Connect to your desktop to browse its folders. Persistent mobile folder import is not available on this device.',
-      );
+      await _pickFiles();
       return;
     }
     final path = await FilePicker.platform.getDirectoryPath(
@@ -135,7 +160,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       builder: (_) => StudyConfirmDialog(
         title: 'Remove this library?',
         message:
-            '“${cleanDisplayTitle(library.title)}” and its StudyStream progress, notes, and bookmarks will be removed. Your source files will stay untouched.',
+            '“${cleanDisplayTitle(library.title)}” and its Tangerine progress, notes, and bookmarks will be removed. Your source files will stay untouched.',
         confirmLabel: 'Remove library',
         icon: Icons.delete_outline_rounded,
         destructive: true,
@@ -196,6 +221,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _HomeDashboard(
         database: database,
         onAddLibrary: _pickFolder,
+        onAddFiles: _scanning ? null : _pickFiles,
         onOpenItem: _openItem,
         onOpenLibraries: () => setState(() => _destination = 1),
       ),
@@ -230,12 +256,14 @@ class _HomeDashboard extends StatelessWidget {
   const _HomeDashboard({
     required this.database,
     required this.onAddLibrary,
+    required this.onAddFiles,
     required this.onOpenItem,
     required this.onOpenLibraries,
   });
 
   final AppDatabase database;
   final VoidCallback onAddLibrary;
+  final VoidCallback? onAddFiles;
   final ValueChanged<Item> onOpenItem;
   final VoidCallback onOpenLibraries;
 
@@ -249,25 +277,45 @@ class _HomeDashboard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               StudyPageHeader(
-                eyebrow: 'Your learning space',
-                title: 'Welcome back',
+                eyebrow: 'MYVLC / YOUR LIBRARY',
+                title: 'Your media, all in one place',
                 description:
-                    'Continue a lesson, revisit a page, or settle into your next focused session.',
+                    'Watch, listen, read, and learn. Local files and server libraries live together here.',
                 actions: [
                   FilledButton.icon(
                     onPressed: onAddLibrary,
                     icon: const Icon(Icons.add_rounded),
                     label: const Text('Add library'),
                   ),
+                  OutlinedButton.icon(
+                    onPressed: onAddFiles,
+                    icon: const Icon(Icons.note_add_outlined),
+                    label: const Text('Add files'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => context.push('/network'),
+                    icon: const Icon(Icons.lan_outlined),
+                    label: const Text('Network'),
+                  ),
                 ],
               ),
               const SizedBox(height: AppSpace.xl),
+              if ((snapshot.data ?? const <Library>[]).isNotEmpty) ...[
+                CinematicHomeSection(onOpen: onOpenItem),
+                const SizedBox(height: AppSpace.xl),
+                OutlinedButton.icon(
+                  onPressed: () => context.push('/browse'),
+                  icon: const Icon(Icons.grid_view),
+                  label: const Text('Browse all media'),
+                ),
+                const SizedBox(height: AppSpace.xl),
+              ],
               if (snapshot.hasError)
                 ContentState(
                   icon: Icons.cloud_off_rounded,
                   title: 'Your libraries are unavailable',
                   message:
-                      'StudyStream could not load your local library index. Try reopening the app.',
+                      'Tangerine could not load your local library index. Try reopening the app.',
                   tone: ContentStateTone.error,
                 )
               else if (snapshot.connectionState == ConnectionState.waiting)
@@ -319,7 +367,7 @@ class _Onboarding extends StatelessWidget {
           ),
           const SizedBox(height: AppSpace.lg),
           Text(
-            'Build your first learning library',
+            'Your library starts here',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.headlineMedium,
           ),
@@ -327,7 +375,7 @@ class _Onboarding extends StatelessWidget {
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 620),
             child: Text(
-              'Choose a folder you already own. StudyStream organises videos, audio, PDFs, and reading files into sections without moving them.',
+              'Add videos, music, PDFs, and other documents. Choose a folder to keep files in place, add files to copy them into the app, or connect to a media server through Network.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyLarge,
             ),
@@ -348,8 +396,8 @@ class _Onboarding extends StatelessWidget {
                 ),
                 const _OnboardingStep(
                   number: '3',
-                  title: 'Learn at your pace',
-                  description: 'Progress, notes, and bookmarks stay private.',
+                  title: 'Play, read, or learn',
+                  description: 'Keep progress, notes, and bookmarks together.',
                 ),
               ];
               if (constraints.maxWidth < 720) {
@@ -379,7 +427,7 @@ class _Onboarding extends StatelessWidget {
           FilledButton.icon(
             onPressed: onAddLibrary,
             icon: const Icon(Icons.create_new_folder_outlined),
-            label: const Text('Choose your first folder'),
+            label: const Text('Add your first library'),
           ),
           const SizedBox(height: AppSpace.sm),
           Text(
@@ -469,13 +517,15 @@ class _PopulatedHome extends StatelessWidget {
       children: [
         _LearningOverview(libraryCount: libraries.length),
         const SizedBox(height: AppSpace.xxl),
-        const StudySectionHeader(
-          title: 'Continue learning',
-          description: 'Your most recent lessons, ready where you left them.',
-        ),
-        const SizedBox(height: AppSpace.md),
-        _ContinueSection(database: database, onOpen: onOpenItem),
-        const SizedBox(height: AppSpace.xxl),
+        for (final kind in _ContinueKind.values) ...[
+          _ContinueSection(
+            key: ValueKey('continue-${kind.itemType}'),
+            kind: kind,
+            database: database,
+            onOpen: onOpenItem,
+          ),
+          const SizedBox(height: AppSpace.xxl),
+        ],
         StudySectionHeader(
           title: 'Your libraries',
           description: 'Quick access to the collections you return to most.',
@@ -516,7 +566,7 @@ class _LearningOverview extends StatelessWidget {
               ),
               const SizedBox(height: AppSpace.md),
               Text(
-                'A calm place for focused learning',
+                'Your media, on your terms',
                 style: Theme.of(context).textTheme.headlineMedium,
               ),
               const SizedBox(height: AppSpace.xs),
@@ -555,21 +605,104 @@ class _LearningOverview extends StatelessWidget {
   }
 }
 
-class _ContinueSection extends StatelessWidget {
-  const _ContinueSection({required this.database, required this.onOpen});
+enum _ContinueKind {
+  watching(
+    'video',
+    'Continue Watching',
+    'Your recent videos, ready where you left them.',
+    'No videos in progress',
+    'Start a video lesson from your libraries to pick it up here.',
+    Icons.play_circle_outline_rounded,
+  ),
+  listening(
+    'audio',
+    'Continue Listening',
+    'Pick up music and audio at the saved moment.',
+    'No audio in progress',
+    'Start an audio lesson from your libraries to pick it up here.',
+    Icons.headphones_rounded,
+  ),
+  reading(
+    'pdf',
+    'Continue Reading',
+    'Return to your PDFs at the page you reached.',
+    'No reading in progress',
+    'Open a PDF from your libraries to return to it here.',
+    Icons.menu_book_rounded,
+  );
 
+  const _ContinueKind(
+    this.itemType,
+    this.title,
+    this.description,
+    this.emptyTitle,
+    this.emptyMessage,
+    this.icon,
+  );
+
+  final String itemType;
+  final String title;
+  final String description;
+  final String emptyTitle;
+  final String emptyMessage;
+  final IconData icon;
+}
+
+class _ContinueSection extends StatefulWidget {
+  const _ContinueSection({
+    super.key,
+    required this.kind,
+    required this.database,
+    required this.onOpen,
+  });
+
+  final _ContinueKind kind;
   final AppDatabase database;
   final ValueChanged<Item> onOpen;
 
   @override
+  State<_ContinueSection> createState() => _ContinueSectionState();
+}
+
+class _ContinueSectionState extends State<_ContinueSection> {
+  late Stream<List<ContinueEntry>> _entries;
+
+  @override
+  void initState() {
+    super.initState();
+    _watchEntries();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ContinueSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.database != oldWidget.database ||
+        widget.kind != oldWidget.kind) {
+      _watchEntries();
+    }
+  }
+
+  void _watchEntries() {
+    _entries = widget.kind == _ContinueKind.reading
+        ? widget.database.watchRecentReadingEntries(limit: 6)
+        : widget.database.watchRecentPlaybackEntries(
+            itemType: widget.kind.itemType,
+            limit: 6,
+          );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return StreamBuilder<List<ContinueEntry>>(
-      stream: database.watchRecentPlaybackEntries(limit: 8),
-      builder: (context, mediaSnapshot) {
-        return StreamBuilder<List<ContinueEntry>>(
-          stream: database.watchRecentReadingEntries(limit: 8),
-          builder: (context, readingSnapshot) {
-            if (mediaSnapshot.hasError || readingSnapshot.hasError) {
+    final kind = widget.kind;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        StudySectionHeader(title: kind.title, description: kind.description),
+        const SizedBox(height: AppSpace.md),
+        StreamBuilder<List<ContinueEntry>>(
+          stream: _entries,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
               return const ContentState(
                 icon: Icons.history_toggle_off_rounded,
                 title: 'Recent activity is unavailable',
@@ -579,47 +712,43 @@ class _ContinueSection extends StatelessWidget {
                 compact: true,
               );
             }
-            if (mediaSnapshot.connectionState == ConnectionState.waiting ||
-                readingSnapshot.connectionState == ConnectionState.waiting) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
               return const ContentLoadingState(label: 'Loading recent lessons');
             }
-            final entries = [...?mediaSnapshot.data, ...?readingSnapshot.data]
-              ..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
+            final entries = snapshot.data ?? const <ContinueEntry>[];
             if (entries.isEmpty) {
-              return const ContentState(
-                icon: Icons.play_circle_outline_rounded,
-                title: 'Your next session starts here',
-                message:
-                    'Open any lesson and it will return here at the exact moment or page you reached.',
+              return ContentState(
+                icon: kind.icon,
+                title: kind.emptyTitle,
+                message: kind.emptyMessage,
                 compact: true,
               );
             }
             return LayoutBuilder(
               builder: (context, constraints) {
                 final columns = constraints.maxWidth >= 1040 ? 2 : 1;
-                final visible = entries.take(6).toList();
-                return GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: visible.length,
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    mainAxisExtent:
-                        180 +
-                        (MediaQuery.textScalerOf(context).scale(16) - 16) * 5,
-                    crossAxisSpacing: AppSpace.sm,
-                    mainAxisSpacing: AppSpace.sm,
-                  ),
-                  itemBuilder: (context, index) => ContinueItemTile(
-                    entry: visible[index],
-                    onTap: () => onOpen(visible[index].item),
-                  ),
+                final width =
+                    (constraints.maxWidth - AppSpace.sm * (columns - 1)) /
+                    columns;
+                return Wrap(
+                  spacing: AppSpace.sm,
+                  runSpacing: AppSpace.sm,
+                  children: [
+                    for (final entry in entries)
+                      SizedBox(
+                        width: width,
+                        child: ContinueItemTile(
+                          entry: entry,
+                          onTap: () => widget.onOpen(entry.item),
+                        ),
+                      ),
+                  ],
                 );
               },
             );
           },
-        );
-      },
+        ),
+      ],
     );
   }
 }
@@ -762,7 +891,7 @@ class _LibrariesPageState extends State<_LibrariesPage> {
                   icon: Icons.create_new_folder_outlined,
                   title: 'No libraries yet',
                   message:
-                      'Choose a course folder and StudyStream will organise its lessons without moving the files.',
+                      'Choose a media folder to organise videos, music, documents, and courses without moving the files.',
                   action: FilledButton.icon(
                     onPressed: widget.onAddLibrary,
                     icon: const Icon(Icons.add_rounded),

@@ -102,7 +102,7 @@ class StudyPageHeader extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final stack = constraints.maxWidth < 680;
+        final stack = constraints.maxWidth < 680 || actions.length > 1;
         if (stack) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -154,34 +154,44 @@ class StudySectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
+    final heading = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: compact
-                    ? Theme.of(context).textTheme.titleLarge
-                    : Theme.of(context).textTheme.headlineSmall,
-              ),
-              if (description != null) ...[
-                const SizedBox(height: AppSpace.xxs),
-                Text(
-                  description!,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ],
-            ],
-          ),
+        Text(
+          title,
+          style: compact
+              ? Theme.of(context).textTheme.titleLarge
+              : Theme.of(context).textTheme.headlineSmall,
         ),
-        if (trailing != null) ...[
-          const SizedBox(width: AppSpace.md),
-          trailing!,
+        if (description != null) ...[
+          const SizedBox(height: AppSpace.xxs),
+          Text(description!, style: Theme.of(context).textTheme.bodyMedium),
         ],
       ],
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (trailing != null && constraints.maxWidth < 600) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              heading,
+              const SizedBox(height: AppSpace.xs),
+              trailing!,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(child: heading),
+            if (trailing != null) ...[
+              const SizedBox(width: AppSpace.md),
+              trailing!,
+            ],
+          ],
+        );
+      },
     );
   }
 }
@@ -266,40 +276,49 @@ class StudySection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return StudySurface(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (icon != null) ...[
-                _IconWell(icon: icon!),
-                const SizedBox(width: AppSpace.md),
-              ],
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: Theme.of(context).textTheme.titleLarge),
-                    if (description != null) ...[
-                      const SizedBox(height: AppSpace.xxs),
+      child: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (icon != null) ...[
+                  _IconWell(icon: icon!),
+                  const SizedBox(width: AppSpace.md),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                       Text(
-                        description!,
-                        style: Theme.of(context).textTheme.bodyMedium,
+                        title,
+                        style: Theme.of(context).textTheme.titleLarge,
                       ),
+                      if (description != null) ...[
+                        const SizedBox(height: AppSpace.xxs),
+                        Text(
+                          description!,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
-              ),
-              if (trailing != null) ...[
-                const SizedBox(width: AppSpace.sm),
-                trailing!,
+                if (trailing != null && constraints.maxWidth >= 600) ...[
+                  const SizedBox(width: AppSpace.sm),
+                  trailing!,
+                ],
               ],
+            ),
+            if (trailing != null && constraints.maxWidth < 600) ...[
+              const SizedBox(height: AppSpace.sm),
+              trailing!,
             ],
-          ),
-          const SizedBox(height: AppSpace.lg),
-          child,
-        ],
+            const SizedBox(height: AppSpace.lg),
+            child,
+          ],
+        ),
       ),
     );
   }

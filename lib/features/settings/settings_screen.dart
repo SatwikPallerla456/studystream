@@ -1,4 +1,7 @@
 import 'dart:io';
+import 'package:go_router/go_router.dart';
+import 'package:file_picker/file_picker.dart';
+import '../../domain/services/myvlc_import_service.dart';
 
 import 'sync_client_section.dart';
 
@@ -8,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
+import '../../data/providers/device_runtime_provider.dart';
 import '../../data/sync/lan_sync_server.dart';
 import '../../domain/models/app_preferences.dart';
 import '../../domain/services/backup_service.dart';
@@ -24,6 +28,93 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _exporting = false;
   bool _restoring = false;
+  bool _importingMyVlc = false;
+
+  Future<void> _importMyVlc(AppDatabase database) async {
+    if (_importingMyVlc) return;
+    setState(() => _importingMyVlc = true);
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        dialogTitle: 'Preview MyVLC library import',
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+      );
+      final path = picked?.files.single.path;
+      if (path == null) return;
+      final service = MyVlcImportService(database);
+      final preview = await service.preview(File(path));
+      if (!mounted) return;
+      var conflict = MyVlcProgressConflict.keepTangerine;
+      final confirmed = await showStudyAdaptiveModal<bool>(
+        context: context,
+        builder: (modalContext) => StatefulBuilder(
+          builder: (context, update) => StudyModalFrame(
+            title: 'Import MyVLC library',
+            icon: Icons.move_to_inbox_outlined,
+            description:
+                '${preview.newItems} new media files, ${preview.existingItems} existing items, '
+                '${preview.playlists} playlists. Original media and MyVLC data stay in place.',
+            primaryAction: FilledButton(
+              onPressed: () => Navigator.pop(modalContext, true),
+              child: const Text('Import library'),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${preview.progressConflicts} items already have Tangerine progress.',
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<MyVlcProgressConflict>(
+                  initialValue: conflict,
+                  isExpanded: true,
+                  items: const [
+                    DropdownMenuItem(
+                      value: MyVlcProgressConflict.keepTangerine,
+                      child: Text('Keep Tangerine progress'),
+                    ),
+                    DropdownMenuItem(
+                      value: MyVlcProgressConflict.useMyVlc,
+                      child: Text('Use newer MyVLC progress'),
+                    ),
+                  ],
+                  onChanged: (value) => update(() => conflict = value!),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Imports local audio/video, history, resume positions, saved subtitles, queue and playlist membership. Remote streams and native preferences are excluded. File-only imports stay local. Relink missing files individually to grant file access; multi-folder refresh and sharing support are pending.',
+                ),
+                if (preview.warnings.isNotEmpty)
+                  Text(
+                    '${preview.warnings.length} skipped entries: ${preview.warnings.take(3).join(' ')}',
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+      if (confirmed == true) {
+        final imported = await service.import(preview, conflict: conflict);
+        if (mounted) {
+          _message(
+            'Imported $imported new files and preserved playlist membership.',
+            success: true,
+          );
+        }
+      }
+    } catch (error) {
+      if (mounted) {
+        _message(
+          error is FormatException
+              ? error.message
+              : 'MyVLC data could not be imported. No original files were changed.',
+          error: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _importingMyVlc = false);
+    }
+  }
 
   Future<void> _export(AppDatabase database) async {
     if (_exporting) return;
@@ -50,7 +141,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final confirmed = await showStudyAdaptiveModal<bool>(
       context: context,
       builder: (_) => const StudyConfirmDialog(
-        title: 'Restore a StudyStream backup?',
+        title: 'Restore a Tangerine backup?',
         message:
             'Valid records will be merged with data on this device. Newer local progress and settings are kept. Conflicting notes and bookmarks are preserved as copies. Source media files are not included or changed.',
         confirmLabel: 'Choose backup',
@@ -72,7 +163,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     } on FormatException {
       if (mounted) {
         _message(
-          'This file is not a compatible StudyStream backup.',
+          'This file is not a compatible Tangerine backup.',
           error: true,
         );
       }
@@ -136,7 +227,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     final appearance = StudySection(
       title: 'Appearance',
-      description: 'Choose how StudyStream should look on this device.',
+      description: 'Choose how Tangerine should look on this device.',
       icon: Icons.palette_outlined,
       child: SizedBox(
         width: double.infinity,
@@ -211,7 +302,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 const SizedBox(width: AppSpace.sm),
                 Expanded(
                   child: Text(
-                    'Keep your source folders separately backed up. A StudyStream backup restores your learning data, not the media itself.',
+                    'Keep your source folders separately backed up. A Tangerine backup restores your learning data, not the media itself.',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ),
@@ -263,6 +354,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const SizedBox(height: AppSpace.xl),
           _SettingsGrid(children: [appearance, playback, reading, backup]),
           const SizedBox(height: AppSpace.md),
+          Wrap(
+            spacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => context.push('/player-settings'),
+                icon: const Icon(Icons.keyboard),
+                label: const Text('Player controls & engine'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => context.push('/playlists'),
+                icon: const Icon(Icons.queue_music),
+                label: const Text('Queue & playlists'),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpace.md),
+          StreamBuilder<List<AppSetting>>(
+            stream: database.select(database.appSettings).watch(),
+            builder: (context, snapshot) => SwitchListTile(
+              title: const Text('Allow paired players to control playback'),
+              subtitle: const Text(
+                'Approved devices can play, pause and seek the host player while the server is running. Off by default; device revocation removes access.',
+              ),
+              value:
+                  snapshot.data?.any(
+                    (setting) =>
+                        setting.key == 'sync.allowPlaybackControl' &&
+                        setting.value == 'true',
+                  ) ??
+                  false,
+              onChanged: (value) =>
+                  database.setSetting('sync.allowPlaybackControl', '$value'),
+            ),
+          ),
+          StudySection(
+            title: 'Bring your MyVLC library',
+            description:
+                'Preview a library.json import before merging local media, resume positions and playlists.',
+            icon: Icons.move_to_inbox_outlined,
+            child: OutlinedButton.icon(
+              onPressed: _importingMyVlc ? null : () => _importMyVlc(database),
+              icon: const Icon(Icons.file_open_outlined),
+              label: Text(
+                _importingMyVlc
+                    ? 'Reading MyVLC library…'
+                    : 'Preview MyVLC import',
+              ),
+            ),
+          ),
+          const SizedBox(height: AppSpace.md),
           StreamBuilder<LanSyncState>(
             stream: server.states,
             initialData: server.state,
@@ -270,6 +411,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               server: server,
               state: snapshot.data ?? server.state,
               onMessage: _message,
+              onToggle: () async {
+                final runtime = ref.read(deviceRuntimeProvider.notifier);
+                if (server.state.running) {
+                  await runtime.stopServer();
+                } else {
+                  final configuration = await ref.read(
+                    deviceRuntimeProvider.future,
+                  );
+                  await runtime.startServer(
+                    name: configuration.serverName,
+                    port: configuration.port,
+                    autoStart: configuration.autoStart,
+                  );
+                }
+              },
             ),
           ),
           const SizedBox(height: AppSpace.md),
@@ -338,7 +494,7 @@ class _PlaybackPreferences extends StatelessWidget {
           description: 'Applied when a lesson has no saved speed.',
           control: DropdownButton<double>(
             value: value.defaultPlaybackSpeed,
-            items: const [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+            items: playbackSpeeds
                 .map(
                   (speed) =>
                       DropdownMenuItem(value: speed, child: Text('$speed×')),
@@ -457,18 +613,20 @@ class _SyncSection extends StatelessWidget {
     required this.server,
     required this.state,
     required this.onMessage,
+    required this.onToggle,
   });
 
   final LanSyncServer server;
   final LanSyncState state;
   final void Function(String message, {bool error, bool success}) onMessage;
+  final Future<void> Function() onToggle;
 
   @override
   Widget build(BuildContext context) {
     return StudySection(
-      title: 'Local network sync host',
+      title: 'Media server',
       description:
-          'Share learning progress with an approved compatible client on the same private network.',
+          'Share local media and learning progress with approved players on your private network.',
       icon: Icons.wifi_tethering_rounded,
       trailing: StudyStatusBadge(
         label: state.running ? 'Host running' : 'Host stopped',
@@ -556,7 +714,7 @@ class _SyncSection extends StatelessWidget {
               FilledButton.icon(
                 onPressed: () async {
                   try {
-                    state.running ? await server.stop() : await server.start();
+                    await onToggle();
                     onMessage(
                       state.running ? 'Sync host stopped' : 'Sync host started',
                       success: true,
@@ -873,13 +1031,14 @@ class _DiagnosticsSection extends StatelessWidget {
             icon: Icons.folder_outlined,
             title: 'External source files',
             description:
-                'StudyStream indexes your folders but does not move or duplicate them.',
+                'Folder libraries keep files in place. Add files copies selected media into app storage.',
           ),
           SizedBox(height: AppSpace.md),
           _InformationRow(
             icon: Icons.play_arrow_rounded,
-            title: 'StudyStream 1.0',
-            description: 'Private, folder-based media learning.',
+            title: 'Tangerine 1.0',
+            description:
+                'Media server and player, with StudyStream learning tools.',
           ),
         ],
       ),

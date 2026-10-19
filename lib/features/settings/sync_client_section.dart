@@ -66,7 +66,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
           _hosts = hosts;
           if (hosts.isEmpty) {
             _error =
-                'No hosts responded. Start a host on your desktop or enter its address manually.';
+                'No servers responded. Start Server mode on another device or enter its address manually.';
           }
         });
       }
@@ -92,9 +92,9 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
         final state = snapshot.data ?? client.state;
         final connected = state.address != null;
         return StudySection(
-          title: 'Connect to your desktop',
+          title: 'Connect to a media server',
           description:
-              'Browse and play a paired desktop library here. Notes, bookmarks, completion, and progress reconcile automatically while connected.',
+              'Browse and play a paired server’s library here. Notes, bookmarks, completion, and progress sync automatically while connected.',
           icon: Icons.devices_rounded,
           trailing: StudyStatusBadge(
             label: switch (state.phase) {
@@ -141,7 +141,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                   onPressed: _discovering ? null : _discover,
                   icon: const Icon(Icons.radar_rounded),
                   label: Text(
-                    _discovering ? 'Discovering…' : 'Find nearby hosts',
+                    _discovering ? 'Discovering…' : 'Find nearby servers',
                   ),
                 ),
                 for (final host in _hosts.entries)
@@ -158,7 +158,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                   keyboardType: TextInputType.url,
                   autocorrect: false,
                   decoration: const InputDecoration(
-                    labelText: 'Host address',
+                    labelText: 'Server address',
                     hintText: 'http://192.168.1.20:45831',
                   ),
                 ),
@@ -176,7 +176,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                   maxLength: 6,
                   decoration: const InputDecoration(
                     labelText: 'Pairing code',
-                    helperText: 'Shown in Settings on your desktop host',
+                    helperText: 'Shown on the other device’s Server screen',
                   ),
                 ),
                 const SizedBox(height: AppSpace.sm),

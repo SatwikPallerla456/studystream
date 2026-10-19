@@ -8,6 +8,7 @@ import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../shared/widgets/content_state.dart';
+import '../../shared/widgets/study_animated_list.dart';
 import '../../shared/widgets/study_ui.dart';
 
 enum _StudyKind { all, timed, pages, general }
@@ -402,30 +403,35 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
         tone: ContentStateTone.error,
       );
     }
-    if (snapshot.connectionState == ConnectionState.waiting) {
+    if (snapshot.connectionState == ConnectionState.waiting &&
+        !snapshot.hasData) {
       return const ContentLoadingState(label: 'Loading notes');
     }
     final notes = snapshot.data ?? const [];
     final visible = _filterNotes(notes);
-    if (notes.isEmpty) {
-      return const ContentState(
-        icon: Icons.note_add_outlined,
-        title: 'Your notes will collect here',
-        message:
-            'Open a lesson and use Study tools to capture a thought at a moment or page.',
-      );
-    }
-    if (visible.isEmpty) {
-      return const ContentState(
-        icon: Icons.filter_alt_off_rounded,
-        title: 'No matching notes',
-        message: 'Try another search, location type, or library filter.',
-      );
-    }
-    return _StudyEntryList(
-      count: visible.length,
-      itemBuilder: (context, index) {
-        final note = visible[index];
+    final emptyState = notes.isEmpty
+        ? const ContentState(
+            icon: Icons.note_add_outlined,
+            title: 'Your notes will collect here',
+            message:
+                'Open a lesson and use Study tools to capture a thought at a moment or page.',
+          )
+        : const ContentState(
+            icon: Icons.filter_alt_off_rounded,
+            title: 'No matching notes',
+            message: 'Try another search, location type, or library filter.',
+          );
+    return StudyAnimatedList<Note>(
+      key: const ValueKey('study-notes'),
+      items: visible,
+      itemId: (note) => note.id,
+      emptyState: emptyState,
+      padding: const EdgeInsets.all(AppSpace.xs),
+      separatorBuilder: (_, _) =>
+          const Divider(indent: 76, endIndent: AppSpace.sm),
+      listBuilder: (_, child) =>
+          StudySurface(padding: EdgeInsets.zero, child: child),
+      itemBuilder: (context, note) {
         return _StudyEntryRow(
           icon: Icons.notes_rounded,
           tone: StudyStatusTone.info,
@@ -463,30 +469,35 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
         tone: ContentStateTone.error,
       );
     }
-    if (snapshot.connectionState == ConnectionState.waiting) {
+    if (snapshot.connectionState == ConnectionState.waiting &&
+        !snapshot.hasData) {
       return const ContentLoadingState(label: 'Loading bookmarks');
     }
     final bookmarks = snapshot.data ?? const [];
     final visible = _filterBookmarks(bookmarks);
-    if (bookmarks.isEmpty) {
-      return const ContentState(
-        icon: Icons.bookmark_add_outlined,
-        title: 'No bookmarks yet',
-        message:
-            'Save useful moments and pages from the Study tools in any lesson.',
-      );
-    }
-    if (visible.isEmpty) {
-      return const ContentState(
-        icon: Icons.filter_alt_off_rounded,
-        title: 'No matching bookmarks',
-        message: 'Try another search, location type, or library filter.',
-      );
-    }
-    return _StudyEntryList(
-      count: visible.length,
-      itemBuilder: (context, index) {
-        final bookmark = visible[index];
+    final emptyState = bookmarks.isEmpty
+        ? const ContentState(
+            icon: Icons.bookmark_add_outlined,
+            title: 'No bookmarks yet',
+            message:
+                'Save useful moments and pages from the Study tools in any lesson.',
+          )
+        : const ContentState(
+            icon: Icons.filter_alt_off_rounded,
+            title: 'No matching bookmarks',
+            message: 'Try another search, location type, or library filter.',
+          );
+    return StudyAnimatedList<Bookmark>(
+      key: const ValueKey('study-bookmarks'),
+      items: visible,
+      itemId: (bookmark) => bookmark.id,
+      emptyState: emptyState,
+      padding: const EdgeInsets.all(AppSpace.xs),
+      separatorBuilder: (_, _) =>
+          const Divider(indent: 76, endIndent: AppSpace.sm),
+      listBuilder: (_, child) =>
+          StudySurface(padding: EdgeInsets.zero, child: child),
+      itemBuilder: (context, bookmark) {
         return _StudyEntryRow(
           icon: Icons.bookmark_rounded,
           tone: StudyStatusTone.warning,
@@ -781,27 +792,6 @@ class _StudyFilters extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _StudyEntryList extends StatelessWidget {
-  const _StudyEntryList({required this.count, required this.itemBuilder});
-
-  final int count;
-  final IndexedWidgetBuilder itemBuilder;
-
-  @override
-  Widget build(BuildContext context) {
-    return StudySurface(
-      padding: EdgeInsets.zero,
-      child: ListView.separated(
-        padding: const EdgeInsets.all(AppSpace.xs),
-        itemCount: count,
-        separatorBuilder: (_, _) =>
-            const Divider(indent: 76, endIndent: AppSpace.sm),
-        itemBuilder: itemBuilder,
-      ),
     );
   }
 }

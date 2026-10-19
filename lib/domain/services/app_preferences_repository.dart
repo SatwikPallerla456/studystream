@@ -17,8 +17,8 @@ class AppPreferencesRepository {
       defaultPlaybackSpeed: _double(
         values[0],
         fallback: 1,
-        minimum: 0.5,
-        maximum: 2,
+        minimum: 0.25,
+        maximum: 4,
       ),
       resumeRewindSeconds: _double(
         values[1],

@@ -8,7 +8,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import '../../data/playback/playback_engine.dart';
+import 'native_playback_tools.dart';
+import 'native_output_tools.dart';
+import '../../domain/services/player_controls_repository.dart';
+import '../../data/playback/remote_playback_controller.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -17,6 +21,7 @@ import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/services/progress_writer.dart';
 import '../../domain/services/resume_service.dart';
+import '../../domain/models/app_preferences.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
@@ -28,10 +33,12 @@ class MediaPlayerScreen extends ConsumerStatefulWidget {
     super.key,
     required this.itemId,
     this.initialPositionSeconds,
+    this.fromQueue = false,
   });
 
   final String itemId;
   final double? initialPositionSeconds;
+  final bool fromQueue;
 
   @override
   ConsumerState<MediaPlayerScreen> createState() => _MediaPlayerScreenState();
@@ -42,25 +49,29 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   late final AppDatabase _database;
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Item? _item;
-  Player? _player;
-  VideoController? _videoController;
+  PlaybackEngine? _player;
   MediaProgressWriter? _progressWriter;
   String? _error;
   bool _loading = true;
   bool _navigating = false;
   bool _completionHandled = false;
   double _speed = 1;
+  PlayerControls _controls = PlayerControls();
+  Timer? _sleepTimer;
+  Object? _remoteOwner;
+  late final RemotePlaybackController _remoteController;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _database = ref.read(appDatabaseProvider);
+    _remoteController = ref.read(remotePlaybackControllerProvider);
     _load();
   }
 
   Future<void> _load() async {
-    Player? initializing;
+    PlaybackEngine? initializing;
     try {
       if (_player != null) {
         for (final subscription in _subscriptions) {
@@ -70,7 +81,6 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         await _progressWriter?.dispose();
         await _player?.dispose();
         _player = null;
-        _videoController = null;
         _progressWriter = null;
       }
       _completionHandled = false;
@@ -95,8 +105,15 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       if (!mounted) return;
       final source = await ref.read(lanSyncClientProvider).sourceFor(item);
       if (!mounted) return;
-      final player = initializing = Player();
-      final controller = VideoController(player);
+      final controlRepository = PlayerControlsRepository(_database);
+      _controls = await controlRepository.load();
+      final player = initializing = await PlaybackEngine.create(
+        nativePreferences: await controlRepository.nativePreferences(),
+        globalShortcuts: _controls.global,
+      );
+      if (player is NativeVlcEngine) {
+        _subscriptions.add(player.actions.listen(_performAction));
+      }
       final speed = saved?.playbackSpeed ?? preferences.defaultPlaybackSpeed;
       final exactPosition = widget.initialPositionSeconds;
       final resume = exactPosition == null
@@ -130,6 +147,16 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         return;
       }
       await player.setRate(speed);
+      if (player is NativeVlcEngine) {
+        await (await NativePlaybackSettings.load(
+          _database,
+          item.id,
+        )).apply(player);
+      }
+      final subtitle = await _database.getSetting('subtitle.${item.id}');
+      if (subtitle != null && await File(subtitle).exists()) {
+        await player.setSubtitleTrack(SubtitleTrack.uri(subtitle));
+      }
       if (resume > 0) {
         await player.seek(Duration(milliseconds: (resume * 1000).round()));
       }
@@ -207,11 +234,52 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       setState(() {
         _item = item;
         _player = player;
-        _videoController = controller;
         _progressWriter = writer;
         _speed = speed;
         _loading = false;
       });
+      _remoteOwner = _remoteController.attach(
+        status: () => {
+          'active': mounted && _player != null,
+          'itemId': item.id,
+          'title': item.userTitle ?? item.title,
+          'playing': player.state.playing,
+          'position': player.state.position.inMilliseconds / 1000,
+          'duration': player.state.duration.inMilliseconds / 1000,
+          'rate': player.state.rate,
+          'volume': player.state.volume,
+        },
+        perform: (action, value) async {
+          if (!mounted) return;
+          switch (action) {
+            case 'play':
+              await player.play();
+            case 'pause':
+              await player.pause();
+              await _progressWriter?.flush();
+            case 'seek':
+              await player.seek(
+                Duration(
+                  milliseconds: (value! * 1000).round().clamp(
+                    0,
+                    player.state.duration.inMilliseconds,
+                  ),
+                ),
+              );
+            case 'rate':
+              await _setSpeed(value!);
+            case 'volume':
+              await player.setVolume(value!);
+            case 'mute':
+              _toggleMute();
+            case 'next':
+              await _navigate(forward: true);
+            case 'previous':
+              await _navigate(forward: false);
+          }
+        },
+      );
+      if (widget.fromQueue) await player.play();
     } catch (error) {
       await initializing?.dispose();
       if (!mounted) return;
@@ -237,13 +305,13 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (message.contains('host') || message.contains('connect')) {
       return 'Connect to this library’s desktop host in Settings, then reopen the lesson.';
     }
-    return 'StudyStream could not start this lesson. Check that the file is accessible and try again.';
+    return 'Tangerine could not start this lesson. Check that the file is accessible and try again.';
   }
 
   Future<void> _completedNaturally({required bool autoAdvance}) async {
     final writer = _progressWriter;
     if (writer != null) await writer.flush(forceComplete: true);
-    if (autoAdvance) {
+    if (autoAdvance || widget.fromQueue) {
       await _navigate(forward: true, countdown: true);
     } else if (mounted) {
       ScaffoldMessenger.of(
@@ -261,11 +329,30 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (item == null) return;
     _navigating = true;
     await _progressWriter?.flush();
-    final next = forward
+    final queueRepository = ref.read(playerLibraryRepositoryProvider);
+    final queue = await queueRepository.load();
+    final queueActive = widget.fromQueue && queue.current?.itemId == item.id;
+    final nextId = queueActive
+        ? await queueRepository.advance(
+            currentItemId: item.id,
+            forward: forward,
+            automatic: countdown,
+          )
+        : null;
+    final next = queueActive
+        ? (nextId == null ? null : await _database.getItemById(nextId))
+        : forward
         ? await _database.getNextSequentialItem(item.id)
         : await _database.getPreviousSequentialItem(item.id);
+    if (queueActive && nextId == item.id && countdown) {
+      await _player?.seek(Duration.zero);
+      await _player?.play();
+      _completionHandled = false;
+      _navigating = false;
+      return;
+    }
     if (!mounted) return;
-    if (countdown) {
+    if (countdown && !queueActive) {
       final action = await showNextItemCountdownDialog(
         context: context,
         nextTitle: next == null
@@ -288,7 +375,9 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       context.go('/library/${item.libraryId}');
       return;
     }
-    context.pushReplacement(_routeFor(next));
+    context.pushReplacement(
+      '${_routeFor(next)}${queueActive ? '?queue=1' : ''}',
+    );
   }
 
   String _routeFor(Item item) => switch (item.itemType) {
@@ -301,6 +390,22 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     await _progressWriter?.flush();
     if (!mounted) return;
     context.go('/library/${_item?.libraryId ?? ''}');
+  }
+
+  Future<void> _showQueue() async {
+    final playing = _player?.state.playing ?? false;
+    await _player?.pause();
+    await _progressWriter?.flush();
+    if (!mounted) return;
+    final next = await context.push<String>(
+      '/playlists?current=${widget.itemId}',
+    );
+    if (!mounted) return;
+    if (next != null && (next != widget.itemId || !widget.fromQueue)) {
+      context.pushReplacement('/player/$next?queue=1');
+    } else if (playing || next != null) {
+      await _player?.play();
+    }
   }
 
   Future<void> _setSpeed(double speed) async {
@@ -361,6 +466,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       await player.setSubtitleTrack(
         SubtitleTrack.uri(path, title: picked!.files.single.name),
       );
+      await _database.setSetting('subtitle.${widget.itemId}', path);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('External subtitles loaded')),
@@ -489,6 +595,75 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         : 'Track ${track.id}';
   }
 
+  void _performAction(String action) {
+    switch (action) {
+      case 'playPause':
+        _togglePlay();
+      case 'seekBack':
+        _seekRelative(-_controls.skipSeconds);
+      case 'seekForward':
+        _seekRelative(_controls.skipSeconds);
+      case 'mute':
+        _toggleMute();
+      case 'next':
+        unawaited(_navigate(forward: true));
+      case 'previous':
+        unawaited(_navigate(forward: false));
+      case 'volumeUp':
+        _player?.setVolume(
+          (_player!.state.volume + _controls.volumeStep).clamp(0, 100),
+        );
+      case 'volumeDown':
+        _player?.setVolume(
+          (_player!.state.volume - _controls.volumeStep).clamp(0, 100),
+        );
+      case 'fullscreen':
+        if (_player is NativeVlcEngine) {
+          (_player! as NativeVlcEngine).toggleFullscreen();
+        }
+      case 'miniPlayer':
+        if (_player is NativeVlcEngine) {
+          (_player! as NativeVlcEngine).toggleMini();
+        }
+      case 'nextFrame':
+        if (_player is NativeVlcEngine) {
+          (_player! as NativeVlcEngine).nextFrame();
+        }
+    }
+  }
+
+  void _playerAction(String action) {
+    if (action == 'queue') _showQueue();
+    if (action == 'outputs' && _player is NativeVlcEngine) {
+      showStudyAdaptiveModal<void>(
+        context: context,
+        builder: (_) => NativeOutputTools(engine: _player! as NativeVlcEngine),
+      );
+    }
+    if (action.startsWith('sleep:')) _setSleep(int.parse(action.substring(6)));
+    if (action == 'complete') _setCompleted(true);
+    if (action == 'incomplete') _setCompleted(false);
+  }
+
+  void _setSleep(int minutes) {
+    _sleepTimer?.cancel();
+    if (minutes > 0) {
+      _sleepTimer = Timer(Duration(minutes: minutes), () async {
+        await _player?.pause();
+        await _progressWriter?.flush();
+      });
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          minutes == 0
+              ? 'Sleep timer cancelled'
+              : 'Playback will pause in $minutes minutes',
+        ),
+      ),
+    );
+  }
+
   void _togglePlay() => _player?.playOrPause();
 
   Future<void> _setWakelock(bool enabled) async {
@@ -535,6 +710,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _sleepTimer?.cancel();
+    _remoteController.detach(_remoteOwner);
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }
@@ -550,16 +727,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     final compact = MediaQuery.sizeOf(context).width < 700;
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.space): _togglePlay,
-        const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
-            _seekRelative(-10),
-        const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-            _seekRelative(10),
-        const SingleActivator(LogicalKeyboardKey.keyM): _toggleMute,
-        const SingleActivator(LogicalKeyboardKey.keyN): () =>
-            _navigate(forward: true),
-        const SingleActivator(LogicalKeyboardKey.keyP): () =>
-            _navigate(forward: false),
+        for (final binding in _controls.local.entries)
+          ?PlayerControls.activator(binding.value): () => _performAction(binding.key),
       },
       child: Focus(
         autofocus: true,
@@ -572,6 +741,19 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             showHome: true,
             onBack: _back,
             actions: [
+              if (_player is NativeVlcEngine)
+                IconButton(
+                  tooltip: 'Playback tools',
+                  onPressed: () => showStudyAdaptiveModal<void>(
+                    context: context,
+                    builder: (_) => NativePlaybackTools(
+                      engine: _player! as NativeVlcEngine,
+                      database: _database,
+                      itemId: widget.itemId,
+                    ),
+                  ),
+                  icon: const Icon(Icons.tune),
+                ),
               if (!compact)
                 IconButton(
                   tooltip: 'Previous lesson',
@@ -595,7 +777,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                   tooltip: 'Playback speed',
                   initialValue: _speed,
                   onSelected: _setSpeed,
-                  itemBuilder: (_) => [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+                  itemBuilder: (_) => playbackSpeeds
                       .map(
                         (speed) =>
                             PopupMenuItem(value: speed, child: Text('$speed×')),
@@ -613,8 +795,27 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                 ),
                 PopupMenuButton<String>(
                   tooltip: 'Lesson actions',
-                  onSelected: (value) => _setCompleted(value == 'complete'),
-                  itemBuilder: (_) => const [
+                  onSelected: _playerAction,
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: 'queue',
+                      child: Text('Queue & playlists'),
+                    ),
+                    if (_player is NativeVlcEngine)
+                      const PopupMenuItem(
+                        value: 'outputs',
+                        child: Text('Outputs & windows'),
+                      ),
+                    for (final minutes in [15, 30, 60, 0])
+                      PopupMenuItem(
+                        value: 'sleep:$minutes',
+                        child: Text(
+                          minutes == 0
+                              ? 'Cancel sleep timer'
+                              : 'Sleep in $minutes minutes',
+                        ),
+                      ),
+
                     PopupMenuItem(
                       value: 'complete',
                       child: Text('Mark complete'),
@@ -636,6 +837,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                 PopupMenuButton<String>(
                   tooltip: 'Player options',
                   onSelected: (value) {
+                    _playerAction(value);
                     if (value == 'previous') _navigate(forward: false);
                     if (value == 'next') _navigate(forward: true);
                     if (value == 'complete') _setCompleted(true);
@@ -646,6 +848,24 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                     }
                   },
                   itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: 'queue',
+                      child: Text('Queue & playlists'),
+                    ),
+                    if (_player is NativeVlcEngine)
+                      const PopupMenuItem(
+                        value: 'outputs',
+                        child: Text('Outputs & windows'),
+                      ),
+                    for (final minutes in [15, 30, 60, 0])
+                      PopupMenuItem(
+                        value: 'sleep:$minutes',
+                        child: Text(
+                          minutes == 0
+                              ? 'Cancel sleep timer'
+                              : 'Sleep in $minutes minutes',
+                        ),
+                      ),
                     const PopupMenuItem(
                       value: 'previous',
                       child: Text('Previous lesson'),
@@ -659,15 +879,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                       value: 'tracks',
                       child: Text('Audio and subtitles'),
                     ),
-                    for (final speed in const [
-                      0.5,
-                      0.75,
-                      1.0,
-                      1.25,
-                      1.5,
-                      1.75,
-                      2.0,
-                    ])
+                    for (final speed in playbackSpeeds)
                       PopupMenuItem(
                         value: 'speed:$speed',
                         child: Text(
@@ -694,6 +906,77 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       ),
     );
   }
+
+  Widget _nativeTransport() => StreamBuilder<Duration>(
+    stream: _player!.stream.position,
+    initialData: _player!.state.position,
+    builder: (context, snapshot) {
+      final player = _player!;
+      final duration = player.state.duration.inMilliseconds.toDouble();
+      return SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Slider(
+                value: (snapshot.data ?? Duration.zero).inMilliseconds
+                    .clamp(0, duration > 0 ? duration : 1)
+                    .toDouble(),
+                max: duration > 0 ? duration : 1,
+                onChanged: duration > 0
+                    ? (value) =>
+                          player.seek(Duration(milliseconds: value.round()))
+                    : null,
+              ),
+              Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  StreamBuilder<bool>(
+                    stream: player.stream.playing,
+                    initialData: player.state.playing,
+                    builder: (context, playing) => IconButton(
+                      tooltip: playing.data == true ? 'Pause' : 'Play',
+                      color: Colors.white,
+                      onPressed: _togglePlay,
+                      icon: Icon(
+                        playing.data == true ? Icons.pause : Icons.play_arrow,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Back 10 seconds',
+                    color: Colors.white,
+                    onPressed: () => _seekRelative(-10),
+                    icon: const Icon(Icons.replay_10),
+                  ),
+                  IconButton(
+                    tooltip: 'Forward 10 seconds',
+                    color: Colors.white,
+                    onPressed: () => _seekRelative(10),
+                    icon: const Icon(Icons.forward_10),
+                  ),
+                  IconButton(
+                    tooltip: 'Next frame',
+                    color: Colors.white,
+                    onPressed: () => (player as NativeVlcEngine).nextFrame(),
+                    icon: const Icon(Icons.skip_next),
+                  ),
+                  Text(
+                    '${_AudioSurface._time(snapshot.data ?? Duration.zero)} / ${_AudioSurface._time(player.state.duration)}',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
 
   Widget _body() {
     if (_loading) return const _PlayerLoadingState();
@@ -738,16 +1021,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     }
     return ColoredBox(
       color: context.studyColors.player,
-      child: Stack(
-        fit: StackFit.expand,
+      child: Column(
         children: [
-          Center(
-            child: Video(
-              controller: _videoController!,
-              controls: AdaptiveVideoControls,
-              fit: BoxFit.contain,
-            ),
-          ),
+          Expanded(child: _player!.videoSurface()),
+          if (_player is NativeVlcEngine) _nativeTransport(),
           StreamBuilder<bool>(
             stream: _player!.stream.buffering,
             initialData: _player!.state.buffering,
@@ -807,7 +1084,7 @@ class _AudioSurface extends StatelessWidget {
     required this.onStudy,
   });
 
-  final Player player;
+  final PlaybackEngine player;
   final Item item;
   final double speed;
   final ValueChanged<double> onSetSpeed;
@@ -846,8 +1123,8 @@ class _AudioSurface extends StatelessWidget {
                     radius: AppRadius.xl,
                   ),
                   const SizedBox(height: AppSpace.lg),
-                  const StudyStatusBadge(
-                    label: 'Audio lesson',
+                  StudyStatusBadge(
+                    label: 'Audio · ${player.backendName}',
                     icon: Icons.graphic_eq_rounded,
                     tone: StudyStatusTone.primary,
                   ),

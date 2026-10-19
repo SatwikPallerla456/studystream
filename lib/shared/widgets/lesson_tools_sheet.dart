@@ -6,6 +6,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import 'content_state.dart';
+import 'study_animated_list.dart';
 import 'study_ui.dart';
 
 Future<void> showLessonToolsSheet({
@@ -415,15 +416,19 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             ),
           );
         }
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.all(AppSpace.md),
             child: ContentLoadingState(label: 'Loading lesson notes'),
           );
         }
         final notes = snapshot.data ?? const [];
-        if (notes.isEmpty) {
-          return Padding(
+        return StudyAnimatedList<Note>(
+          key: const ValueKey('lesson-notes'),
+          items: notes,
+          itemId: (note) => note.id,
+          emptyState: Padding(
             padding: const EdgeInsets.all(AppSpace.md),
             child: ContentState(
               icon: Icons.note_add_outlined,
@@ -437,14 +442,10 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
               ),
               compact: true,
             ),
-          );
-        }
-        return ListView.separated(
+          ),
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-          itemCount: notes.length,
           separatorBuilder: (_, _) => const SizedBox(height: 8),
-          itemBuilder: (context, index) {
-            final note = notes[index];
+          itemBuilder: (context, note) {
             return StudySurface(
               padding: EdgeInsets.zero,
               child: ListTile(
@@ -502,15 +503,19 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             ),
           );
         }
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.all(AppSpace.md),
             child: ContentLoadingState(label: 'Loading lesson bookmarks'),
           );
         }
         final bookmarks = snapshot.data ?? const [];
-        if (bookmarks.isEmpty) {
-          return Padding(
+        return StudyAnimatedList<Bookmark>(
+          key: const ValueKey('lesson-bookmarks'),
+          items: bookmarks,
+          itemId: (bookmark) => bookmark.id,
+          emptyState: Padding(
             padding: const EdgeInsets.all(AppSpace.md),
             child: ContentState(
               icon: Icons.bookmark_add_outlined,
@@ -524,14 +529,10 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
               ),
               compact: true,
             ),
-          );
-        }
-        return ListView.separated(
+          ),
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-          itemCount: bookmarks.length,
           separatorBuilder: (_, _) => const SizedBox(height: 8),
-          itemBuilder: (context, index) {
-            final bookmark = bookmarks[index];
+          itemBuilder: (context, bookmark) {
             return StudySurface(
               padding: EdgeInsets.zero,
               child: ListTile(

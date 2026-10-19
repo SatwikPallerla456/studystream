@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:study_stream/app.dart';
 import 'package:study_stream/core/theme/app_theme.dart';
 import 'package:study_stream/data/db/app_database.dart';
@@ -16,9 +17,11 @@ import 'package:study_stream/features/reader/pdf_reader_screen.dart';
 import 'package:study_stream/features/search/search_screen.dart';
 import 'package:study_stream/features/settings/settings_screen.dart';
 import 'package:study_stream/features/study/study_screen.dart';
+import 'package:study_stream/shared/widgets/continue_item_tile.dart';
+import 'package:study_stream/shared/widgets/study_ui.dart';
 
 void main() {
-  testWidgets('main app router presents the redesigned empty Home state', (
+  testWidgets('first launch chooses a device mode and opens the media Home', (
     tester,
   ) async {
     final database = _database();
@@ -32,9 +35,13 @@ void main() {
       wrapsMaterialApp: false,
     );
 
-    expect(find.text('Welcome back'), findsOneWidget);
-    expect(find.text('Build your first learning library'), findsOneWidget);
-    expect(find.text('Choose your first folder'), findsOneWidget);
+    expect(find.text('Use as player'), findsOneWidget);
+    expect(find.text('Set up server'), findsOneWidget);
+    await tester.tap(find.text('Use as player'));
+    await _settleUi(tester);
+    expect(find.text('Your media, all in one place'), findsOneWidget);
+    expect(find.text('Your library starts here'), findsOneWidget);
+    expect(find.text('Add your first library'), findsOneWidget);
     expect(find.byType(NavigationBar), findsNothing);
     expect(find.text('Libraries'), findsOneWidget);
     await _disposeTree(tester);
@@ -84,7 +91,12 @@ void main() {
       size: const Size(1280, 900),
     );
 
-    expect(find.text('Continue learning').hitTestable(), findsOneWidget);
+    await tester.ensureVisible(find.text('Continue Watching'));
+    expect(find.text('Continue Watching').hitTestable(), findsOneWidget);
+    expect(find.text('Continue Listening'), findsOneWidget);
+    expect(find.text('Continue Reading'), findsOneWidget);
+    expect(find.text('No audio in progress'), findsOneWidget);
+    expect(find.text('No reading in progress'), findsOneWidget);
     expect(find.text('Welcome to Dart'), findsWidgets);
     expect(find.text('Demo Course'), findsWidgets);
 
@@ -95,6 +107,82 @@ void main() {
     await tester.tap(find.byTooltip('List view').hitTestable());
     await _settleUi(tester);
     expect(find.text('Demo Course').hitTestable(), findsOneWidget);
+    await _disposeTree(tester);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Home groups resume cards and opens their existing routes', (
+    tester,
+  ) async {
+    final database = _database();
+    addTearDown(database.close);
+    await tester.runAsync(() => _seedContinueActivity(database));
+    final router = GoRouter(
+      routes: [
+        GoRoute(path: '/', builder: (_, _) => const HomeScreen()),
+        GoRoute(
+          path: '/player/:id',
+          builder: (_, state) => Scaffold(
+            body: Text('Opened media ${state.pathParameters['id']}'),
+          ),
+        ),
+        GoRoute(
+          path: '/pdf/:id',
+          builder: (_, state) => Scaffold(
+            body: Text('Opened document ${state.pathParameters['id']}'),
+          ),
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await _pumpApp(
+      tester,
+      database: database,
+      home: MaterialApp.router(theme: AppTheme.light(), routerConfig: router),
+      size: const Size(1280, 900),
+      wrapsMaterialApp: false,
+    );
+
+    for (final (type, id, percent, destination) in [
+      ('video', 'video', 35.0, 'Opened media video'),
+      ('audio', 'audio', 20.0, 'Opened media audio'),
+      ('pdf', 'pdf', 25.0, 'Opened document pdf'),
+    ]) {
+      final section = find.byKey(ValueKey('continue-$type'));
+      final card = find.descendant(
+        of: section,
+        matching: find.byType(ContinueItemTile),
+      );
+      expect(card, findsOneWidget);
+      final entry = tester.widget<ContinueItemTile>(card).entry;
+      expect(entry.item.id, id);
+      expect(entry.item.itemType, type);
+      expect(entry.progressPercent, percent);
+      await tester.ensureVisible(card);
+      await tester.tap(card);
+      await _settleUi(tester);
+      expect(find.text(destination), findsOneWidget);
+      router.pop();
+      await _settleUi(tester);
+    }
+
+    // Completing a lesson removes only its card; other sections retain theirs.
+    await tester.runAsync(() async {
+      final pdf = (await database.getItemById('pdf'))!;
+      await database.setItemCompletion(item: pdf, completed: true);
+    });
+    await _settleUi(tester);
+    expect(find.text('No reading in progress'), findsOneWidget);
+    expect(find.byType(ContinueItemTile), findsNWidgets(2));
+    expect(
+      (await database.getPlaybackByItemId('video'))!.lastPositionSeconds,
+      42,
+    );
+    expect(
+      (await database.getPlaybackByItemId('audio'))!.resumePositionSeconds,
+      12,
+    );
+    expect((await database.getReadingByItemId('pdf'))!.resumePage, 30);
     await _disposeTree(tester);
     expect(tester.takeException(), isNull);
   });
@@ -121,6 +209,87 @@ void main() {
     await _settleUi(tester);
     expect(find.text('Dart Handbook'), findsOneWidget);
     expect(find.text('Not started'), findsOneWidget);
+    await _disposeTree(tester);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('nested sections collapse without changing the selected lesson', (
+    tester,
+  ) async {
+    final database = _database();
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      await _seed(database);
+      await database.upsertSection(
+        SectionsCompanion.insert(
+          id: 'nested',
+          libraryId: 'library',
+          title: 'Deeper topic',
+          parentSectionId: const Value('section-1'),
+          orderIndex: 2,
+          folderPath: '/missing/demo-course/getting-started/deeper',
+        ),
+      );
+      await database.upsertItem(
+        ItemsCompanion.insert(
+          id: 'nested-video',
+          libraryId: 'library',
+          sectionId: 'nested',
+          title: 'Nested lesson',
+          filename: 'nested.mp4',
+          filePath: '/missing/demo-course/getting-started/deeper/nested.mp4',
+          relativePath: 'getting-started/deeper/nested.mp4',
+          itemType: 'video',
+          orderIndex: 0,
+        ),
+      );
+    });
+    await _pumpApp(
+      tester,
+      database: database,
+      home: const LibraryScreen(libraryId: 'library'),
+      size: const Size(1024, 1000),
+    );
+    await tester.tap(find.text('Deeper topic').hitTestable());
+    await _settleUi(tester);
+    expect(find.text('Nested lesson'), findsOneWidget);
+    expect(
+      tester
+          .widget<StudySurface>(find.byKey(const ValueKey('section-nested')))
+          .selected,
+      isTrue,
+    );
+
+    await tester.tap(find.byTooltip('Collapse Getting Started'));
+    await _settleUi(tester);
+    expect(
+      find.byKey(const ValueKey('section-nested')).hitTestable(),
+      findsNothing,
+    );
+    expect(find.text('Nested lesson'), findsOneWidget);
+    // A database-driven rebuild/section change must retain collapsed folders.
+    await tester.tap(find.text('Reference').hitTestable());
+    await _settleUi(tester);
+    expect(find.text('Dart Handbook'), findsOneWidget);
+    expect(find.byTooltip('Expand Getting Started'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('section-nested')).hitTestable(),
+      findsNothing,
+    );
+    await tester.tap(find.byTooltip('Expand Getting Started'));
+    await _settleUi(tester);
+    expect(
+      find.byKey(const ValueKey('section-nested')).hitTestable(),
+      findsOneWidget,
+    );
+
+    tester.view.physicalSize = const Size(430, 1000);
+    await _settleUi(tester);
+    await tester.tap(find.byType(DropdownButtonFormField<String>));
+    await _settleUi(tester);
+    await tester.tap(find.text('Deeper topic · 0/1').hitTestable());
+    await _settleUi(tester);
+    expect(find.text('Nested lesson'), findsOneWidget);
     await _disposeTree(tester);
     expect(tester.takeException(), isNull);
   });
@@ -170,7 +339,7 @@ void main() {
     await _pumpApp(
       tester,
       database: database,
-      home: const StudyScreen(),
+      home: const Scaffold(body: StudyScreen()),
       size: const Size(1024, 900),
     );
 
@@ -181,6 +350,14 @@ void main() {
     expect(find.text('Key example'), findsOneWidget);
     expect(find.text('Bookmark'), findsOneWidget);
     expect(find.byTooltip('Bookmark actions'), findsOneWidget);
+    await tester.tap(find.byTooltip('Bookmark actions'));
+    await _settleUi(tester);
+    await tester.tap(find.text('Delete'));
+    await _settleUi(tester);
+    await tester.tap(find.text('Delete bookmark'));
+    await _settleUi(tester);
+    expect(find.text('Key example'), findsNothing);
+    expect(find.text('No bookmarks yet'), findsOneWidget);
     await _disposeTree(tester);
     expect(tester.takeException(), isNull);
   });
@@ -201,7 +378,7 @@ void main() {
       expect(find.text('Appearance'), findsOneWidget);
       expect(find.text('Playback'), findsOneWidget);
       expect(find.text('Backup & restore'), findsOneWidget);
-      expect(find.text('Local network sync host'), findsOneWidget);
+      expect(find.text('Media server'), findsOneWidget);
       expect(find.text('Keyboard shortcuts'), findsOneWidget);
       expect(
         find.textContaining('HTTP traffic is authenticated'),
@@ -286,6 +463,7 @@ void main() {
   ) async {
     final database = _database();
     addTearDown(database.close);
+    await tester.runAsync(() => _seedContinueActivity(database));
     tester.platformDispatcher.textScaleFactorTestValue = 1.7;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
 
@@ -297,6 +475,16 @@ void main() {
         home: const HomeScreen(),
         size: Size(width, 1000),
       );
+      for (final type in ['video', 'audio', 'pdf']) {
+        final card = find.descendant(
+          of: find.byKey(ValueKey('continue-$type')),
+          matching: find.byType(ContinueItemTile),
+        );
+        expect(card, findsOneWidget);
+        await tester.ensureVisible(card);
+        await tester.pump();
+        expect(card.hitTestable(), findsOneWidget);
+      }
       expect(
         tester.takeException(),
         isNull,
@@ -360,13 +548,13 @@ void main() {
 
     final scaffoldContext = tester.element(find.byType(Scaffold).first);
     expect(Theme.of(scaffoldContext).brightness, Brightness.dark);
-    expect(find.bySemanticsLabel(RegExp('StudyStream')), findsWidgets);
-    expect(find.bySemanticsLabel('Choose your first folder'), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('Tangerine')), findsWidgets);
+    expect(find.bySemanticsLabel('Add your first library'), findsOneWidget);
 
     final pointer = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await pointer.addPointer();
     await pointer.moveTo(
-      tester.getCenter(find.text('Choose your first folder').hitTestable()),
+      tester.getCenter(find.text('Add your first library').hitTestable()),
     );
     await tester.pump();
     await pointer.removePointer();
@@ -526,6 +714,44 @@ Future<void> _seed(AppDatabase database) async {
       positionSeconds: const Value(42),
       createdAt: now - 1000,
       updatedAt: now,
+      deviceId: 'test',
+    ),
+  );
+}
+
+Future<void> _seedContinueActivity(AppDatabase database) async {
+  await _seed(database);
+  final now = DateTime.now().millisecondsSinceEpoch;
+  await database.upsertItem(
+    ItemsCompanion.insert(
+      id: 'audio',
+      libraryId: 'library',
+      sectionId: 'section-1',
+      title: 'Dart audio lesson',
+      filename: 'lesson.mp3',
+      filePath: '/missing/demo-course/getting-started/lesson.mp3',
+      relativePath: 'getting-started/lesson.mp3',
+      itemType: 'audio',
+      orderIndex: 1,
+    ),
+  );
+  await database.upsertPlayback(
+    PlaybackProgressCompanion.insert(
+      itemId: 'audio',
+      lastPositionSeconds: const Value(22),
+      resumePositionSeconds: const Value(12),
+      percentWatched: const Value(20),
+      lastOpenedAt: Value(now + 1),
+      deviceId: 'test',
+    ),
+  );
+  await database.upsertReading(
+    ReadingProgressCompanion.insert(
+      itemId: 'pdf',
+      lastPage: const Value(30),
+      resumePage: const Value(30),
+      percentRead: const Value(25),
+      lastOpenedAt: Value(now + 2),
       deviceId: 'test',
     ),
   );

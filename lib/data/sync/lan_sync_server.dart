@@ -9,8 +9,11 @@ import 'package:drift/drift.dart' as drift;
 
 import '../../core/utils/id_utils.dart';
 import '../db/app_database.dart';
+import '../playback/remote_playback_controller.dart';
 import 'sync_snapshot_merger.dart';
+import 'approved_media_source.dart';
 import 'lan_discovery.dart';
+import 'web_player.dart';
 
 class LanSyncState {
   const LanSyncState({
@@ -18,16 +21,20 @@ class LanSyncState {
     this.port,
     this.pairingCode,
     this.error,
+    this.name = 'Tangerine server',
   });
 
   final bool running;
   final int? port;
   final String? pairingCode;
   final String? error;
+  final String name;
 }
 
 class LanSyncServer {
-  LanSyncServer(this.database);
+  LanSyncServer(this.database, {this.playbackController});
+
+  final RemotePlaybackController? playbackController;
 
   final AppDatabase database;
   final _states = StreamController<LanSyncState>.broadcast();
@@ -38,22 +45,37 @@ class LanSyncServer {
   StreamSubscription<HttpRequest>? _requestSubscription;
   Timer? _pairingTimer;
   String? _pairingCode;
+  String _name = 'Tangerine server';
+  Future<void>? _starting;
 
   LanSyncState _state = const LanSyncState(running: false);
 
   LanSyncState get state => _state;
   Stream<LanSyncState> get states => _states.stream;
 
-  Future<void> start({int port = 0}) async {
+  Future<void> start({int port = 0, String name = 'Tangerine server'}) =>
+      _starting ??= _start(
+        port: port,
+        name: name,
+      ).whenComplete(() => _starting = null);
+
+  Future<void> _start({required int port, required String name}) async {
     if (_server != null) return;
+    if (port < 0 ||
+        port > 65535 ||
+        name.trim().isEmpty ||
+        name.trim().length > 80) {
+      throw const FormatException('Enter a server name and a valid port.');
+    }
+    _name = name.trim();
     try {
       final server = await HttpServer.bind(
         InternetAddress.anyIPv4,
         port,
-        shared: true,
+        shared: false,
       );
       _server = server;
-      await _discovery.advertise(server.port);
+      await _discovery.advertise(server.port, name: _name);
       regeneratePairingCode();
       _requestSubscription = server.listen(
         (request) => unawaited(
@@ -71,6 +93,8 @@ class LanSyncServer {
             running: true,
             port: server.port,
             error: error.toString(),
+            pairingCode: _pairingCode,
+            name: _name,
           ),
         ),
       );
@@ -79,9 +103,16 @@ class LanSyncServer {
           running: true,
           port: server.port,
           pairingCode: _pairingCode,
+          name: _name,
         ),
       );
     } catch (error) {
+      _pairingTimer?.cancel();
+      _discovery.close();
+      await _requestSubscription?.cancel();
+      await _server?.close(force: true);
+      _server = null;
+      _requestSubscription = null;
       _emit(LanSyncState(running: false, error: error.toString()));
       rethrow;
     }
@@ -92,7 +123,7 @@ class LanSyncServer {
     _pairingTimer?.cancel();
     _pairingTimer = Timer(const Duration(minutes: 10), () {
       _pairingCode = null;
-      _emit(LanSyncState(running: true, port: _server?.port));
+      _emit(LanSyncState(running: true, port: _server?.port, name: _name));
     });
     if (_server != null) {
       _emit(
@@ -100,17 +131,24 @@ class LanSyncServer {
           running: true,
           port: _server?.port,
           pairingCode: _pairingCode,
+          name: _name,
         ),
       );
     }
   }
 
   Future<void> stop() async {
+    try {
+      await _starting;
+    } on Object {
+      /* Failed starts are already cleaned up. */
+    }
     _pairingTimer?.cancel();
     _discovery.close();
     await _requestSubscription?.cancel();
     await _server?.close(force: true);
     _server = null;
+    _pairingCode = null;
     _requestSubscription = null;
     _emit(const LanSyncState(running: false));
   }
@@ -126,10 +164,31 @@ class LanSyncServer {
         ..set('X-Content-Type-Options', 'nosniff')
         ..set('Cache-Control', 'no-store');
       final path = request.uri.pathSegments;
+      if ((request.method == 'GET' || request.method == 'HEAD') &&
+          request.uri.path == '/') {
+        request.response.headers
+          ..contentType = ContentType.html
+          ..set(
+            'Content-Security-Policy',
+            "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+          )
+          ..set('Referrer-Policy', 'no-referrer');
+        if (request.method == 'GET') request.response.write(webPlayerHtml);
+        await request.response.close();
+        return;
+      }
       if (request.method == 'GET' && request.uri.path == '/v1/health') {
         return await _json(request, HttpStatus.ok, {
           'service': 'StudyStream',
           'version': 1,
+          'name': _name,
+          'product': 'Tangerine',
+          'capabilities': [
+            'catalogue',
+            'streaming',
+            'range-requests',
+            'study-sync',
+          ],
         });
       }
       if (request.method == 'POST' && request.uri.path == '/v1/pair') {
@@ -137,6 +196,23 @@ class LanSyncServer {
       }
       final device = await _authorise(request);
       if (device == null) return;
+      if (request.method == 'GET' && request.uri.path == '/v1/session') {
+        return await _json(request, HttpStatus.ok, {
+          'deviceId': device.id,
+          'name': _name,
+        });
+      }
+      if (request.method == 'POST' && request.uri.path == '/v1/logout') {
+        await database.revokeDevice(device.id);
+        request.response.cookies.add(
+          Cookie('myvlc_session', '')
+            ..path = '/v1'
+            ..httpOnly = true
+            ..sameSite = SameSite.strict
+            ..maxAge = 0,
+        );
+        return await _json(request, HttpStatus.ok, {'status': 'disconnected'});
+      }
       await database.upsertKnownDevice(
         device
             .toCompanion(true)
@@ -147,8 +223,39 @@ class LanSyncServer {
               ),
             ),
       );
+      if (request.uri.path == '/v1/playback') {
+        final enabled =
+            await database.getSetting('sync.allowPlaybackControl') == 'true';
+        if (request.method == 'GET') {
+          return await _json(request, HttpStatus.ok, {
+            'enabled': enabled,
+            if (enabled) ...?playbackController?.status,
+          });
+        }
+        if (request.method == 'POST') {
+          if (!enabled ||
+              playbackController == null ||
+              playbackController!.status['active'] != true) {
+            return await _json(request, HttpStatus.conflict, {
+              'error':
+                  'Host playback control is disabled or no player is open.',
+            });
+          }
+          final body = await _readJson(request);
+          final action = body['action'];
+          final value = body['value'];
+          if (action is! String || value != null && value is! num) {
+            throw const FormatException('Invalid player command.');
+          }
+          await playbackController!.execute(
+            action,
+            (value as num?)?.toDouble(),
+          );
+          return await _json(request, HttpStatus.ok, {'status': 'applied'});
+        }
+      }
       if (request.method == 'GET' && request.uri.path == '/v1/snapshot') {
-        final snapshot = await database.exportSyncData();
+        final snapshot = await _hostedSnapshot();
         await database.markDeviceSynced(
           device.id,
           address: request.connectionInfo?.remoteAddress.address,
@@ -157,7 +264,9 @@ class LanSyncServer {
       }
       if (request.method == 'POST' && request.uri.path == '/v1/snapshot') {
         final body = await _readJson(request);
-        await SyncSnapshotMerger(database).merge(body);
+        await SyncSnapshotMerger(
+          database,
+        ).merge(body, allowedLibraryIds: await _hostedLibraryIds());
         await database.markDeviceSynced(
           device.id,
           address: request.connectionInfo?.remoteAddress.address,
@@ -229,23 +338,108 @@ class LanSyncServer {
       ),
     );
     regeneratePairingCode();
+    request.response.cookies.add(
+      Cookie('myvlc_session', token)
+        ..path = '/v1'
+        ..httpOnly = true
+        ..sameSite = SameSite.strict
+        ..secure = request.requestedUri.scheme == 'https'
+        ..maxAge = 30 * 24 * 60 * 60,
+    );
     await _json(request, HttpStatus.created, {
       'deviceId': deviceId,
       'token': token,
     });
   }
 
+  Future<Set<String>> _hostedLibraryIds() async =>
+      (await database.select(database.libraries).get())
+          .where(
+            (library) =>
+                !library.rootFolderPath.startsWith('remote:') &&
+                !library.rootFolderPath.startsWith('import:'),
+          )
+          .map((library) => library.id)
+          .toSet();
+
+  Future<Map<String, Object?>> _hostedSnapshot() =>
+      database.transaction(() async {
+        final snapshot = await database.exportSyncData();
+        final localLibraries = await _hostedLibraryIds();
+        List<Map<String, dynamic>> rows(String key) =>
+            (snapshot[key] as List).cast<Map<String, dynamic>>();
+        final libraries = rows(
+          'libraries',
+        ).where((row) => localLibraries.contains(row['id'])).toList();
+        final sections = rows(
+          'sections',
+        ).where((row) => localLibraries.contains(row['libraryId'])).toList();
+        final sectionLibraries = {
+          for (final row in sections) row['id']: row['libraryId'],
+        };
+        final items = rows('items')
+            .where(
+              (row) =>
+                  localLibraries.contains(row['libraryId']) &&
+                  sectionLibraries[row['sectionId']] == row['libraryId'],
+            )
+            .toList();
+        final itemLibraries = {
+          for (final row in items) row['id']: row['libraryId'],
+        };
+        bool ownsItem(
+          Map<String, dynamic> row,
+          String libraryKey,
+          String itemKey,
+        ) =>
+            localLibraries.contains(row[libraryKey]) &&
+            (row[itemKey] == null ||
+                itemLibraries[row[itemKey]] == row[libraryKey]);
+        return {
+          'schemaVersion': snapshot['schemaVersion'],
+          'exportedAt': snapshot['exportedAt'],
+          'protocolVersion': snapshot['protocolVersion'],
+          'libraries': libraries,
+          'sections': sections,
+          'items': items,
+          for (final key in ['playback', 'reading'])
+            key: rows(
+              key,
+            ).where((row) => itemLibraries.containsKey(row['itemId'])).toList(),
+          for (final key in ['notes', 'bookmarks'])
+            key: rows(
+              key,
+            ).where((row) => ownsItem(row, 'libraryId', 'itemId')).toList(),
+          'mediaRecords': rows('mediaRecords').where((row) {
+            if (!ownsItem(row, 'library_id', 'item_id')) return false;
+            if (['collection', 'playlist', 'album'].contains(row['kind'])) {
+              final payload = jsonDecode(row['payload'] as String) as Map;
+              return (payload['items'] as List).every(
+                (id) => itemLibraries[id] == row['library_id'],
+              );
+            }
+            return true;
+          }).toList(),
+        };
+      });
+
   Future<KnownDevice?> _authorise(HttpRequest request) async {
     final header = request.headers.value(HttpHeaders.authorizationHeader);
-    if (header == null || !header.startsWith('Bearer ')) {
+    String? token = header?.startsWith('Bearer ') == true
+        ? header!.substring(7)
+        : null;
+    if (header == null) {
+      for (final cookie in request.cookies) {
+        if (cookie.name == 'myvlc_session') token = cookie.value;
+      }
+    }
+    if (token == null || token.isEmpty) {
       await _json(request, HttpStatus.unauthorized, {
         'error': 'Approval required',
       });
       return null;
     }
-    final tokenHash = sha256
-        .convert(utf8.encode(header.substring(7)))
-        .toString();
+    final tokenHash = sha256.convert(utf8.encode(token)).toString();
     final device = await database.getDeviceByTokenHash(tokenHash);
     if (device == null) {
       await _json(request, HttpStatus.forbidden, {
@@ -262,29 +456,18 @@ class LanSyncServer {
         'error': 'Media unavailable',
       });
     }
-    final library = await database.getLibraryById(item.libraryId);
-    if (library == null) {
-      return await _json(request, HttpStatus.notFound, {
-        'error': 'Library unavailable',
-      });
+    final File file;
+    try {
+      file = await resolveApprovedMedia(database, item);
+    } on MediaSourceException catch (error) {
+      return await _json(request, error.statusCode, {'error': error.message});
     }
-    if (!await File(item.filePath).exists() ||
-        !await Directory(library.rootFolderPath).exists()) {
-      return await _json(request, HttpStatus.notFound, {
-        'error': 'Media unavailable',
-      });
+    if (item.itemType == 'html') {
+      request.response.headers.set(
+        'Content-Security-Policy',
+        "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+      );
     }
-    final canonicalRoot = await Directory(
-      library.rootFolderPath,
-    ).resolveSymbolicLinks();
-    final canonicalFile = await File(item.filePath).resolveSymbolicLinks();
-    if (canonicalFile != canonicalRoot &&
-        !canonicalFile.startsWith('$canonicalRoot${Platform.pathSeparator}')) {
-      return await _json(request, HttpStatus.forbidden, {
-        'error': 'File is outside the approved library',
-      });
-    }
-    final file = File(item.filePath);
     final length = await file.length();
     if (length == 0) {
       request.response.headers

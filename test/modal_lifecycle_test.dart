@@ -101,6 +101,18 @@ void main() {
         await tester.runAsync(() => db.watchBookmarks().first),
         hasLength(1),
       );
+      await tester.tap(find.byTooltip('Bookmark actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete bookmark'));
+      await tester.pumpAndSettle();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 40)),
+      );
+      await tester.pumpAndSettle();
+      expect(await tester.runAsync(() => db.watchBookmarks().first), isEmpty);
+      expect(find.text('No bookmarks in this lesson'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);

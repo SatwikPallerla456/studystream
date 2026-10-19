@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart';
@@ -6,6 +7,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../domain/catalog/media_record_contract.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
+import '../indexer/library_source_store.dart';
 import '../../domain/services/sync_conflict_resolver.dart';
 
 part 'app_database.g.dart';
@@ -309,11 +313,14 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-    onCreate: (m) => m.createAll(),
+    onCreate: (m) async {
+      await m.createAll();
+      await _createMediaTables();
+    },
     onUpgrade: (m, from, to) async {
       if (from < 2) {
         await m.addColumn(libraries, libraries.description);
@@ -348,10 +355,186 @@ class AppDatabase extends _$AppDatabase {
       }
     },
     beforeOpen: (_) async {
+      await _createMediaTables();
+      await _backfillSources();
+      await LibrarySourceStore(this).createTables();
+      await LibrarySourceStore(this).backfill();
+      await CatalogIdentityStore(this).createTables();
+      await CatalogIdentityStore(this).backfill();
       await customStatement('PRAGMA foreign_keys = ON');
       await _createIndexes();
     },
   );
+
+  // Additive extension tables deliberately keep the original item schema/IDs.
+  Future<void> _createMediaTables() async {
+    await customStatement(
+      'CREATE TABLE IF NOT EXISTS library_sources (id TEXT PRIMARY KEY, library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE, root_path TEXT NOT NULL, namespace TEXT NOT NULL, unavailable INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)',
+    );
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_sources_library ON library_sources(library_id)',
+    );
+    await customStatement(
+      'CREATE TABLE IF NOT EXISTS media_records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE, item_id TEXT REFERENCES items(id) ON DELETE CASCADE, payload TEXT NOT NULL, updated_at INTEGER NOT NULL, device_id TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0)',
+    );
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_media_kind_library ON media_records(kind, library_id, item_id)',
+    );
+  }
+
+  Future<void> _backfillSources() async {
+    await customStatement(
+      "INSERT OR IGNORE INTO library_sources(id, library_id, root_path, namespace, unavailable, updated_at) SELECT 'legacy:' || id, id, root_folder_path, '', unavailable, updated_at FROM libraries WHERE root_folder_path NOT LIKE 'remote:%' AND root_folder_path NOT LIKE 'import:%'",
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> exportMediaRows(String table) async {
+    if (table != 'media_records' && table != 'library_sources') {
+      throw ArgumentError('Invalid media table');
+    }
+    return (await customSelect(
+      'SELECT * FROM $table',
+    ).get()).map((row) => row.data).toList();
+  }
+
+  Future<void> importMediaRows(
+    Map<String, dynamic> snapshot, {
+    bool includeSources = false,
+    Set<String>? allowedLibraryIds,
+  }) => transaction(() async {
+    for (final table in [
+      'media_records',
+      if (includeSources) 'library_sources',
+    ]) {
+      final input =
+          snapshot[table == 'media_records' ? 'mediaRecords' : 'sources'];
+      if (input == null) continue;
+      if (input is! List || input.length > 100000) {
+        throw const FormatException('Invalid media records');
+      }
+      for (final value in input) {
+        if (value is! Map<String, dynamic>) {
+          throw const FormatException('Invalid media record');
+        }
+        final row = Map<String, dynamic>.of(value);
+        final id = row['id'], libraryId = row['library_id'];
+        if (id is! String || libraryId is! String) {
+          throw const FormatException('Invalid media identity');
+        }
+        MediaRecordContract.identity(id);
+        MediaRecordContract.identity(libraryId);
+        MediaRecordContract.revision(row['updated_at']);
+        if (allowedLibraryIds != null &&
+            !allowedLibraryIds.contains(libraryId)) {
+          continue;
+        }
+        final existing = await customSelect(
+          'SELECT * FROM $table WHERE id = ?',
+          variables: [Variable(id)],
+        ).getSingleOrNull();
+        if (existing != null && existing.data['library_id'] != libraryId) {
+          throw const FormatException('Media record ownership cannot change');
+        }
+        final library = await getLibraryById(libraryId);
+        if (library == null) continue;
+        if (table == 'media_records') {
+          final kind = row['kind'], itemId = row['item_id'];
+          final payload = row['payload'], deviceId = row['device_id'];
+          if (kind is! String ||
+              itemId != null && itemId is! String ||
+              payload is! String ||
+              deviceId is! String ||
+              row['deleted'] is! int ||
+              ![0, 1].contains(row['deleted'])) {
+            throw const FormatException('Invalid media record fields');
+          }
+          MediaRecordContract.identity(deviceId);
+          if (utf8.encode(payload).length >
+              MediaRecordContract.maxPayloadBytes) {
+            throw const FormatException('Metadata is too large');
+          }
+          final decoded = jsonDecode(payload);
+          if (decoded is! Map<String, dynamic>) {
+            throw const FormatException('Metadata must be an object');
+          }
+          MediaRecordContract.validate(
+            id: id,
+            kind: kind,
+            libraryId: libraryId,
+            itemId: itemId as String?,
+            data: decoded,
+            allowUnknownKind: includeSources,
+          );
+          if (existing != null &&
+              (existing.data['kind'] != kind ||
+                  existing.data['item_id'] != itemId)) {
+            throw const FormatException('Media record ownership cannot change');
+          }
+          if (itemId != null) {
+            final item = await getItemById(itemId);
+            if (item == null) continue;
+            if (item.libraryId != libraryId) {
+              throw const FormatException('Item is outside this library');
+            }
+          }
+          if (['collection', 'playlist', 'album'].contains(kind)) {
+            for (final member in (decoded['items'] as List).cast<String>()) {
+              if ((await getItemById(member))?.libraryId != libraryId) {
+                throw const FormatException(
+                  'Collection item is outside this library',
+                );
+              }
+            }
+          }
+        } else {
+          final root = row['root_path'], namespace = row['namespace'];
+          if (root is! String ||
+              root.length > 32768 ||
+              !p.isAbsolute(root) ||
+              root.contains('\x00') ||
+              namespace is! String ||
+              p.basename(id) != id ||
+              id == '.' ||
+              id == '..' ||
+              (namespace.isEmpty
+                  ? id != 'legacy:$libraryId'
+                  : namespace != p.join('@sources', id)) ||
+              row['unavailable'] is! int ||
+              ![0, 1].contains(row['unavailable'])) {
+            throw const FormatException('Invalid library source');
+          }
+          if (existing != null && existing.data['namespace'] != namespace) {
+            throw const FormatException('Source namespace cannot change');
+          }
+        }
+        final columns = table == 'media_records'
+            ? [
+                'id',
+                'kind',
+                'library_id',
+                'item_id',
+                'payload',
+                'updated_at',
+                'device_id',
+                'deleted',
+              ]
+            : [
+                'id',
+                'library_id',
+                'root_path',
+                'namespace',
+                'unavailable',
+                'updated_at',
+              ];
+        await customStatement(
+          'INSERT INTO $table (${columns.join(',')}) VALUES (${columns.map((_) => '?').join(',')}) '
+          'ON CONFLICT(id) DO UPDATE SET ${columns.skip(1).map((c) => '$c = excluded.$c').join(',')} '
+          'WHERE excluded.updated_at > $table.updated_at',
+          columns.map((c) => row[c]).toList(),
+        );
+      }
+    }
+  });
 
   Future<void> _createIndexes() async {
     const statements = [
@@ -642,12 +825,21 @@ class AppDatabase extends _$AppDatabase {
     return orderedItems[adjacent];
   }
 
-  Stream<List<ContinueEntry>> watchRecentPlaybackEntries({int limit = 8}) {
+  Stream<List<ContinueEntry>> watchRecentPlaybackEntries({
+    int limit = 8,
+    String? itemType,
+  }) {
     final query =
         select(playbackProgress).join([
             innerJoin(items, items.id.equalsExp(playbackProgress.itemId)),
           ])
-          ..where(items.unavailable.not() & playbackProgress.completed.not())
+          ..where(
+            items.unavailable.not() &
+                playbackProgress.completed.not() &
+                items.itemType.isIn(
+                  itemType == null ? ['video', 'audio'] : [itemType],
+                ),
+          )
           ..orderBy([OrderingTerm.desc(playbackProgress.lastOpenedAt)])
           ..limit(limit);
     return query.watch().map(
@@ -1111,6 +1303,10 @@ class AppDatabase extends _$AppDatabase {
       'bookmarks': (await select(
         bookmarks,
       ).get()).map((e) => e.toJson()).toList(),
+      'sources': await exportMediaRows('library_sources'),
+      'itemAssets': (await customSelect('SELECT * FROM item_assets').get()).map((r)=>r.data).toList(),
+      'mediaRecords': await exportMediaRows('media_records'),
+      'catalogRows': await CatalogIdentityStore(this).exportRows(),
       'settings': (await select(
         appSettings,
       ).get()).map((e) => e.toJson()).toList(),
@@ -1146,13 +1342,22 @@ class AppDatabase extends _$AppDatabase {
           return safe;
         })
         .toList();
+    final mediaRows = (snapshot['mediaRecords']! as List)
+        .cast<Map<String, dynamic>>()
+        .map(MediaRecordContract.forTransport)
+        .whereType<Map<String, dynamic>>()
+        .toList();
     return {
-      ...snapshot,
+      'schemaVersion': 3, // Legacy transport adapter; independent of local schema.
+      'exportedAt': snapshot['exportedAt'],
       'protocolVersion': 1,
       'libraries': libraryRows,
       'sections': sectionRows,
       'items': itemRows,
-    }..remove('settings');
+      for (final key in ['playback', 'reading', 'notes', 'bookmarks'])
+        key: snapshot[key],
+      'mediaRecords': mediaRows,
+    };
   }
 
   Future<void> importData(Map<String, Object?> snapshot) async {
@@ -1160,7 +1365,7 @@ class AppDatabase extends _$AppDatabase {
     if (backupVersion is! int ||
         backupVersion < 1 ||
         backupVersion > schemaVersion) {
-      throw const FormatException('This is not a valid StudyStream backup.');
+      throw const FormatException('This is not a valid Tangerine backup.');
     }
     List<Map<String, dynamic>> rows(String key) {
       final value = snapshot[key];
@@ -1266,6 +1471,17 @@ class AppDatabase extends _$AppDatabase {
             await into(bookmarks).insertOnConflictUpdate(value);
           }
         }
+        await importMediaRows(snapshot, includeSources: true);
+        await _backfillSources();
+        for (final row in rows('itemAssets')) {
+          final itemId=row['item_id'], sourceId=row['source_id'], relative=row['relative_path'];
+          if(itemId is! String || sourceId is! String || relative is! String) throw const FormatException('Invalid asset binding');
+          final item=await getItemById(itemId);
+          if(item != null) await LibrarySourceStore(this).bind(item,sourceId,relative);
+        }
+        await LibrarySourceStore(this).backfill();
+        await CatalogIdentityStore(this).importRows(snapshot['catalogRows']);
+        await CatalogIdentityStore(this).backfill();
         for (final row in rows('settings')) {
           final remote = AppSetting.fromJson(row);
           if (remote.key == 'deviceId' || remote.key.startsWith('sync.')) {
@@ -1291,6 +1507,13 @@ class AppDatabase extends _$AppDatabase {
 
   Future<void> deleteLibraryCascade(String libraryId) async {
     await transaction(() async {
+      await customStatement(
+        'DELETE FROM library_sources WHERE library_id = ?',
+        [libraryId],
+      );
+      await customStatement('DELETE FROM media_records WHERE library_id = ?', [
+        libraryId,
+      ]);
       final itemRows = await getItemsForLibrary(libraryId);
       final ids = itemRows.map((e) => e.id).toList();
       await (delete(notes)..where((t) => t.libraryId.equals(libraryId))).go();

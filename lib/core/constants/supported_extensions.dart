@@ -9,6 +9,7 @@ enum ItemType {
   doc,
   ppt,
   epub,
+  cbz,
   other,
 }
 
@@ -22,16 +23,24 @@ const videoExtensions = {
   'mpg',
   'mpeg',
   'ts',
+  'm2ts',
+  'ogv',
+  '3gp',
+  'vob',
 };
 const audioExtensions = {
   'mp3',
   'm4a',
+  'm4b',
   'aac',
   'wav',
   'flac',
   'ogg',
   'opus',
   'wma',
+  'aiff',
+  'aif',
+  'alac',
 };
 const pdfExtensions = {'pdf'};
 const textExtensions = {'txt'};
@@ -65,6 +74,7 @@ ItemType inferItemType(String filename) {
   if (imageExtensions.contains(ext)) return ItemType.image;
   if (docExtensions.contains(ext)) return ItemType.doc;
   if (pptExtensions.contains(ext)) return ItemType.ppt;
+  if (ext == 'cbz') return ItemType.cbz;
   if (epubExtensions.contains(ext)) return ItemType.epub;
   return ItemType.other;
 }

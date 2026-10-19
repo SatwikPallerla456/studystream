@@ -148,7 +148,7 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
         _error =
             message.contains('missing') || message.contains('no longer exists')
             ? 'The resource file is missing or has moved. Relink it from the library to keep your progress.'
-            : 'StudyStream could not open this resource. The file may be inaccessible or unsupported.';
+            : 'Tangerine could not open this resource. The file may be inaccessible or unsupported.';
         _loading = false;
       });
     }
@@ -442,7 +442,7 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
         icon: Icons.open_in_new,
         title: '${item.itemType.toUpperCase()} requires another app',
         detail:
-            'StudyStream keeps this file organised and tracks manual completion, but does not pretend to render a format it cannot display reliably.',
+            'Tangerine keeps this file organised and tracks manual completion, but does not pretend to render a format it cannot display reliably.',
         buttonLabel: 'Open in another app',
         onOpen: _openExternal,
       ),

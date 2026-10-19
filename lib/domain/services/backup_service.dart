@@ -18,8 +18,8 @@ class BackupService {
     );
     final path = await FilePicker.platform.saveFile(
       bytes: bytes,
-      dialogTitle: 'Export StudyStream backup',
-      fileName: 'studystream-backup-${_dateStamp()}.json',
+      dialogTitle: 'Export Tangerine backup',
+      fileName: 'tangerine-backup-${_dateStamp()}.json',
       type: FileType.custom,
       allowedExtensions: const ['json'],
     );
@@ -35,7 +35,7 @@ class BackupService {
 
   Future<String?> importBackup() async {
     final picked = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Restore StudyStream backup',
+      dialogTitle: 'Restore Tangerine backup',
       type: FileType.custom,
       allowedExtensions: const ['json'],
       allowMultiple: false,
@@ -51,7 +51,7 @@ class BackupService {
     }
     final decoded = jsonDecode(await file.readAsString());
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('This is not a valid StudyStream backup.');
+      throw const FormatException('This is not a valid Tangerine backup.');
     }
     await database.importData(decoded);
     return path;

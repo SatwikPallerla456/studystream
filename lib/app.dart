@@ -4,25 +4,62 @@ import 'package:go_router/go_router.dart';
 
 import 'core/theme/app_theme.dart';
 import 'data/providers/app_providers.dart';
-import 'features/home/home_screen.dart';
+import 'features/setup/device_home.dart';
+import 'features/setup/mode_selection_screen.dart';
+import 'features/server/server_screen.dart';
+import 'features/server/network_screen.dart';
 import 'features/library/library_screen.dart';
+import 'features/library/library_sources_screen.dart';
+import 'features/media/media_details_screen.dart';
+import 'features/media/media_browse_screen.dart';
 import 'features/player/media_player_screen.dart';
 import 'features/reader/pdf_reader_screen.dart';
 import 'features/resource/resource_screen.dart';
+import 'features/playlists/playlists_screen.dart';
+import 'features/settings/player_controls_screen.dart';
 
 final _router = GoRouter(
   initialLocation: '/',
   routes: [
-    GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+    GoRoute(path: '/', builder: (context, state) => const DeviceHome()),
+    GoRoute(
+      path: '/mode',
+      builder: (context, state) => const ModeSelectionScreen(),
+    ),
+    GoRoute(
+      path: '/player-settings',
+      builder: (context, state) => const PlayerControlsScreen(),
+    ),
+    GoRoute(
+      path: '/playlists',
+      builder: (context, state) =>
+          PlaylistsScreen(currentItemId: state.uri.queryParameters['current']),
+    ),
+    GoRoute(path: '/server', builder: (context, state) => const ServerScreen()),
+    GoRoute(
+      path: '/network',
+      builder: (context, state) => const NetworkScreen(),
+    ),
+    GoRoute(path:'/library/:libraryId/sources',builder:(context,state)=>LibrarySourcesScreen(libraryId:state.pathParameters['libraryId']!)),
     GoRoute(
       path: '/library/:libraryId',
       builder: (context, state) =>
           LibraryScreen(libraryId: state.pathParameters['libraryId']!),
     ),
     GoRoute(
+      path: '/browse',
+      builder: (context, state) => const MediaBrowseScreen(),
+    ),
+    GoRoute(
+      path: '/details/:itemId',
+      builder: (context, state) =>
+          MediaDetailsScreen(itemId: state.pathParameters['itemId']!),
+    ),
+    GoRoute(
       path: '/player/:itemId',
       builder: (context, state) => MediaPlayerScreen(
         itemId: state.pathParameters['itemId']!,
+        fromQueue: state.uri.queryParameters['queue'] == '1',
         initialPositionSeconds: double.tryParse(
           state.uri.queryParameters['position'] ?? '',
         ),
@@ -50,7 +87,7 @@ class StudyMediaPlayerApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeProvider);
     return MaterialApp.router(
-      title: 'StudyStream',
+      title: 'Tangerine',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),

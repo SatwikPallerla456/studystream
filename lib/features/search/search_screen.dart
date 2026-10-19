@@ -199,7 +199,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         icon: Icons.cloud_off_rounded,
         title: 'Search is temporarily unavailable',
         message:
-            'StudyStream could not read the local search index. Try again in a moment.',
+            'Tangerine could not read the local search index. Try again in a moment.',
         action: FilledButton.icon(
           onPressed: () => _search(_controller.text),
           icon: const Icon(Icons.refresh_rounded),

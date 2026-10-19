@@ -35,7 +35,7 @@ void main() {
       await database.setSetting('resumeRewindSeconds', '-5');
       await database.setSetting('completionThreshold', 'invalid');
       final validated = await repository.load();
-      expect(validated.defaultPlaybackSpeed, 2);
+      expect(validated.defaultPlaybackSpeed, 4);
       expect(validated.resumeRewindSeconds, 0);
       expect(validated.completionThreshold, 0.90);
     },
