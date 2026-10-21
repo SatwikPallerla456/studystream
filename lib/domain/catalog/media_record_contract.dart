@@ -48,6 +48,8 @@ abstract final class MediaRecordContract {
     'album',
     'author',
     'series',
+    'volume',
+    'chapter',
     'track',
     'disc',
     'airDate',
@@ -243,11 +245,15 @@ abstract final class MediaRecordContract {
         'rating',
         'track',
         'disc',
+        'volume',
+        'chapter',
         'extra',
       })) {
         string(key);
       }
       number('year', 0, 9999, integer: true);
+      number('volume', 0, 100000, integer: true);
+      number('chapter', 0, 100000);
       number('season', 0, 100000, integer: true);
       number('episode', 0, 100000, integer: true);
       number('episodeEnd', 0, 100000, integer: true);

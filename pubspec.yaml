@@ -53,6 +53,7 @@ dependencies:
   webview_flutter: 4.14.1
   wakelock_plus: ^1.5.1
   flutter_secure_storage: ^10.0.0
+  flutter_svg: ^2.3.0
 
 dev_dependencies:
   flutter_test:
@@ -81,6 +82,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/brand/tangerine.png
+    - assets/brand/tmdb.svg
 
   # To add assets to your application, add an assets section, like this:
   # assets:

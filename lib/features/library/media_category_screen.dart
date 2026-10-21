@@ -11,6 +11,7 @@ import '../../shared/widgets/media_categories.dart';
 import '../media/media_browser_section.dart';
 import 'library_creation.dart';
 import 'library_scan_dialog.dart';
+import 'category_browse_section.dart';
 
 class MediaCategoryScreen extends ConsumerWidget {
   const MediaCategoryScreen({super.key, required this.kind});
@@ -83,17 +84,27 @@ class MediaCategoryScreen extends ConsumerWidget {
                 );
               },
             ),
-            MediaBrowserSection(
-              initialKind: kind.name,
-              lockCategory: true,
-              emptyIcon: mediaCategoryIcon(kind),
-              emptyAction: FilledButton.icon(
-                onPressed: () => createMediaLibrary(context, kind: kind),
-                icon: const Icon(Icons.add),
-                label: Text('Add ${kind.label.toLowerCase()} library'),
+            if (hasCategoryHierarchy(kind))
+              CategoryBrowseSection(
+                kind: kind,
+                emptyAction: FilledButton.icon(
+                  onPressed: () => createMediaLibrary(context, kind: kind),
+                  icon: const Icon(Icons.add),
+                  label: Text('Add ${kind.label.toLowerCase()} library'),
+                ),
+              )
+            else
+              MediaBrowserSection(
+                initialKind: kind.name,
+                lockCategory: true,
+                emptyIcon: mediaCategoryIcon(kind),
+                emptyAction: FilledButton.icon(
+                  onPressed: () => createMediaLibrary(context, kind: kind),
+                  icon: const Icon(Icons.add),
+                  label: Text('Add ${kind.label.toLowerCase()} library'),
+                ),
+                onOpenItem: (item) => context.push(MediaVisuals.route(item)),
               ),
-              onOpenItem: (item) => context.push(MediaVisuals.route(item)),
-            ),
           ],
         ),
       ),

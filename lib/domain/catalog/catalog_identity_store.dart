@@ -156,7 +156,7 @@ class CatalogIdentityStore {
       );
       await reindex(item);
     }
-    if (await db.getSetting('catalog.localHints.version') != '3') {
+    if (await db.getSetting('catalog.localHints.version') != '4') {
       var cursor = '';
       while (true) {
         final rows = await db
@@ -177,7 +177,7 @@ class CatalogIdentityStore {
         });
         cursor = rows.last.data['id'] as String;
       }
-      await db.setSetting('catalog.localHints.version', '3');
+      await db.setSetting('catalog.localHints.version', '4');
     }
     final unindexed = await db
         .customSelect(
@@ -477,6 +477,8 @@ class CatalogIdentityStore {
         ).hasMatch(title);
     final result = <String, dynamic>{
       ...file,
+      if ({'cbz', 'epub', 'pdf'}.contains(item.itemType))
+        ...CatalogHints.reading(item.filename, comic: item.itemType == 'cbz'),
       'category': CatalogHints.category(item.itemType, file),
       if (extraType != null) ...{'extra': true, 'extraType': extraType},
       if (useFolder && parent['title'] != null) 'title': parent['title'],
@@ -638,6 +640,8 @@ class CatalogIdentityStore {
       'album',
       'author',
       'series',
+      'volume',
+      'chapter',
       'disc',
       'track',
       'airDate',

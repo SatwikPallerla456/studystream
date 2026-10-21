@@ -8,6 +8,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import '../../core/utils/id_utils.dart';
 import '../../data/db/app_database.dart';
+import '../../data/reader/publication_cover.dart';
 import '../reader/reader_jobs.dart';
 import 'dart:math' as math;
 
@@ -17,7 +18,7 @@ class ThumbnailCache {
   Future<void> _queue = Future.value();
   final _owners = <String, int>{};
   String _key(Item item) =>
-      'v2:${item.id}:${item.fingerprint ?? '${item.modifiedAt}:${item.fileSize}'}:320:rgba';
+      'v3:${item.id}:${item.fingerprint ?? '${item.modifiedAt}:${item.fileSize}'}:320:rgba';
   ReaderLease<String?> acquire(Item item) {
     final key = _key(item);
     _owners[key] = (_owners[key] ?? 0) + 1;
@@ -65,7 +66,8 @@ class ThumbnailCache {
     if (item.unavailable || item.filePath.startsWith('remote:')) return null;
     final source = File(item.filePath);
     if (!await source.exists()) return null;
-    if (!['image', 'pdf', 'video'].contains(item.itemType)) return null;
+    if (!['image', 'pdf', 'video', 'cbz', 'epub'].contains(item.itemType))
+      return null;
     try {
       final directory = await Directory(
         '${(await getTemporaryDirectory()).path}/studystream-thumbnails',
@@ -75,11 +77,18 @@ class ThumbnailCache {
         await target.setLastModified(DateTime.now());
         return target.path;
       }
-      if (item.itemType == 'image') {
-        if (await source.length() > 32 * 1024 * 1024) return null;
-        final buffer = await ui.ImmutableBuffer.fromUint8List(
-          await source.readAsBytes(),
-        );
+      if ({'image', 'cbz', 'epub'}.contains(item.itemType)) {
+        if (item.itemType == 'image' &&
+            await source.length() > 32 * 1024 * 1024)
+          return null;
+        final bytes = item.itemType == 'image'
+            ? await source.readAsBytes()
+            : await PublicationCover.read(
+                item.filePath,
+                epub: item.itemType == 'epub',
+              );
+        if (bytes == null) return null;
+        final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
         ui.ImageDescriptor? descriptor;
         try {
           descriptor = await ui.ImageDescriptor.encoded(buffer);

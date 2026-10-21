@@ -31,6 +31,7 @@ class ReaderImagePage extends StatefulWidget {
     this.initialPoint = Offset.zero,
     this.initialViewState,
     required this.layoutKey,
+    this.onTapUp,
   });
   final BookPageSource source;
   final int page, targetWidth;
@@ -40,6 +41,7 @@ class ReaderImagePage extends StatefulWidget {
   final double initialZoom;
   final Offset initialPoint;
   final ReaderViewportState? initialViewState;
+  final GestureTapUpCallback? onTapUp;
   final ValueChanged<ReaderEdgeColors> onColors;
   final void Function(double zoom, Offset point, ReaderViewportState state)?
   onSettled;
@@ -257,6 +259,8 @@ class _ReaderImagePageState extends State<ReaderImagePage> {
           _restore(saved);
         }
         return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: widget.onTapUp,
           onDoubleTapDown: (details) => _tap = details.localPosition,
           onDoubleTap: () {
             final zoom = _transform.value.getMaxScaleOnAxis() > 1.05

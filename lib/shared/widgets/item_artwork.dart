@@ -10,27 +10,28 @@ import 'study_ui.dart';
 import 'remote_item_artwork.dart';
 
 final thumbnailCacheProvider = Provider((ref) => ThumbnailCache());
-final catalogArtworkPathProvider = FutureProvider.autoDispose.family<String?, Item>((
-  ref,
-  item,
-) async {
-  if (item.filePath.startsWith('remote:')) return null;
-  final db = ref.read(appDatabaseProvider);
-  // Matching emits an Items update. Keep already visible tiles in step with a
-  // new selection, clear or artwork override without changing the source file.
-  ref.watch(_catalogArtworkRevisionProvider(item.id));
-  final metadata = await MediaCatalogRepository(db).metadata(item);
-  return CatalogArtworkCache.instance.get(metadata['artworkUrl'] as String?);
-});
-final _catalogArtworkRevisionProvider = StreamProvider.autoDispose
-    .family<Item?, String>(
-      (ref, id) =>
-          (ref
-                  .read(appDatabaseProvider)
-                  .select(ref.read(appDatabaseProvider).items)
-                ..where((t) => t.id.equals(id)))
-              .watchSingleOrNull(),
-    );
+final catalogArtworkPathProvider = FutureProvider.autoDispose
+    .family<String?, Item>((ref, item) async {
+      if (item.filePath.startsWith('remote:')) return null;
+      final url = await ref.watch(_catalogArtworkUrlProvider(item).future);
+      final lease = CatalogArtworkCache.instance.acquire(url);
+      ref.onDispose(lease.release);
+      return lease.future;
+    });
+final _catalogArtworkUrlProvider = StreamProvider.autoDispose
+    .family<String?, Item>((ref, item) {
+      final db = ref.read(appDatabaseProvider);
+      // Map every catalog notification to its resolved URL before Riverpod compares
+      // values: the source Item itself need not change when its match changes.
+      return (db.select(
+        db.items,
+      )..where((t) => t.id.equals(item.id))).watchSingleOrNull().asyncMap(
+        (current) async => current == null
+            ? null
+            : (await MediaCatalogRepository(db).metadata(current))['artworkUrl']
+                  as String?,
+      );
+    });
 final itemArtworkPathProvider = FutureProvider.autoDispose
     .family<String?, Item>((ref, item) {
       final lease = ref.read(thumbnailCacheProvider).acquire(item);
@@ -49,12 +50,26 @@ final _coverProvider = FutureProvider.autoDispose.family<String?, Library>((
               (t) =>
                   t.libraryId.equals(library.id) &
                   t.unavailable.not() &
-                  t.itemType.isIn(['image', 'pdf', 'video']),
+                  t.itemType.isIn([
+                    'image',
+                    'pdf',
+                    'video',
+                    'cbz',
+                    'epub',
+                    'audio',
+                  ]),
             )
             ..orderBy([(t) => drift.OrderingTerm.asc(t.orderIndex)])
             ..limit(1))
           .getSingleOrNull();
   if (item == null) return null;
+  final metadata = await MediaCatalogRepository(db).metadata(item);
+  final catalogLease = CatalogArtworkCache.instance.acquire(
+    metadata['artworkUrl'] as String?,
+  );
+  ref.onDispose(catalogLease.release);
+  final catalogPath = await catalogLease.future;
+  if (catalogPath != null) return catalogPath;
   final lease = cache.acquire(item);
   ref.onDispose(lease.release);
   return lease.future;

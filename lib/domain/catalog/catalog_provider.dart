@@ -49,6 +49,8 @@ class JsonCatalogProvider implements CatalogProvider {
       'album',
       'author',
       'series',
+      'volume',
+      'chapter',
       'track',
       'disc',
       'airDate',
@@ -86,6 +88,7 @@ class JsonCatalogProvider implements CatalogProvider {
         'episodeEnd',
         'track',
         'disc',
+        'volume',
       ]) {
         final value = safe[key];
         if (value != null &&

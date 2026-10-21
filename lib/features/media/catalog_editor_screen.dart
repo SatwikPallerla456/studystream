@@ -16,6 +16,7 @@ import 'catalog_candidate_artwork.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/item_artwork.dart' show catalogArtworkPathProvider;
 
 /// Matching changes descriptive identity; editing changes sparse user fields.
 /// Both keep the exact asset, study anchors and playback history intact.
@@ -41,6 +42,10 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
     'album': 'Album',
     'author': 'Author',
     'series': 'Series',
+    'volume': 'Volume',
+    'chapter': 'Chapter / issue',
+    'track': 'Track number',
+    'disc': 'Disc number',
     'edition': 'Edition',
   };
   final _query = TextEditingController();
@@ -66,6 +71,8 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
         (_kind == LibraryKind.mixed && widget.item.itemType == 'audio')) ...[
       'artist',
       'album',
+      'track',
+      'disc',
     ],
     if ({
           LibraryKind.books,
@@ -75,6 +82,8 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
         {'epub', 'cbz', 'pdf'}.contains(widget.item.itemType)) ...[
       'author',
       'series',
+      'volume',
+      'chapter',
       'edition',
     ],
     if (_kind == LibraryKind.podcasts) ...['artist', 'series'],
@@ -85,6 +94,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
   JsonCatalogProvider? _provider;
   String _source = 'local-json';
   bool _searched = false;
+  bool _hasCatalogArtwork = false;
   final _season = TextEditingController();
   final _episode = TextEditingController();
   final _episodeEnd = TextEditingController();
@@ -121,12 +131,13 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
       _kind = await MediaCatalogRepository(
         db,
       ).libraryKind(widget.item.libraryId);
-      if (_kind == LibraryKind.mixed && metadata['category'] is String) {
+      if (metadata['category'] is String) {
         _kind = LibraryKind.values.firstWhere(
           (kind) => kind.name == metadata['category'],
           orElse: () => LibraryKind.mixed,
         );
       }
+      _hasCatalogArtwork = metadata['artworkUrl'] is String;
       _source = _kind == LibraryKind.television ? 'tvmaze' : _sources.first;
       _season.text = '${metadata['season'] ?? ''}';
       _episode.text = '${metadata['episode'] ?? ''}';
@@ -196,12 +207,22 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
     await _search();
   });
 
+  void _clearCandidates(String _) => setState(() {
+    _candidates = [];
+    _searched = false;
+  });
+
   Future<void> _search() async {
     final year = _year.text.trim().isEmpty ? null : int.tryParse(_year.text);
     if (_year.text.trim().isNotEmpty &&
         (year == null || year < 0 || year > 9999)) {
       throw const FormatException('Enter a valid year or leave it empty.');
     }
+    if (mounted)
+      setState(() {
+        _candidates = [];
+        _searched = false;
+      });
     final matches = await _activeProvider?.search(
       _query.text.trim(),
       year: year,
@@ -255,6 +276,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
     }
     if (!mounted) return;
     var useArtwork = candidate['artworkUrl'] != null;
+    String? releaseId;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -269,12 +291,52 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (candidate['_releaseOptions'] case final List options) ...[
+                    DropdownButtonFormField<String>(
+                      initialValue: '',
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Album release & cover',
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('Recording only (no album cover)'),
+                        ),
+                        for (final option in options.whereType<Map>())
+                          DropdownMenuItem(
+                            value: option['id'] as String,
+                            child: Text(
+                              '${option['title']} · ${option['year'] ?? '?'} ${option['country'] ?? ''}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) => update(() {
+                        releaseId = value == '' ? null : value;
+                        final release = options
+                            .whereType<Map>()
+                            .where((r) => r['id'] == releaseId)
+                            .firstOrNull;
+                        candidate = OnlineCatalogProvider.chooseRelease(
+                          candidate,
+                          release == null
+                              ? null
+                              : Map<String, dynamic>.from(release),
+                        );
+                        useArtwork = candidate['artworkUrl'] != null;
+                      }),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                   if (candidate['artworkUrl'] != null)
                     Center(
                       child: CatalogCandidateArtwork(
                         url: candidate['artworkUrl'] as String?,
                         width: 140,
                         height: 210,
+                        allowRetry: true,
                       ),
                     ),
                   if (candidate['show'] != null)
@@ -354,6 +416,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
       providerId: provider.id,
       expectedRevision: _decision?['revision'] as int? ?? 0,
     );
+    ref.invalidate(catalogArtworkPathProvider(widget.item));
     if (mounted) Navigator.pop(context);
   });
 
@@ -364,10 +427,23 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
         Object? value = entry.value == 'set'
             ? _controllers[entry.key]!.text.trim()
             : null;
-        if ({'year', 'season', 'episode', 'episodeEnd'}.contains(entry.key) &&
+        if ({
+              'year',
+              'season',
+              'episode',
+              'episodeEnd',
+              'volume',
+              'chapter',
+              'track',
+              'disc',
+            }.contains(entry.key) &&
             entry.value == 'set') {
           final input = value as String;
-          value = input.isEmpty ? null : int.tryParse(input);
+          value = input.isEmpty
+              ? null
+              : entry.key == 'chapter'
+              ? num.tryParse(input)
+              : int.tryParse(input);
           if (value == null && input.isNotEmpty)
             throw FormatException('Enter a number for ${_fields[entry.key]}.');
         }
@@ -385,6 +461,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
       ).record('metadata:${widget.item.id}');
       await _store.resolve(widget.item, legacy?.data ?? {}, strictRanges: true);
     });
+    ref.invalidate(catalogArtworkPathProvider(widget.item));
     if (mounted) Navigator.pop(context);
   });
 
@@ -420,6 +497,16 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
+          : _controllers.length != _fields.length
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  _error ??
+                      'Details could not load. Go back and reopen this title.',
+                ),
+              ),
+            )
           : Column(
               children: [
                 if (_error != null)
@@ -446,7 +533,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                         padding: const EdgeInsets.all(24),
                         children: [
                           Text(
-                            'Current match: ${_decision?['state'] ?? 'unmatched'}',
+                            'Current match: ${_decision?['state'] ?? 'unmatched'}${_decision?['provider_id'] == null ? '' : ' · ${OnlineCatalogProvider.label(_decision!['provider_id'] as String)}'}',
                           ),
                           Text(widget.item.filename),
                           const SizedBox(height: 16),
@@ -507,6 +594,8 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                           const SizedBox(height: 16),
                           TextField(
                             controller: _query,
+                            enabled: !_busy,
+                            onChanged: _clearCandidates,
                             decoration: const InputDecoration(
                               labelText: 'Title (or ID for an offline catalog)',
                             ),
@@ -514,6 +603,8 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                           ),
                           TextField(
                             controller: _year,
+                            enabled: !_busy,
+                            onChanged: _clearCandidates,
                             keyboardType: TextInputType.number,
                             decoration: const InputDecoration(
                               labelText: 'Year (optional)',
@@ -612,6 +703,35 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                                 child: Icon(Icons.info_outline),
                               ),
                             ],
+                          ),
+                          const SizedBox(height: 16),
+                          DropdownButtonFormField<String>(
+                            decoration: const InputDecoration(
+                              labelText: 'Artwork source',
+                            ),
+                            hint: Text(
+                              _hasCatalogArtwork
+                                  ? 'Matched provider artwork'
+                                  : 'Local artwork',
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'inherit',
+                                child: Text('Use matched provider artwork'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'remove',
+                                child: Text('Use local artwork'),
+                              ),
+                            ],
+                            onChanged: _busy
+                                ? null
+                                : (value) => setState(() {
+                                    if (value != null) {
+                                      _changes['artworkUrl'] = value;
+                                      _locks['artworkUrl'] = true;
+                                    }
+                                  }),
                           ),
                           for (final field in _fields.entries.where(
                             (field) => _primaryFields.contains(field.key),

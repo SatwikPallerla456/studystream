@@ -15,6 +15,7 @@ import '../media/media_browser_section.dart';
 import 'collections_screen.dart';
 import 'photo_slideshow_screen.dart';
 import 'library_scan_dialog.dart';
+import 'category_browse_section.dart';
 
 class TypedLibraryScreen extends ConsumerStatefulWidget {
   const TypedLibraryScreen({
@@ -276,7 +277,9 @@ class _TypedLibraryState extends ConsumerState<TypedLibraryScreen> {
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
             ),
-          if (widget.filters.isEmpty && _defaultField != null)
+          if (widget.filters.isEmpty &&
+              _defaultField != null &&
+              !hasCategoryHierarchy(widget.kind))
             Padding(
               padding: const EdgeInsets.only(bottom: 20),
               child: Wrap(
@@ -304,7 +307,12 @@ class _TypedLibraryState extends ConsumerState<TypedLibraryScreen> {
                 ],
               ),
             ),
-          if (_field == null && widget.filters.isEmpty)
+          if (hasCategoryHierarchy(widget.kind) && widget.filters.isEmpty)
+            CategoryBrowseSection(
+              kind: widget.kind,
+              libraryId: widget.library.id,
+            )
+          else if (_field == null && widget.filters.isEmpty)
             MediaBrowserSection(
               initialLibraryId: widget.library.id,
               onOpenItem: (item) => context.push(MediaVisuals.route(item)),

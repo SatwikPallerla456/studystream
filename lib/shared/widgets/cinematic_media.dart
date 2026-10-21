@@ -96,11 +96,13 @@ class CinematicMediaCard extends StatefulWidget {
     this.progressPercent,
     this.displayTitle,
     this.subtitle,
+    this.actionLabel,
   });
   final Item item;
   final VoidCallback onDetails, onOpen;
   final double? progressPercent;
   final String? displayTitle, subtitle;
+  final String? actionLabel;
   @override
   State<CinematicMediaCard> createState() => _CinematicMediaCardState();
 }
@@ -168,7 +170,8 @@ class _CinematicMediaCardState extends State<CinematicMediaCard> {
                         right: 8,
                         bottom: 8,
                         child: IconButton.filled(
-                          tooltip: '${MediaVisuals.action(item)} $title',
+                          tooltip:
+                              '${widget.actionLabel ?? MediaVisuals.action(item)} $title',
                           onPressed: item.unavailable ? null : widget.onOpen,
                           icon: Icon(
                             MediaVisuals.isReading(item)
@@ -444,11 +447,25 @@ class CinematicGroupCard extends StatelessWidget {
     required this.onOpen,
     this.item,
     this.icon = Icons.collections_bookmark_outlined,
+    this.artworkFit = BoxFit.cover,
   });
   final String title, subtitle;
   final Item? item;
   final IconData icon;
+  final BoxFit artworkFit;
   final VoidCallback onOpen;
+  Widget _label(BuildContext context, String text, TextStyle? style) =>
+      SizedBox(
+        height: MediaQuery.textScalerOf(
+          context,
+        ).scale((style?.fontSize ?? 14) * (style?.height ?? 1.5) * 2),
+        child: Text(
+          text,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        ),
+      );
   @override
   Widget build(BuildContext context) => Card(
     clipBehavior: Clip.antiAlias,
@@ -465,7 +482,7 @@ class CinematicGroupCard extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   if (item != null)
-                    CinematicArtwork(item: item!)
+                    CinematicArtwork(item: item!, fit: artworkFit)
                   else
                     ColoredBox(
                       color: Theme.of(
@@ -491,18 +508,16 @@ class CinematicGroupCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
+                  _label(
+                    context,
                     title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleSmall,
+                    Theme.of(context).textTheme.titleSmall,
                   ),
                   const SizedBox(height: 4),
-                  Text(
+                  _label(
+                    context,
                     subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+                    Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
               ),

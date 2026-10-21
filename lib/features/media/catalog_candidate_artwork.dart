@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../../domain/services/catalog_artwork_cache.dart';
+import '../../domain/reader/reader_jobs.dart' show ReaderLease;
 
 class CatalogCandidateArtwork extends StatefulWidget {
   const CatalogCandidateArtwork({
@@ -8,21 +9,49 @@ class CatalogCandidateArtwork extends StatefulWidget {
     required this.url,
     this.width = 64,
     this.height = 96,
+    this.allowRetry = false,
   });
   final String? url;
   final double width, height;
+  final bool allowRetry;
   @override
   State<CatalogCandidateArtwork> createState() =>
       _CatalogCandidateArtworkState();
 }
 
 class _CatalogCandidateArtworkState extends State<CatalogCandidateArtwork> {
-  late Future<String?> _image = CatalogArtworkCache.instance.get(widget.url);
+  late ReaderLease<String?> _lease = CatalogArtworkCache.instance.acquire(
+    widget.url,
+  );
+  bool _refreshing = false;
   @override
   void didUpdateWidget(CatalogCandidateArtwork oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url)
-      _image = CatalogArtworkCache.instance.get(widget.url);
+    if (oldWidget.url != widget.url) {
+      _lease.release();
+      _lease = CatalogArtworkCache.instance.acquire(widget.url);
+    }
+  }
+
+  @override
+  void dispose() {
+    _lease.release();
+    super.dispose();
+  }
+
+  Future<void> _retry() async {
+    final url = widget.url;
+    if (url == null || _refreshing) return;
+    setState(() => _refreshing = true);
+    _lease.release();
+    try {
+      await CatalogArtworkCache.instance.refresh(url);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _lease = CatalogArtworkCache.instance.acquire(widget.url);
+      _refreshing = false;
+    });
   }
 
   @override
@@ -32,7 +61,7 @@ class _CatalogCandidateArtworkState extends State<CatalogCandidateArtwork> {
     child: ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: FutureBuilder<String?>(
-        future: _image,
+        future: _lease.future,
         builder: (context, snapshot) {
           if (snapshot.data case final String path) {
             return Image.file(
@@ -42,7 +71,23 @@ class _CatalogCandidateArtworkState extends State<CatalogCandidateArtwork> {
               errorBuilder: (_, _, _) => _placeholder(),
             );
           }
-          return _placeholder();
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              _placeholder(),
+              if (widget.allowRetry &&
+                  !_refreshing &&
+                  snapshot.connectionState == ConnectionState.done)
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: IconButton(
+                    tooltip: 'Retry artwork',
+                    onPressed: _retry,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ),
+            ],
+          );
         },
       ),
     ),

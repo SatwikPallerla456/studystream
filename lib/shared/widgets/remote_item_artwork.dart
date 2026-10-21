@@ -5,6 +5,23 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/reader/reader_jobs.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
+
+final _remoteArtworkSelection = StreamProvider.autoDispose
+    .family<String?, Item>((ref, item) {
+      final db = ref.read(appDatabaseProvider);
+      return (db.select(
+        db.items,
+      )..where((t) => t.id.equals(item.id))).watchSingleOrNull().asyncMap((
+        current,
+      ) async {
+        if (current == null) return null;
+        final metadata = await MediaCatalogRepository(db).metadata(current);
+        final decision = await CatalogIdentityStore(db).decision(current.id);
+        return '${metadata['artworkUrl']}:${decision?['revision'] ?? 0}';
+      });
+    });
 
 final _artworkJobs = ReaderJobScheduler(
   maxConcurrent: 2,
@@ -14,10 +31,12 @@ final _remoteArtwork = FutureProvider.autoDispose.family<Uint8List?, Item>((
   ref,
   item,
 ) async {
+  final selection = await ref.watch(_remoteArtworkSelection(item).future);
+  if (!ref.mounted) return null;
   final source = await ref.read(lanSyncClientProvider).artworkFor(item);
   if (!ref.mounted) return null;
   final lease = _artworkJobs.request<Uint8List?>(
-    key: '${source.uri}:${item.updatedAt}:${item.modifiedAt}',
+    key: '${source.uri}:${item.updatedAt}:${item.modifiedAt}:$selection',
     priority: ReaderPriority.thumbnail,
     estimatedBytes: 2 * 1024 * 1024,
     run: (cancel) async {

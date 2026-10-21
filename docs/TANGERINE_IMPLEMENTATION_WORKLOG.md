@@ -234,14 +234,67 @@ were not executed as acceptance tests. Populated category-specific reading/music
 TV journeys still need content and later coverage; online matching/artwork is
 not yet integrated. Screenshots and limits are in the saved design review.
 
+## Online identification and artwork — 21 October 2026
+
+Resumed the WIP checkpoint and completed the source path for TMDB movies/TV,
+TVmaze, Open Library and MusicBrainz/CAA. The match editor now opens on Find
+match, offers category-appropriate providers, previews real metadata/artwork and
+applies only explicit selections through the existing revision/lock rules.
+TMDB has device-secure token setup; key-free providers and offline JSON remain
+available for their supported categories. Selected attribution/source URLs and
+artwork are wired through details, browsing and scoped server delivery.
+
+The native app compiled for design review. A read-only Open Library query
+displayed real candidates and a cover preview for an existing comic; the preview
+was cancelled, with no match or credential saved. This is visual design evidence,
+not acceptance of matching persistence, other providers, synchronization or
+cache budgets. See TANGERINE_ONLINE_METADATA_2026-10-21.md and its screenshots.
+Tests/analyzers remain deferred; the full master plan remains unfinished.
+
+## Category-specific TV, music and reading screens — 21 October 2026
+
+Implemented one bounded category-browsing backend and UI shared by category
+roots and named libraries: TV shows → seasons → episode rows; music artists/
+albums → disc/track rows; books/comics with author and series shelves, numeric
+volumes/chapters, reading status and progress. Search, source filtering, unknown
+metadata groups, breadcrumbs and full-scope bounded queues are connected. Offline
+titles remain visible, while new queues omit unavailable files. Metadata editing
+includes publication numbering and disc/track corrections.
+
+Local comic filename hints and single-resource CBZ/EPUB covers populate reading
+shelves without launching a reader. Derived hints preserve overrides, item IDs,
+notes and positions. Saved pre-change findings and subsequent visual refinements
+are in TANGERINE_CATEGORY_BROWSING_2026-10-21.md.
+
+Native builds succeeded for design review. Real-content screenshots show all
+three local comic series and naturally ordered volumes, with existing progress.
+TV/music/book populated layouts were reviewed separately through a clearly
+labelled in-memory synthetic preview because those production categories are
+empty. The normal app entry point is restored. This is source implementation
+and visual evidence only; playback, queue, import, persistence, scale and device
+acceptance remain deferred with all automated tests/analyzers.
+
+## Manga reverse page turning — 21 October 2026
+
+The user's current manga title visibly has Right to left selected, but the
+bottom arrows/slider remain LTR. Source inspection also found missing trackpad
+page-turn handlers and separate ownership of image double taps versus outer
+single taps. Saved pre-change findings in TANGERINE_MANGA_DIRECTION_2026-10-21.md.
+Implemented mirrored horizontal controls, image-owned single/double tap handling,
+trackpad pan and horizontal-wheel turning with zoom/pinch/selection guards, and
+spread boundary controls. Canonical page identity and stored preferences remain
+unchanged. Tests/analyzers and full gesture acceptance remain deferred.
+
 ## Remaining implementation before testing may start
 
 The master plan is the complete scope; this list highlights known open work and
 is not a reduction of that scope:
 
 - Complete automatic/background technical-analysis scheduling, other-platform
-  technical bindings, remaining type-specific organization and online-provider
-  integration. macOS on-demand analysis and explainable offline ranking now have
+  technical bindings and organization for categories outside this requested TV/music/reading pass. Online-provider
+  search/preview/selection and artwork now have source implementations; see
+  TANGERINE_ONLINE_METADATA_2026-10-21.md for provider coverage and evidence limits.
+  macOS on-demand analysis and explainable offline ranking now have
   source implementations, alongside title files and associated extras.
 - Reconcile remaining renderer/cache ownership edge cases. Compatible viewport
   replay, page-quote macOS OCR, complete-layer backgrounds, cancellation and cache
@@ -261,4 +314,4 @@ is not a reduction of that scope:
   including regression tests, analysis, builds, measurement and runtime journeys.
 
 No release gate is marked passed by this worklog. Working changes are not a new
-release or a verified checkpoint. The earlier committed checkpoint is 3ae476b.
+release or a verified checkpoint. Checkpoint 2a3ff62 preceded the online metadata, category browsing and manga-direction changes documented above.

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' show AppExitResponse, Offset, Size;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -44,6 +45,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   final _jobs = ReaderJobScheduler();
   final _cancel = ReaderCancellation();
   final _scroll = ScrollController();
+  final _pageSurface = GlobalKey();
   final _visited = <int>{};
   List<CanonicalPage> _pages = [];
   PresentationMap? _presentation;
@@ -68,7 +70,19 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   Offset? _swipeStart;
   int _swipeStartedAt = 0;
   bool _canSwipe = false;
+  bool _canTrackpad = false;
+  Offset _trackpadPan = Offset.zero;
+  double _wheelPan = 0;
+  int _wheelLastAt = 0, _wheelTurnAt = 0;
   bool get _rtl => _options['rtl'] == true;
+  bool get _reverse => _rtl && _mode != 'vertical';
+  bool get _canTurnByGesture =>
+      !_restoring &&
+      !_navigating &&
+      _zoom <= 1.05 &&
+      _selectedRange == null &&
+      _source != null &&
+      !_source!.publicationPage(_page);
   String get _mode => _options['mode'] as String;
   String get _background => _options['background'] as String;
   @override
@@ -309,9 +323,13 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     });
   }
 
-  void _advance(bool forward) => unawaited(
-    _go(_presentation?.advance(_page, forward) ?? _page + (forward ? 1 : -1)),
-  );
+  void _advance(bool forward) {
+    if (!_canAdvance(forward)) return;
+    unawaited(
+      _go(_presentation?.advance(_page, forward) ?? _page + (forward ? 1 : -1)),
+    );
+  }
+
   Future<void> _setting(String key, Object value) async {
     await _save();
     if (!mounted) return;
@@ -371,6 +389,47 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       case 'study':
         _study();
     }
+  }
+
+  void _imageTap(TapUpDetails details) {
+    final surface = _pageSurface.currentContext?.findRenderObject();
+    if (surface is RenderBox)
+      _tapAction(surface.globalToLocal(details.globalPosition), surface.size);
+  }
+
+  bool _canAdvance(bool forward) {
+    if (_source == null) return false;
+    final map = _presentation;
+    if (map == null) return forward ? _page < _source!.pageCount : _page > 1;
+    final cell = map.cellFor(_page);
+    return forward ? cell < map.cells.length - 1 : cell > 0;
+  }
+
+  void _horizontalTurn(Offset delta, double width) {
+    if (!_canTurnByGesture ||
+        delta.dx.abs() < (width * .15).clamp(48, 180) ||
+        delta.dy.abs() > delta.dx.abs() * .5)
+      return;
+    _advance(_reverse ? delta.dx > 0 : delta.dx < 0);
+  }
+
+  void _pointerScroll(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent ||
+        !_canTurnByGesture ||
+        HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed ||
+        event.scrollDelta.dx.abs() <= event.scrollDelta.dy.abs() * 2)
+      return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _wheelTurnAt < 350) return;
+    final delta = -event.scrollDelta.dx;
+    if (now - _wheelLastAt > 250 || _wheelPan.sign != delta.sign) _wheelPan = 0;
+    _wheelLastAt = now;
+    _wheelPan += delta;
+    if (_wheelPan.abs() < 48) return;
+    _wheelTurnAt = now;
+    _advance(_reverse ? _wheelPan > 0 : _wheelPan < 0);
+    _wheelPan = 0;
   }
 
   Future<void> _settings() async {
@@ -491,6 +550,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       vertical: vertical,
       layoutKey:
           '$_mode:$_rtl:${_presentation?.pagesFor(page).join(',') ?? page}',
+      onTapUp: _imageTap,
       initialViewState: page == _page ? _viewState : null,
       initialZoom: page == _page ? _zoom : 1,
       initialPoint: page == _page ? Offset(_pointX, _pointY) : Offset.zero,
@@ -564,17 +624,28 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
           behavior: HitTestBehavior.translucent,
           onTapUp: (details) => _tapAction(details.localPosition, box.biggest),
           child: Listener(
+            key: _pageSurface,
+            behavior: HitTestBehavior.opaque,
+            onPointerSignal: _pointerScroll,
+            onPointerPanZoomStart: (_) {
+              _trackpadPan = Offset.zero;
+              _canTrackpad = _canTurnByGesture;
+            },
+            onPointerPanZoomUpdate: (event) {
+              _trackpadPan = event.pan;
+              if ((event.scale - 1).abs() > .02 || event.rotation.abs() > .02)
+                _canTrackpad = false;
+            },
+            onPointerPanZoomEnd: (_) {
+              if (_canTrackpad) _horizontalTurn(_trackpadPan, box.maxWidth);
+              _canTrackpad = false;
+            },
             onPointerDown: (event) {
               _touches.add(event.pointer);
               if (_touches.length == 1) {
                 _swipeStart = event.localPosition;
                 _swipeStartedAt = DateTime.now().millisecondsSinceEpoch;
-                _canSwipe =
-                    !_restoring &&
-                    !_navigating &&
-                    _zoom <= 1.05 &&
-                    _selectedRange == null &&
-                    !_source!.publicationPage(_page);
+                _canSwipe = _canTurnByGesture;
               } else {
                 _canSwipe = false;
               }
@@ -594,11 +665,9 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
               _canSwipe = false;
               final delta = event.localPosition - start;
               if (DateTime.now().millisecondsSinceEpoch - _swipeStartedAt >
-                      1000 ||
-                  delta.dx.abs() < (box.maxWidth * .15).clamp(48, 180) ||
-                  delta.dy.abs() > delta.dx.abs() * .5)
+                  1000)
                 return;
-              _advance(_rtl ? delta.dx > 0 : delta.dx < 0);
+              _horizontalTurn(delta, box.maxWidth);
             },
             child: Row(
               textDirection: _rtl ? TextDirection.rtl : TextDirection.ltr,
@@ -683,9 +752,10 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
-      const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _advance(_rtl),
+      const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+          _advance(_reverse),
       const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-          _advance(!_rtl),
+          _advance(!_reverse),
       const SingleActivator(LogicalKeyboardKey.pageDown): () => _advance(true),
       const SingleActivator(LogicalKeyboardKey.pageUp): () => _advance(false),
       const SingleActivator(LogicalKeyboardKey.home): () => _go(1),
@@ -764,43 +834,56 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
         bottomNavigationBar: _source == null || !_chrome
             ? null
             : SafeArea(
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: _source!.reflowable
-                          ? 'Previous chapter'
-                          : 'Previous page',
-                      onPressed: () => _advance(false),
-                      icon: const Icon(Icons.skip_previous),
-                    ),
-                    Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            '${_source!.reflowable ? 'Chapter' : 'Page'} $_page / ${_source!.pageCount}',
-                          ),
-                          Slider(
-                            value: _page.toDouble(),
-                            min: 1,
-                            max: _source!.pageCount > 1
-                                ? _source!.pageCount.toDouble()
-                                : 2,
-                            onChanged: _source!.pageCount < 2
-                                ? null
-                                : (value) => _go(value.round()),
-                          ),
-                        ],
+                child: Directionality(
+                  textDirection: _reverse
+                      ? TextDirection.rtl
+                      : TextDirection.ltr,
+                  child: Row(
+                    children: [
+                      IconButton(
+                        tooltip: _source!.reflowable
+                            ? 'Previous chapter'
+                            : 'Previous page',
+                        onPressed: _canAdvance(false)
+                            ? () => _advance(false)
+                            : null,
+                        icon: Icon(
+                          _reverse ? Icons.skip_next : Icons.skip_previous,
+                        ),
                       ),
-                    ),
-                    IconButton(
-                      tooltip: _source!.reflowable
-                          ? 'Next chapter'
-                          : 'Next page',
-                      onPressed: () => _advance(true),
-                      icon: const Icon(Icons.skip_next),
-                    ),
-                  ],
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '${_source!.reflowable ? 'Chapter' : 'Page'} $_page / ${_source!.pageCount}',
+                            ),
+                            Slider(
+                              value: _page.toDouble(),
+                              min: 1,
+                              max: _source!.pageCount > 1
+                                  ? _source!.pageCount.toDouble()
+                                  : 2,
+                              onChanged: _source!.pageCount < 2
+                                  ? null
+                                  : (value) => _go(value.round()),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: _source!.reflowable
+                            ? 'Next chapter'
+                            : 'Next page',
+                        onPressed: _canAdvance(true)
+                            ? () => _advance(true)
+                            : null,
+                        icon: Icon(
+                          _reverse ? Icons.skip_previous : Icons.skip_next,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
       ),

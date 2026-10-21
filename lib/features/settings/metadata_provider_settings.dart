@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../domain/catalog/online_catalog_provider.dart';
 import '../../shared/widgets/app_top_bar.dart';
@@ -148,6 +149,18 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
           ),
         const Divider(height: 32),
         for (final id in OnlineCatalogProvider.labels.keys) ...[
+          if (id == 'tmdb')
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: SvgPicture.asset(
+                  'assets/brand/tmdb.svg',
+                  width: 120,
+                  semanticsLabel: 'The Movie Database (TMDB)',
+                ),
+              ),
+            ),
           Text(
             OnlineCatalogProvider.label(id),
             style: Theme.of(context).textTheme.titleMedium,

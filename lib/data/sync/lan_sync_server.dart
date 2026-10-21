@@ -623,35 +623,40 @@ class LanSyncServer {
       });
     try {
       final metadata = await MediaCatalogRepository(database).metadata(item);
-      var path = await CatalogArtworkCache.instance.get(
+      final providerLease = CatalogArtworkCache.instance.acquire(
         metadata['artworkUrl'] as String?,
       );
-      if (path == null) {
-        final source = await resolveApprovedMedia(database, item);
-        final lease = _artwork.acquire(item.copyWith(filePath: source.path));
-        try {
-          path = await lease.future;
-        } finally {
-          lease.release();
+      try {
+        var path = await providerLease.future;
+        if (path == null) {
+          final source = await resolveApprovedMedia(database, item);
+          final lease = _artwork.acquire(item.copyWith(filePath: source.path));
+          try {
+            path = await lease.future;
+          } finally {
+            lease.release();
+          }
         }
+        if (path == null) {
+          return _json(request, HttpStatus.notFound, {
+            'error': 'Artwork is not available for this format',
+          });
+        }
+        final file = File(path), length = await File(path).length();
+        if (length > 2 * 1024 * 1024) {
+          return _json(request, HttpStatus.notFound, {
+            'error': 'Artwork exceeds delivery limit',
+          });
+        }
+        request.response.headers
+          ..contentType = ContentType('image', 'png')
+          ..contentLength = length;
+        if (request.method == 'GET')
+          await request.response.addStream(file.openRead());
+        await request.response.close();
+      } finally {
+        providerLease.release();
       }
-      if (path == null) {
-        return _json(request, HttpStatus.notFound, {
-          'error': 'Artwork is not available for this format',
-        });
-      }
-      final file = File(path), length = await File(path).length();
-      if (length > 2 * 1024 * 1024) {
-        return _json(request, HttpStatus.notFound, {
-          'error': 'Artwork exceeds delivery limit',
-        });
-      }
-      request.response.headers
-        ..contentType = ContentType('image', 'png')
-        ..contentLength = length;
-      if (request.method == 'GET')
-        await request.response.addStream(file.openRead());
-      await request.response.close();
     } on MediaSourceException catch (error) {
       return _json(request, error.statusCode, {'error': error.message});
     } on FileSystemException {

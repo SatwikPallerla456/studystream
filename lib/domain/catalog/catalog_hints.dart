@@ -75,6 +75,36 @@ abstract final class CatalogHints {
     return '${season == 0 ? 'Specials' : 'Season $season'} · Episode${suffix.isEmpty ? '' : 's'} $first$suffix';
   }
 
+  /// Explicit publication numbering is a local browsing hint. Bare numeric
+  /// suffixes are accepted only for comic archives, never arbitrary book names.
+  static Map<String, dynamic> reading(String filename, {required bool comic}) {
+    var name = p.basenameWithoutExtension(filename);
+    name = name
+        .replaceFirst(RegExp(r'\s*[\[(](?:19|20)\d{2}[\])].*$'), '')
+        .trim();
+    final explicit = RegExp(
+      r'^(.*?)\s+(v(?:ol(?:ume)?)?\.?|c(?:h(?:apter)?)?\.?|#)\s*(\d{1,5}(?:\.\d{1,4})?)\b',
+      caseSensitive: false,
+    ).firstMatch(name);
+    final bare = comic && explicit == null
+        ? RegExp(r'^(.*?)\s+(\d{1,5}(?:\.\d{1,4})?)$').firstMatch(name)
+        : null;
+    final series = (explicit?[1] ?? bare?[1])?.trim();
+    if (series == null ||
+        series.isEmpty ||
+        !RegExp(r'[a-zA-Z\u0080-\uffff]').hasMatch(series))
+      return {};
+    final value = num.tryParse(explicit?[3] ?? bare![2]!);
+    if (value == null || !value.isFinite || value < 0 || value > 100000)
+      return {};
+    final volume = explicit?[2]?.toLowerCase().startsWith('v') ?? false;
+    return {
+      'series': series,
+      if (volume && value is int) 'volume': value,
+      if (!volume) 'chapter': value,
+    };
+  }
+
   static Map<String, dynamic> filename(String filename) {
     final raw = p.basenameWithoutExtension(filename);
     final explicitEdition = edition(raw);

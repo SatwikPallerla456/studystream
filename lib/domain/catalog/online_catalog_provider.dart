@@ -32,6 +32,7 @@ abstract final class CatalogCredentials {
 class CatalogHttp {
   static final _queues = <String, Future<void>>{};
   static final _last = <String, DateTime>{};
+  static final _blockedUntil = <String, DateTime>{};
   static const apiHosts = {
     'api.themoviedb.org',
     'api.tvmaze.com',
@@ -47,6 +48,11 @@ class CatalogHttp {
   }) {
     final host = uri.host;
     final result = (_queues[host] ?? Future<void>.value()).then((_) async {
+      if (_blockedUntil[host]?.isAfter(DateTime.now()) ?? false) {
+        throw const FormatException(
+          'The provider asked us to wait. Retry in a minute.',
+        );
+      }
       final interval = {'openlibrary.org', 'musicbrainz.org'}.contains(host)
           ? 1050
           : 100;
@@ -101,6 +107,7 @@ class CatalogHttp {
       }
       final request = await client.getUrl(uri);
       request.followRedirects = false;
+      request.persistentConnection = false;
       request.headers.set(
         HttpHeaders.userAgentHeader,
         'Tangerine/1.0 (personal media catalog; interactive identification)',
@@ -120,7 +127,18 @@ class CatalogHttp {
             'The provider returned an unsupported redirect.',
           );
         }
-        uri = uri.resolve(location);
+        var next = uri.resolve(location);
+        // CAA's documented Location may use http. Upgrade a known artwork
+        // host before validating; never make a plaintext network request.
+        if (image &&
+            next.scheme == 'http' &&
+            !next.hasPort &&
+            CatalogOnlinePolicy.artwork(
+              next.replace(scheme: 'https').toString(),
+            )) {
+          next = next.replace(scheme: 'https');
+        }
+        uri = next;
         continue;
       }
       if (response.statusCode == 401 || response.statusCode == 403) {
@@ -129,6 +147,11 @@ class CatalogHttp {
         );
       }
       if (response.statusCode == 429 || response.statusCode == 503) {
+        final seconds =
+            int.tryParse(response.headers.value('retry-after') ?? '') ?? 60;
+        _blockedUntil[uri.host] = DateTime.now().add(
+          Duration(seconds: seconds.clamp(1, 3600)),
+        );
         throw const FormatException(
           'The provider is busy or rate limited. Wait a moment, then retry.',
         );
@@ -205,11 +228,15 @@ String _text(dynamic value, [int limit = 15000]) {
   return plain.length > limit ? plain.substring(0, limit) : plain;
 }
 
-int? _year(dynamic value) => value is String && value.length >= 4
-    ? int.tryParse(value.substring(0, 4))
-    : value is int
-    ? value
-    : null;
+int? _year(dynamic value) {
+  final year = value is String && value.length >= 4
+      ? int.tryParse(value.substring(0, 4))
+      : value is int
+      ? value
+      : null;
+  return year != null && year >= 0 && year <= 9999 ? year : null;
+}
+
 String _joined(dynamic value) => value is List
     ? value
           .take(20)
@@ -232,6 +259,25 @@ class OnlineCatalogProvider implements CatalogProvider {
     'musicbrainz': 'MusicBrainz',
   };
   static String label(String id) => labels[id] ?? 'Local JSON';
+  static Map<String, dynamic> chooseRelease(
+    Map<String, dynamic> candidate,
+    Map<String, dynamic>? release,
+  ) {
+    final result = Map<String, dynamic>.from(candidate);
+    final recording = candidate['_recordingId'];
+    if (recording is! String || !_mbid(recording)) return result;
+    result['id'] = recording;
+    result.remove('album');
+    result.remove('artworkUrl');
+    if (release != null && _mbid('${release['id']}')) {
+      result['id'] = 'recording/$recording/release/${release['id']}';
+      result['album'] = _text(release['title'], 500);
+      result['artworkUrl'] =
+          'https://coverartarchive.org/release/${release['id']}/front-500';
+    }
+    return result;
+  }
+
   static String attribution(String id) => switch (id) {
     'tmdb' =>
       'This product uses the TMDB API but is not endorsed or certified by TMDB.',
@@ -247,7 +293,7 @@ class OnlineCatalogProvider implements CatalogProvider {
     ...data,
     '_providerId': id,
     '_matchReason':
-        'Provider search result${year == null
+        '${data['_matchReason']?.toString().isNotEmpty == true ? data['_matchReason'] : 'Provider search result'}${year == null
             ? ''
             : data['year'] == year
             ? ' · year matches'
@@ -274,6 +320,11 @@ class OnlineCatalogProvider implements CatalogProvider {
     if (query.trim().isEmpty || query.length > 300) {
       throw const FormatException('Enter a title of at most 300 characters.');
     }
+    if (year != null && (year < 1000 || year > 9999)) {
+      throw const FormatException(
+        'For online search, enter a year from 1000 to 9999 or leave it empty.',
+      );
+    }
     if (id == 'tmdb') {
       final tv = type == 'episode';
       final data = _map(
@@ -285,14 +336,16 @@ class OnlineCatalogProvider implements CatalogProvider {
             'include_adult': 'false',
             'language': 'en-US',
             'page': '1',
-            if (year != null) tv ? 'first_air_date_year' : 'year': '$year',
+            if (year != null) 'year': '$year',
           },
           await _token(),
         ),
       );
       return [
         for (final raw in _list(data['results']).take(20))
-          if (raw is Map && raw['id'] is int)
+          if (raw is Map &&
+              raw['id'] is int &&
+              _text(raw[tv ? 'name' : 'title']).isNotEmpty)
             _candidate(_tmdb(_map(raw), tv), year),
       ];
     }
@@ -302,7 +355,10 @@ class OnlineCatalogProvider implements CatalogProvider {
       });
       return [
         for (final raw in _list(data).take(20))
-          if (raw is Map && raw['show'] is Map)
+          if (raw is Map &&
+              raw['show'] is Map &&
+              raw['show']['id'] is int &&
+              _text(raw['show']['name']).isNotEmpty)
             _candidate(_tvmaze(_map(raw['show'])), year),
       ];
     }
@@ -343,7 +399,9 @@ class OnlineCatalogProvider implements CatalogProvider {
       );
       return [
         for (final raw in _list(data['recordings']).take(20))
-          if (raw is Map && _mbid('${raw['id']}'))
+          if (raw is Map &&
+              _mbid('${raw['id']}') &&
+              _text(raw['title']).isNotEmpty)
             _candidate(_recording(_map(raw)), year),
       ];
     }
@@ -372,7 +430,8 @@ class OnlineCatalogProvider implements CatalogProvider {
     'genres': _joined(row['genres']),
     'type': 'episode',
     'sourceUrl': 'https://www.tvmaze.com/shows/${row['id']}',
-    if (CatalogOnlinePolicy.artwork(_map(row['image'])['medium'] as String?))
+    if (_map(row['image'])['medium'] is String &&
+        CatalogOnlinePolicy.artwork(_map(row['image'])['medium']))
       'artworkUrl': row['image']['medium'],
   };
   static bool _mbid(String value) => RegExp(
@@ -418,6 +477,12 @@ class OnlineCatalogProvider implements CatalogProvider {
           'append_to_response': 'credits',
         }, token),
       );
+      if ('${row['id']}' != remote.split('/').last ||
+          _text(row[tv ? 'name' : 'title']).isEmpty) {
+        throw const FormatException(
+          'The provider returned incomplete title details. Retry this candidate.',
+        );
+      }
       result.addAll(_tmdb(row, tv));
       result['genres'] = _list(
         row['genres'],
@@ -435,6 +500,13 @@ class OnlineCatalogProvider implements CatalogProvider {
             token,
           ),
         );
+        if (ep['season_number'] != season ||
+            ep['episode_number'] != episode ||
+            _text(ep['name']).isEmpty) {
+          throw const FormatException(
+            'The provider did not return the requested episode. Check season and episode numbers.',
+          );
+        }
         result.addAll({
           'id':
               '$remote/season/$season/episode/$episode${episodeEnd != null && episodeEnd > episode ? '-$episodeEnd' : ''}',
@@ -460,6 +532,14 @@ class OnlineCatalogProvider implements CatalogProvider {
           {'season': '$season', 'number': '$episode'},
         ),
       );
+      if (ep['season'] != season ||
+          ep['number'] != episode ||
+          ep['id'] is! int ||
+          _text(ep['name']).isEmpty) {
+        throw const FormatException(
+          'The provider did not return the requested episode. Check season and episode numbers.',
+        );
+      }
       result.addAll({
         'id':
             'episode/${ep['id']}${episodeEnd != null && episodeEnd > episode ? '-$episodeEnd' : ''}',
@@ -478,6 +558,10 @@ class OnlineCatalogProvider implements CatalogProvider {
       final row = _map(
         await CatalogHttp.json('openlibrary.org', '$remote.json'),
       );
+      if (row['key'] != remote)
+        throw const FormatException(
+          'The provider returned an unexpected book. Retry this candidate.',
+        );
       result['synopsis'] = _text(row['description']);
       result['genres'] = _joined(row['subjects']);
     } else if (id == 'musicbrainz') {
@@ -485,19 +569,42 @@ class OnlineCatalogProvider implements CatalogProvider {
         throw const FormatException('Invalid MusicBrainz identity.');
       final row = _map(
         await CatalogHttp.json('musicbrainz.org', '/ws/2/recording/$remote', {
-          'inc': 'artists+releases+genres+annotations',
+          'inc': 'artists+releases+genres+annotation',
           'fmt': 'json',
         }),
       );
+      if (row['id'] != remote)
+        throw const FormatException(
+          'The provider returned an unexpected recording. Retry this candidate.',
+        );
       result['synopsis'] = _text(row['annotation'] ?? row['disambiguation']);
       result['genres'] = _list(
         row['genres'],
       ).whereType<Map>().take(20).map((g) => _text(g['name'], 100)).join(', ');
-      final release = candidate['_releaseId'];
-      if (release is String && _mbid(release)) {
-        result['artworkUrl'] =
-            'https://coverartarchive.org/release/$release/front-500';
-      }
+      final releases = _list(row['releases'])
+          .whereType<Map>()
+          .where(
+            (release) =>
+                _mbid('${release['id']}') && _text(release['title']).isNotEmpty,
+          )
+          .take(20)
+          .toList();
+      result['_releaseOptions'] = [
+        for (final release in releases)
+          {
+            'id': release['id'],
+            'title': _text(release['title'], 500),
+            'year': _year(release['date']),
+            'country': _text(release['country'], 10),
+          },
+      ];
+      // Album and cover are chosen together; do not silently present the first
+      // arbitrary release as the user's edition of this recording.
+      result.remove('artworkUrl');
+      result.remove('album');
+      result['_recordingId'] = remote;
+      result['_detailNote'] =
+          'Choose the release for album information and cover art, or keep recording-only details.';
     }
     // Shared-range details describe its first episode; boundaries remain user
     // hints, never synthesized timestamps or additional downloaded episodes.
