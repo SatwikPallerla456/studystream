@@ -10,6 +10,8 @@ import 'package:uuid/uuid.dart';
 import '../../domain/catalog/media_record_contract.dart';
 import '../../domain/catalog/catalog_identity_store.dart';
 import '../indexer/library_source_store.dart';
+import '../sync/library_access_store.dart';
+import '../sync/sync_change_journal.dart';
 import '../../domain/services/sync_conflict_resolver.dart';
 
 part 'app_database.g.dart';
@@ -313,7 +315,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -361,6 +363,8 @@ class AppDatabase extends _$AppDatabase {
       await LibrarySourceStore(this).backfill();
       await CatalogIdentityStore(this).createTables();
       await CatalogIdentityStore(this).backfill();
+      await LibraryAccessStore(this).createTables();
+      await SyncChangeJournal(this).createTables();
       await customStatement('PRAGMA foreign_keys = ON');
       await _createIndexes();
     },
@@ -546,6 +550,8 @@ class AppDatabase extends _$AppDatabase {
       'CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback_progress (last_opened_at)',
       'CREATE INDEX IF NOT EXISTS idx_reading_recent ON reading_progress (last_opened_at)',
       'CREATE INDEX IF NOT EXISTS idx_notes_item ON notes (item_id, updated_at)',
+      'CREATE INDEX IF NOT EXISTS idx_notes_page ON notes (library_id,item_id,deleted,updated_at DESC,id DESC)',
+      'CREATE INDEX IF NOT EXISTS idx_bookmarks_page ON bookmarks (library_id,item_id,deleted,updated_at DESC,id DESC)',
       'CREATE INDEX IF NOT EXISTS idx_bookmarks_item ON bookmarks (item_id, updated_at)',
       'CREATE INDEX IF NOT EXISTS idx_sync_changes_created ON sync_changes (created_at)',
     ];
@@ -1304,7 +1310,9 @@ class AppDatabase extends _$AppDatabase {
         bookmarks,
       ).get()).map((e) => e.toJson()).toList(),
       'sources': await exportMediaRows('library_sources'),
-      'itemAssets': (await customSelect('SELECT * FROM item_assets').get()).map((r)=>r.data).toList(),
+      'itemAssets': (await customSelect(
+        'SELECT * FROM item_assets',
+      ).get()).map((r) => r.data).toList(),
       'mediaRecords': await exportMediaRows('media_records'),
       'catalogRows': await CatalogIdentityStore(this).exportRows(),
       'settings': (await select(
@@ -1348,9 +1356,17 @@ class AppDatabase extends _$AppDatabase {
         .whereType<Map<String, dynamic>>()
         .toList();
     return {
-      'schemaVersion': 3, // Legacy transport adapter; independent of local schema.
+      'schemaVersion':
+          3, // Legacy transport adapter; independent of local schema.
       'exportedAt': snapshot['exportedAt'],
-      'protocolVersion': 1,
+      'protocolVersion': 2,
+      'capabilities': [
+        'catalog-v2',
+        'reader-locator-v1',
+        'field-overrides-v1',
+        'library-grants-v1',
+      ],
+      'catalogRows': await CatalogIdentityStore(this).transportRows(),
       'libraries': libraryRows,
       'sections': sectionRows,
       'items': itemRows,
@@ -1474,10 +1490,14 @@ class AppDatabase extends _$AppDatabase {
         await importMediaRows(snapshot, includeSources: true);
         await _backfillSources();
         for (final row in rows('itemAssets')) {
-          final itemId=row['item_id'], sourceId=row['source_id'], relative=row['relative_path'];
-          if(itemId is! String || sourceId is! String || relative is! String) throw const FormatException('Invalid asset binding');
-          final item=await getItemById(itemId);
-          if(item != null) await LibrarySourceStore(this).bind(item,sourceId,relative);
+          final itemId = row['item_id'],
+              sourceId = row['source_id'],
+              relative = row['relative_path'];
+          if (itemId is! String || sourceId is! String || relative is! String)
+            throw const FormatException('Invalid asset binding');
+          final item = await getItemById(itemId);
+          if (item != null)
+            await LibrarySourceStore(this).bind(item, sourceId, relative);
         }
         await LibrarySourceStore(this).backfill();
         await CatalogIdentityStore(this).importRows(snapshot['catalogRows']);

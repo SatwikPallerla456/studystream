@@ -76,10 +76,12 @@ class NativePlaybackTools extends StatefulWidget {
     required this.engine,
     required this.database,
     required this.itemId,
+    this.video = true,
   });
   final NativeVlcEngine engine;
   final AppDatabase database;
   final String itemId;
+  final bool video;
   @override
   State<NativePlaybackTools> createState() => _NativePlaybackToolsState();
 }
@@ -213,24 +215,26 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
                         (value) => _change(() => settings.bands[i] = value),
                       ),
                   ],
-                  const Divider(),
-                  for (final key in [
-                    'brightness',
-                    'contrast',
-                    'saturation',
-                    'gamma',
-                  ])
-                    _slider(
-                      key[0].toUpperCase() + key.substring(1),
-                      (settings.picture[key] as num?)?.toDouble() ?? 1,
-                      key == 'gamma' ? .01 : 0,
-                      key == 'gamma'
-                          ? 10
-                          : key == 'saturation'
-                          ? 3
-                          : 2,
-                      (value) => _change(() => settings.picture[key] = value),
-                    ),
+                  if (widget.video) ...[
+                    const Divider(),
+                    for (final key in [
+                      'brightness',
+                      'contrast',
+                      'saturation',
+                      'gamma',
+                    ])
+                      _slider(
+                        key[0].toUpperCase() + key.substring(1),
+                        (settings.picture[key] as num?)?.toDouble() ?? 1,
+                        key == 'gamma' ? .01 : 0,
+                        key == 'gamma'
+                            ? 10
+                            : key == 'saturation'
+                            ? 3
+                            : 2,
+                        (value) => _change(() => settings.picture[key] = value),
+                      ),
+                  ],
                   _slider(
                     'Audio delay (seconds)',
                     (settings.picture['audioDelay'] as num?)?.toDouble() ?? 0,
@@ -239,16 +243,17 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
                     (value) =>
                         _change(() => settings.picture['audioDelay'] = value),
                   ),
-                  _slider(
-                    'Subtitle delay (seconds)',
-                    (settings.picture['subtitleDelay'] as num?)?.toDouble() ??
-                        0,
-                    -5,
-                    5,
-                    (value) => _change(
-                      () => settings.picture['subtitleDelay'] = value,
+                  if (widget.video)
+                    _slider(
+                      'Subtitle delay (seconds)',
+                      (settings.picture['subtitleDelay'] as num?)?.toDouble() ??
+                          0,
+                      -5,
+                      5,
+                      (value) => _change(
+                        () => settings.picture['subtitleDelay'] = value,
+                      ),
                     ),
-                  ),
                   TextButton(
                     onPressed: () => _change(() {
                       settings.equalizer = false;

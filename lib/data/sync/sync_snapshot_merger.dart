@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 
 import '../../domain/services/sync_conflict_resolver.dart';
 import '../db/app_database.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
 
 class SyncSnapshotMerger {
   const SyncSnapshotMerger(this.database);
@@ -14,6 +15,11 @@ class SyncSnapshotMerger {
   }) async {
     bool allowed(String id) =>
         allowedLibraryIds == null || allowedLibraryIds.contains(id);
+    final protocol = snapshot['protocolVersion'] ?? 1;
+    if (protocol is! int || protocol < 1 || protocol > 2)
+      throw const FormatException(
+        'This client uses an unsupported sync protocol. Update Tangerine.',
+      );
     final schemaVersion = snapshot['schemaVersion'];
     if (schemaVersion is! int ||
         schemaVersion < 1 ||
@@ -219,6 +225,11 @@ class SyncSnapshotMerger {
       await database.importMediaRows(
         snapshot,
         allowedLibraryIds: allowedLibraryIds,
+      );
+      await CatalogIdentityStore(database).importRows(
+        snapshot['catalogRows'],
+        allowedLibraryIds: allowedLibraryIds,
+        transport: true,
       );
       for (final sectionId in affectedSections) {
         await database.refreshSectionCounts(sectionId);

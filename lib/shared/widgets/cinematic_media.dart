@@ -8,6 +8,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import 'item_artwork.dart';
+import 'remote_item_artwork.dart';
 
 abstract final class MediaVisuals {
   static const posterRatio = 2 / 3;
@@ -30,6 +31,7 @@ abstract final class MediaVisuals {
       : 'Play';
   static String route(Item item) => switch (item.itemType) {
     'video' || 'audio' => '/player/${Uri.encodeComponent(item.id)}',
+    'epub' || 'cbz' => '/book/${Uri.encodeComponent(item.id)}',
     'pdf' => '/pdf/${Uri.encodeComponent(item.id)}',
     _ => '/resource/${Uri.encodeComponent(item.id)}',
   };
@@ -47,18 +49,28 @@ class CinematicArtwork extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final path =
+        ref.watch(catalogArtworkPathProvider(item)).asData?.value ??
         item.thumbnailPath ??
         ref.watch(itemArtworkPathProvider(item)).asData?.value;
     Widget placeholder() => ColoredBox(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      color: Color.alphaBlend(
+        Theme.of(context).colorScheme.primary.withValues(alpha: .08),
+        Theme.of(context).colorScheme.surfaceContainerLow,
+      ),
       child: Center(
         child: Icon(
           MediaVisuals.icon(item),
           size: 52,
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          color: Theme.of(context).colorScheme.primary.withValues(alpha: .6),
         ),
       ),
     );
+    if (item.filePath.startsWith('remote:'))
+      return RemoteItemArtwork(
+        item: item,
+        placeholder: placeholder(),
+        fit: fit,
+      );
     if (path == null || path.isEmpty || path.startsWith('remote:')) {
       return placeholder();
     }
@@ -82,10 +94,13 @@ class CinematicMediaCard extends StatefulWidget {
     required this.onDetails,
     required this.onOpen,
     this.progressPercent,
+    this.displayTitle,
+    this.subtitle,
   });
   final Item item;
   final VoidCallback onDetails, onOpen;
   final double? progressPercent;
+  final String? displayTitle, subtitle;
   @override
   State<CinematicMediaCard> createState() => _CinematicMediaCardState();
 }
@@ -95,7 +110,9 @@ class _CinematicMediaCardState extends State<CinematicMediaCard> {
   @override
   Widget build(BuildContext context) {
     final item = widget.item;
-    final title = cleanDisplayTitle(item.userTitle ?? item.title);
+    final title = cleanDisplayTitle(
+      widget.displayTitle ?? item.userTitle ?? item.title,
+    );
     final scheme = Theme.of(context).colorScheme;
     return AnimatedContainer(
       duration: AppMotion.resolve(context, AppMotion.quick),
@@ -147,6 +164,21 @@ class _CinematicMediaCardState extends State<CinematicMediaCard> {
                           ),
                         ),
                       ),
+                      Positioned(
+                        right: 8,
+                        bottom: 8,
+                        child: IconButton.filled(
+                          tooltip: '${MediaVisuals.action(item)} $title',
+                          onPressed: item.unavailable ? null : widget.onOpen,
+                          icon: Icon(
+                            MediaVisuals.isReading(item)
+                                ? Icons.menu_book_rounded
+                                : item.itemType == 'image'
+                                ? Icons.open_in_full
+                                : Icons.play_arrow_rounded,
+                          ),
+                        ),
+                      ),
                       if (item.unavailable)
                         const Center(
                           child: Icon(Icons.cloud_off, color: Colors.white),
@@ -156,6 +188,19 @@ class _CinematicMediaCardState extends State<CinematicMediaCard> {
                 ),
               ),
             ),
+            if (widget.subtitle != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+                child: Tooltip(
+                  message: item.filename,
+                  child: Text(
+                    widget.subtitle!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ),
+              ),
             if (widget.progressPercent != null)
               LinearProgressIndicator(
                 value: (widget.progressPercent! / 100).clamp(0, 1),
@@ -173,18 +218,6 @@ class _CinematicMediaCardState extends State<CinematicMediaCard> {
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
-                  ),
-                  IconButton(
-                    tooltip: '${MediaVisuals.action(item)} $title',
-                    onPressed: item.unavailable ? null : widget.onOpen,
-                    icon: Icon(
-                      MediaVisuals.isReading(item)
-                          ? Icons.menu_book_rounded
-                          : item.itemType == 'image'
-                          ? Icons.open_in_full
-                          : Icons.play_circle_fill_rounded,
-                    ),
-                    color: scheme.primary,
                   ),
                 ],
               ),
@@ -204,9 +237,15 @@ class CinematicMediaRow extends StatefulWidget {
     required this.items,
     required this.onDetails,
     required this.onOpen,
+    this.displayTitles = const {},
+    this.progress = const {},
+    this.compact = false,
   });
   final String title;
+  final bool compact;
   final List<Item> items;
+  final Map<String, String> displayTitles;
+  final Map<String, double> progress;
   final ValueChanged<Item> onDetails, onOpen;
   @override
   State<CinematicMediaRow> createState() => _CinematicMediaRowState();
@@ -249,21 +288,23 @@ class _CinematicMediaRowState extends State<CinematicMediaRow> {
                 ),
               ),
             ),
-            IconButton(
-              tooltip: 'Previous in ${widget.title}',
-              onPressed: () => _move(-1),
-              icon: const Icon(Icons.chevron_left),
-            ),
-            IconButton(
-              tooltip: 'Next in ${widget.title}',
-              onPressed: () => _move(1),
-              icon: const Icon(Icons.chevron_right),
-            ),
+            if (widget.items.length > 1)
+              IconButton(
+                tooltip: 'Previous in ${widget.title}',
+                onPressed: () => _move(-1),
+                icon: const Icon(Icons.chevron_left),
+              ),
+            if (widget.items.length > 1)
+              IconButton(
+                tooltip: 'Next in ${widget.title}',
+                onPressed: () => _move(1),
+                icon: const Icon(Icons.chevron_right),
+              ),
           ],
         ),
         const SizedBox(height: AppSpace.sm),
         SizedBox(
-          height: 235 + 72 * scale,
+          height: (widget.compact ? 140 : 235) + 80 * scale,
           child: ListView.separated(
             key: PageStorageKey('media-row-${widget.title}'),
             controller: _scroll,
@@ -279,10 +320,12 @@ class _CinematicMediaRowState extends State<CinematicMediaRow> {
                   ? 300.0
                   : 176.0;
               return SizedBox(
-                width: width,
+                width: widget.compact ? 148 : width,
                 child: CinematicMediaCard(
                   key: ValueKey(item.id),
                   item: item,
+                  displayTitle: widget.displayTitles[item.id],
+                  progressPercent: widget.progress[item.id],
                   onDetails: () => widget.onDetails(item),
                   onOpen: () => widget.onOpen(item),
                 ),
@@ -387,6 +430,86 @@ class FeaturedMedia extends StatelessWidget {
           ),
         ),
       ],
+    ),
+  );
+}
+
+/// A real member supplies group artwork; missing artwork uses the same honest
+/// fallback as individual titles. Group navigation never starts playback.
+class CinematicGroupCard extends StatelessWidget {
+  const CinematicGroupCard({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.onOpen,
+    this.item,
+    this.icon = Icons.collections_bookmark_outlined,
+  });
+  final String title, subtitle;
+  final Item? item;
+  final IconData icon;
+  final VoidCallback onOpen;
+  @override
+  Widget build(BuildContext context) => Card(
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: onOpen,
+      child: Semantics(
+        button: true,
+        label: '$title, $subtitle',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (item != null)
+                    CinematicArtwork(item: item!)
+                  else
+                    ColoredBox(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest,
+                      child: Icon(icon, size: 48),
+                    ),
+                  Positioned(
+                    bottom: 8,
+                    right: 8,
+                    child: CircleAvatar(
+                      backgroundColor: Colors.black87,
+                      foregroundColor: Colors.white,
+                      radius: 16,
+                      child: Icon(icon, size: 18),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     ),
   );
 }

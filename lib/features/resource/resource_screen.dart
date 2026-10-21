@@ -15,6 +15,9 @@ import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/services/progress_writer.dart';
+import '../../domain/catalog/media_experience.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
+import '../reader/book_reader_screen.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
@@ -34,6 +37,10 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
   late final AppDatabase _database;
   final _scrollController = ScrollController();
   Item? _item;
+  MediaExperience _experience = const MediaExperience(
+    LibraryKind.mixed,
+    'document',
+  );
   ReadingProgressWriter? _writer;
   Timer? _saveTimer;
   String? _content;
@@ -58,6 +65,14 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
       final item = await _database.getItemById(widget.itemId);
       if (item == null) throw StateError('This resource no longer exists.');
       _item = item;
+      _experience = MediaExperience(
+        await MediaCatalogRepository(_database).libraryKind(item.libraryId),
+        item.itemType,
+      );
+      if ({'epub', 'cbz'}.contains(item.itemType)) {
+        if (mounted) setState(() => _loading = false);
+        return;
+      }
       final remote = item.filePath.startsWith('remote:');
       if (item.unavailable ||
           (!remote && !await File(item.filePath).exists())) {
@@ -101,16 +116,17 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
       final preferences = await ref
           .read(appPreferencesRepositoryProvider)
           .load();
-      _writer =
-          ReadingProgressWriter(
-              database: _database,
-              item: item,
-              completionThreshold: preferences.completionThreshold,
-            )
-            ..currentPage = (saved?.percentRead ?? 0).round().clamp(1, 100)
-            ..totalPages = 100
-            ..pagesVisited = (saved?.percentRead ?? 0) > 0 ? 2 : 1
-            ..scrollOffset = saved?.resumeScrollOffset ?? 0;
+      if (!_experience.photo)
+        _writer =
+            ReadingProgressWriter(
+                database: _database,
+                item: item,
+                completionThreshold: preferences.completionThreshold,
+              )
+              ..currentPage = (saved?.percentRead ?? 0).round().clamp(1, 100)
+              ..totalPages = 100
+              ..pagesVisited = (saved?.percentRead ?? 0) > 0 ? 2 : 1
+              ..scrollOffset = saved?.resumeScrollOffset ?? 0;
       switch (item.itemType) {
         case 'txt':
         case 'html':
@@ -194,7 +210,7 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
   Future<void> _navigate(bool forward) async {
     if (_navigating) return;
     final item = _item;
-    if (item == null) return;
+    if (item == null || !_experience.course) return;
     _navigating = true;
     await _writer?.save();
     final next = forward
@@ -246,8 +262,13 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
 
   void _showTools() {
     final item = _item;
-    if (item == null) return;
-    showLessonToolsSheet(context: context, database: _database, item: item);
+    if (item == null || !_experience.notes) return;
+    showLessonToolsSheet(
+      context: context,
+      database: _database,
+      item: item,
+      title: _experience.course ? 'Study tools' : 'Notes & bookmarks',
+    );
   }
 
   void _message(String message) {
@@ -280,6 +301,8 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
 
   @override
   Widget build(BuildContext context) {
+    if ({'epub', 'cbz'}.contains(_item?.itemType))
+      return BookReaderScreen(itemId: widget.itemId);
     final item = _item;
     final compact = AppBreakpoints.isCompact(context);
     return Scaffold(
@@ -293,17 +316,18 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
               showHome: true,
               onBack: _back,
               actions: [
-                if (!compact)
+                if (!compact && _experience.course)
                   IconButton(
                     tooltip: 'Previous lesson',
                     onPressed: item == null ? null : () => _navigate(false),
                     icon: const Icon(Icons.skip_previous_rounded),
                   ),
-                IconButton(
-                  tooltip: 'Study tools',
-                  onPressed: item == null ? null : _showTools,
-                  icon: const Icon(Icons.note_alt_outlined),
-                ),
+                if (_experience.notes)
+                  IconButton(
+                    tooltip: _experience.notesLabel,
+                    onPressed: item == null ? null : _showTools,
+                    icon: const Icon(Icons.note_alt_outlined),
+                  ),
                 if (!compact)
                   IconButton(
                     tooltip: 'Enter focus mode',
@@ -322,7 +346,7 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
                     if (value == 'incomplete') _setCompleted(false);
                   },
                   itemBuilder: (_) => [
-                    if (compact) ...[
+                    if (compact && _experience.course) ...[
                       const PopupMenuItem(
                         value: 'previous',
                         child: Text('Previous lesson'),
@@ -338,17 +362,19 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
                         value: 'open',
                         child: Text('Open externally'),
                       ),
-                    const PopupMenuItem(
-                      value: 'complete',
-                      child: Text('Mark complete'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'incomplete',
-                      child: Text('Mark incomplete'),
-                    ),
+                    if (_experience.completion)
+                      PopupMenuItem(
+                        value: 'complete',
+                        child: Text(_experience.completionLabel(false)),
+                      ),
+                    if (_experience.completion)
+                      PopupMenuItem(
+                        value: 'incomplete',
+                        child: Text(_experience.completionLabel(true)),
+                      ),
                   ],
                 ),
-                if (!compact)
+                if (!compact && _experience.course)
                   IconButton(
                     tooltip: 'Next lesson',
                     onPressed: item == null ? null : () => _navigate(true),
@@ -373,12 +399,16 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
             ),
         ],
       ),
-      bottomNavigationBar: !_focusMode && compact && item != null
+      bottomNavigationBar:
+          !_focusMode &&
+              compact &&
+              item != null &&
+              (_experience.course || _experience.notes)
           ? _ResourceBottomBar(
-              onPrevious: () => _navigate(false),
-              onStudy: _showTools,
+              onPrevious: _experience.course ? () => _navigate(false) : null,
+              onStudy: _experience.notes ? _showTools : null,
               onFocus: () => setState(() => _focusMode = true),
-              onNext: () => _navigate(true),
+              onNext: _experience.course ? () => _navigate(true) : null,
             )
           : null,
     );
@@ -532,10 +562,10 @@ class _ResourceBottomBar extends StatelessWidget {
     required this.onNext,
   });
 
-  final VoidCallback onPrevious;
-  final VoidCallback onStudy;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onStudy;
   final VoidCallback onFocus;
-  final VoidCallback onNext;
+  final VoidCallback? onNext;
 
   @override
   Widget build(BuildContext context) {
@@ -557,7 +587,7 @@ class _ResourceBottomBar extends StatelessWidget {
               icon: const Icon(Icons.skip_previous_rounded),
             ),
             IconButton(
-              tooltip: 'Study tools',
+              tooltip: 'Notes & bookmarks',
               onPressed: onStudy,
               icon: const Icon(Icons.note_alt_outlined),
             ),

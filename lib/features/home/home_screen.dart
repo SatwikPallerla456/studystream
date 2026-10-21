@@ -1,5 +1,3 @@
-import 'dart:io';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,31 +7,47 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/indexer/library_indexer.dart';
-import '../../data/platform/folder_access.dart';
 import '../../data/providers/app_providers.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
+import '../library/library_creation.dart';
+import '../library/library_scan_dialog.dart';
+import '../../shared/widgets/media_categories.dart';
 import '../../domain/services/media_import_service.dart';
 import '../../shared/widgets/content_state.dart';
-import '../../shared/widgets/continue_item_tile.dart';
+import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/library_card.dart';
 import '../../shared/widgets/study_shell.dart';
 import '../../shared/widgets/study_ui.dart';
 import '../../shared/widgets/study_motion.dart';
 import '../search/search_screen.dart';
 import '../settings/settings_screen.dart';
-import '../study/study_screen.dart';
 import '../media/cinematic_home_section.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.initialDestination = 0});
+  final int initialDestination;
 
   @override
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  int _destination = 0;
-  ScanProgress? _progress;
-  ScanCancellationToken? _scanToken;
+  late int _destination = widget.initialDestination;
+  static const _tabs = ['home', 'libraries', 'search', 'settings'];
+
+  @override
+  void didUpdateWidget(covariant HomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialDestination != widget.initialDestination) {
+      _destination = widget.initialDestination;
+    }
+  }
+
+  void _selectDestination(int value) {
+    setState(() => _destination = value);
+    context.go('/?tab=${_tabs[value]}');
+  }
+
   bool _importing = false;
 
   static const _destinations = [
@@ -53,18 +67,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       selectedIcon: Icons.manage_search_rounded,
     ),
     StudyShellDestination(
-      label: 'Study',
-      icon: Icons.auto_stories_outlined,
-      selectedIcon: Icons.auto_stories_rounded,
-    ),
-    StudyShellDestination(
       label: 'Settings',
       icon: Icons.tune_outlined,
       selectedIcon: Icons.tune_rounded,
     ),
   ];
 
-  bool get _scanning => _scanToken != null || _importing;
+  bool get _scanning => _importing;
 
   Future<void> _pickFiles() async {
     if (_scanning) return;
@@ -91,68 +100,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  Future<void> _pickFolder() async {
-    if (Platform.isAndroid || Platform.isIOS) {
-      await _pickFiles();
-      return;
-    }
-    final path = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Choose a course or library folder',
-    );
-    if (path == null || path.isEmpty || !mounted) return;
-    await FolderAccess.retain(path);
-    if (!mounted) return;
-    await _scan(path: path, title: cleanDisplayTitle(p.basename(path)));
-  }
-
-  Future<void> _scan({required String path, required String title}) async {
-    if (_scanning || !mounted) return;
-    final token = ScanCancellationToken();
-    setState(() {
-      _scanToken = token;
-      _progress = const ScanProgress(
-        phase: 'Preparing your library',
-        discoveredFiles: 0,
-        processedFiles: 0,
-      );
-    });
-    try {
-      final result = await ref
-          .read(libraryIndexerProvider)
-          .scanRootFolder(
-            rootFolderPath: path,
-            title: title,
-            cancellationToken: token,
-            onProgress: (progress) {
-              if (mounted) setState(() => _progress = progress);
-            },
-          );
-      if (!mounted) return;
-      final detail = result.errors.isEmpty
-          ? '${result.importedItems} lessons are ready'
-          : '${result.importedItems} lessons added · ${result.errors.length} files need attention';
-      _showMessage(detail, success: result.errors.isEmpty);
-      context.push('/library/${result.libraryId}');
-    } on ScanCancelledException {
-      if (mounted) {
-        _showMessage('Scan cancelled. Your existing library was kept.');
-      }
-    } catch (_) {
-      if (mounted) {
-        _showMessage(
-          'This folder could not be scanned. Check access and try again.',
-          error: true,
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _scanToken = null;
-          _progress = null;
-        });
-      }
-    }
-  }
+  Future<void> _pickFolder() => createMediaLibrary(context);
 
   Future<void> _removeLibrary(Library library) async {
     final confirmed = await showStudyAdaptiveModal<bool>(
@@ -174,12 +122,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _openItem(Item item) {
-    final route = switch (item.itemType) {
-      'video' || 'audio' => '/player/${item.id}',
-      'pdf' => '/pdf/${item.id}',
-      _ => '/resource/${item.id}',
-    };
-    context.push(route);
+    context.push(MediaVisuals.route(item));
   }
 
   void _showMessage(
@@ -210,7 +153,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   void dispose() {
-    _scanToken?.cancel();
     super.dispose();
   }
 
@@ -223,26 +165,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         onAddLibrary: _pickFolder,
         onAddFiles: _scanning ? null : _pickFiles,
         onOpenItem: _openItem,
-        onOpenLibraries: () => setState(() => _destination = 1),
+        onOpenLibraries: () => _selectDestination(1),
       ),
       _LibrariesPage(
         database: database,
-        scanProgress: _progress,
+        scanProgress: null,
         scanning: _scanning,
-        onCancelScan: _scanToken?.cancel,
+        onCancelScan: null,
         onAddLibrary: _pickFolder,
-        onRescan: (library) =>
-            _scan(path: library.rootFolderPath, title: library.title),
+        onRescan: (library) => showLibraryScan(context, libraryId: library.id),
         onRemove: _removeLibrary,
       ),
       const SearchScreen(),
-      const StudyScreen(),
       const SettingsScreen(),
     ];
 
     return StudyShell(
       index: _destination,
-      onDestinationSelected: (value) => setState(() => _destination = value),
+      onDestinationSelected: _selectDestination,
       destinations: _destinations,
       child: StudyPageTransition(
         selection: _destination,
@@ -277,39 +217,52 @@ class _HomeDashboard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               StudyPageHeader(
-                eyebrow: 'MYVLC / YOUR LIBRARY',
-                title: 'Your media, all in one place',
-                description:
-                    'Watch, listen, read, and learn. Local files and server libraries live together here.',
+                title: 'Home',
                 actions: [
-                  FilledButton.icon(
-                    onPressed: onAddLibrary,
-                    icon: const Icon(Icons.add_rounded),
-                    label: const Text('Add library'),
+                  TextButton.icon(
+                    onPressed: () => context.push('/browse'),
+                    icon: const Icon(Icons.grid_view_outlined),
+                    label: const Text('Browse all'),
                   ),
-                  OutlinedButton.icon(
-                    onPressed: onAddFiles,
-                    icon: const Icon(Icons.note_add_outlined),
-                    label: const Text('Add files'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () => context.push('/network'),
-                    icon: const Icon(Icons.lan_outlined),
-                    label: const Text('Network'),
+                  PopupMenuButton<String>(
+                    tooltip: 'Add media',
+                    onSelected: (value) {
+                      if (value == 'library') onAddLibrary();
+                      if (value == 'files') onAddFiles?.call();
+                    },
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'library',
+                        child: Text('Add library folder'),
+                      ),
+                      PopupMenuItem(
+                        value: 'files',
+                        enabled: onAddFiles != null,
+                        child: const Text('Add files'),
+                      ),
+                    ],
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.add),
+                          SizedBox(width: 8),
+                          Text('Add media'),
+                        ],
+                      ),
+                    ),
                   ),
                 ],
               ),
-              const SizedBox(height: AppSpace.xl),
-              if ((snapshot.data ?? const <Library>[]).isNotEmpty) ...[
-                CinematicHomeSection(onOpen: onOpenItem),
-                const SizedBox(height: AppSpace.xl),
-                OutlinedButton.icon(
-                  onPressed: () => context.push('/browse'),
-                  icon: const Icon(Icons.grid_view),
-                  label: const Text('Browse all media'),
-                ),
-                const SizedBox(height: AppSpace.xl),
-              ],
+              const SizedBox(height: AppSpace.lg),
+              const Text('Browse by category'),
+              const SizedBox(height: 12),
+              const MediaCategories(compact: true),
+              const SizedBox(height: 24),
               if (snapshot.hasError)
                 ContentState(
                   icon: Icons.cloud_off_rounded,
@@ -323,12 +276,23 @@ class _HomeDashboard extends StatelessWidget {
               else if ((snapshot.data ?? const <Library>[]).isEmpty)
                 _Onboarding(onAddLibrary: onAddLibrary)
               else
-                _PopulatedHome(
-                  database: database,
-                  libraries: snapshot.data!,
-                  onAddLibrary: onAddLibrary,
-                  onOpenItem: onOpenItem,
-                  onOpenLibraries: onOpenLibraries,
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    CinematicHomeSection(onOpen: onOpenItem),
+                    StudySectionHeader(
+                      title: 'Libraries',
+                      trailing: TextButton(
+                        onPressed: onOpenLibraries,
+                        child: const Text('View all'),
+                      ),
+                    ),
+                    const SizedBox(height: AppSpace.sm),
+                    _QuickLibraries(
+                      database: database,
+                      libraries: snapshot.data!.take(4).toList(),
+                    ),
+                  ],
                 ),
             ],
           );
@@ -381,49 +345,6 @@ class _Onboarding extends StatelessWidget {
             ),
           ),
           const SizedBox(height: AppSpace.xl),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final steps = [
-                const _OnboardingStep(
-                  number: '1',
-                  title: 'Choose a folder',
-                  description: 'Your original files remain in place.',
-                ),
-                const _OnboardingStep(
-                  number: '2',
-                  title: 'Let us organise it',
-                  description: 'Nested folders become clear sections.',
-                ),
-                const _OnboardingStep(
-                  number: '3',
-                  title: 'Play, read, or learn',
-                  description: 'Keep progress, notes, and bookmarks together.',
-                ),
-              ];
-              if (constraints.maxWidth < 720) {
-                return Column(
-                  children: [
-                    for (var i = 0; i < steps.length; i++) ...[
-                      steps[i],
-                      if (i != steps.length - 1)
-                        const SizedBox(height: AppSpace.sm),
-                    ],
-                  ],
-                );
-              }
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  for (var i = 0; i < steps.length; i++) ...[
-                    Expanded(child: steps[i]),
-                    if (i != steps.length - 1)
-                      const SizedBox(width: AppSpace.sm),
-                  ],
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: AppSpace.xl),
           FilledButton.icon(
             onPressed: onAddLibrary,
             icon: const Icon(Icons.create_new_folder_outlined),
@@ -440,319 +361,6 @@ class _Onboarding extends StatelessWidget {
   }
 }
 
-class _OnboardingStep extends StatelessWidget {
-  const _OnboardingStep({
-    required this.number,
-    required this.title,
-    required this.description,
-  });
-
-  final String number;
-  final String title;
-  final String description;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(AppSpace.md),
-      decoration: BoxDecoration(
-        color: context.studyColors.surfaceRaised,
-        borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border.all(color: context.studyColors.outlineSoft),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primary,
-              shape: BoxShape.circle,
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              number,
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: Theme.of(context).colorScheme.onPrimary,
-              ),
-            ),
-          ),
-          const SizedBox(width: AppSpace.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(height: AppSpace.xxs),
-                Text(description, style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PopulatedHome extends StatelessWidget {
-  const _PopulatedHome({
-    required this.database,
-    required this.libraries,
-    required this.onAddLibrary,
-    required this.onOpenItem,
-    required this.onOpenLibraries,
-  });
-
-  final AppDatabase database;
-  final List<Library> libraries;
-  final VoidCallback onAddLibrary;
-  final ValueChanged<Item> onOpenItem;
-  final VoidCallback onOpenLibraries;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _LearningOverview(libraryCount: libraries.length),
-        const SizedBox(height: AppSpace.xxl),
-        for (final kind in _ContinueKind.values) ...[
-          _ContinueSection(
-            key: ValueKey('continue-${kind.itemType}'),
-            kind: kind,
-            database: database,
-            onOpen: onOpenItem,
-          ),
-          const SizedBox(height: AppSpace.xxl),
-        ],
-        StudySectionHeader(
-          title: 'Your libraries',
-          description: 'Quick access to the collections you return to most.',
-          trailing: TextButton.icon(
-            onPressed: onOpenLibraries,
-            icon: const Icon(Icons.arrow_forward_rounded),
-            label: const Text('View all'),
-          ),
-        ),
-        const SizedBox(height: AppSpace.md),
-        _QuickLibraries(
-          database: database,
-          libraries: libraries.take(4).toList(),
-        ),
-      ],
-    );
-  }
-}
-
-class _LearningOverview extends StatelessWidget {
-  const _LearningOverview({required this.libraryCount});
-
-  final int libraryCount;
-
-  @override
-  Widget build(BuildContext context) {
-    return StudySurface(
-      emphasized: true,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final content = Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const StudyStatusBadge(
-                label: 'Local & private',
-                icon: Icons.lock_outline_rounded,
-                tone: StudyStatusTone.success,
-              ),
-              const SizedBox(height: AppSpace.md),
-              Text(
-                'Your media, on your terms',
-                style: Theme.of(context).textTheme.headlineMedium,
-              ),
-              const SizedBox(height: AppSpace.xs),
-              Text(
-                '$libraryCount ${libraryCount == 1 ? 'library is' : 'libraries are'} organised and ready on this device.',
-                style: Theme.of(context).textTheme.bodyLarge,
-              ),
-            ],
-          );
-          final mark = Container(
-            width: 72,
-            height: 72,
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primaryContainer,
-              borderRadius: BorderRadius.circular(AppRadius.xl),
-            ),
-            child: Icon(
-              Icons.slow_motion_video_rounded,
-              size: 36,
-              color: Theme.of(context).colorScheme.onPrimaryContainer,
-            ),
-          );
-          if (constraints.maxWidth < 620) {
-            return content;
-          }
-          return Row(
-            children: [
-              Expanded(child: content),
-              const SizedBox(width: AppSpace.lg),
-              mark,
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-enum _ContinueKind {
-  watching(
-    'video',
-    'Continue Watching',
-    'Your recent videos, ready where you left them.',
-    'No videos in progress',
-    'Start a video lesson from your libraries to pick it up here.',
-    Icons.play_circle_outline_rounded,
-  ),
-  listening(
-    'audio',
-    'Continue Listening',
-    'Pick up music and audio at the saved moment.',
-    'No audio in progress',
-    'Start an audio lesson from your libraries to pick it up here.',
-    Icons.headphones_rounded,
-  ),
-  reading(
-    'pdf',
-    'Continue Reading',
-    'Return to your PDFs at the page you reached.',
-    'No reading in progress',
-    'Open a PDF from your libraries to return to it here.',
-    Icons.menu_book_rounded,
-  );
-
-  const _ContinueKind(
-    this.itemType,
-    this.title,
-    this.description,
-    this.emptyTitle,
-    this.emptyMessage,
-    this.icon,
-  );
-
-  final String itemType;
-  final String title;
-  final String description;
-  final String emptyTitle;
-  final String emptyMessage;
-  final IconData icon;
-}
-
-class _ContinueSection extends StatefulWidget {
-  const _ContinueSection({
-    super.key,
-    required this.kind,
-    required this.database,
-    required this.onOpen,
-  });
-
-  final _ContinueKind kind;
-  final AppDatabase database;
-  final ValueChanged<Item> onOpen;
-
-  @override
-  State<_ContinueSection> createState() => _ContinueSectionState();
-}
-
-class _ContinueSectionState extends State<_ContinueSection> {
-  late Stream<List<ContinueEntry>> _entries;
-
-  @override
-  void initState() {
-    super.initState();
-    _watchEntries();
-  }
-
-  @override
-  void didUpdateWidget(covariant _ContinueSection oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.database != oldWidget.database ||
-        widget.kind != oldWidget.kind) {
-      _watchEntries();
-    }
-  }
-
-  void _watchEntries() {
-    _entries = widget.kind == _ContinueKind.reading
-        ? widget.database.watchRecentReadingEntries(limit: 6)
-        : widget.database.watchRecentPlaybackEntries(
-            itemType: widget.kind.itemType,
-            limit: 6,
-          );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final kind = widget.kind;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        StudySectionHeader(title: kind.title, description: kind.description),
-        const SizedBox(height: AppSpace.md),
-        StreamBuilder<List<ContinueEntry>>(
-          stream: _entries,
-          builder: (context, snapshot) {
-            if (snapshot.hasError) {
-              return const ContentState(
-                icon: Icons.history_toggle_off_rounded,
-                title: 'Recent activity is unavailable',
-                message:
-                    'Your library is safe. Reopen this screen to try again.',
-                tone: ContentStateTone.error,
-                compact: true,
-              );
-            }
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const ContentLoadingState(label: 'Loading recent lessons');
-            }
-            final entries = snapshot.data ?? const <ContinueEntry>[];
-            if (entries.isEmpty) {
-              return ContentState(
-                icon: kind.icon,
-                title: kind.emptyTitle,
-                message: kind.emptyMessage,
-                compact: true,
-              );
-            }
-            return LayoutBuilder(
-              builder: (context, constraints) {
-                final columns = constraints.maxWidth >= 1040 ? 2 : 1;
-                final width =
-                    (constraints.maxWidth - AppSpace.sm * (columns - 1)) /
-                    columns;
-                return Wrap(
-                  spacing: AppSpace.sm,
-                  runSpacing: AppSpace.sm,
-                  children: [
-                    for (final entry in entries)
-                      SizedBox(
-                        width: width,
-                        child: ContinueItemTile(
-                          entry: entry,
-                          onTap: () => widget.onOpen(entry.item),
-                        ),
-                      ),
-                  ],
-                );
-              },
-            );
-          },
-        ),
-      ],
-    );
-  }
-}
-
 class _QuickLibraries extends StatelessWidget {
   const _QuickLibraries({required this.database, required this.libraries});
 
@@ -761,34 +369,19 @@ class _QuickLibraries extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns = constraints.maxWidth >= 1050
-            ? 3
-            : constraints.maxWidth >= 640
-            ? 2
-            : 1;
-        return GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: libraries.length.clamp(0, columns == 3 ? 3 : 4),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columns,
-            mainAxisExtent:
-                430 + (MediaQuery.textScalerOf(context).scale(16) - 16) * 10,
-            crossAxisSpacing: AppSpace.sm,
-            mainAxisSpacing: AppSpace.sm,
-          ),
-          itemBuilder: (context, index) {
-            final library = libraries[index];
-            return LibraryCard(
+    return Column(
+      children: [
+        for (final library in libraries)
+          Padding(
+            padding: const EdgeInsets.only(bottom: AppSpace.sm),
+            child: LibraryCard(
               library: library,
               stats: database.getLibraryStats(library.id),
+              layout: LibraryCardLayout.list,
               onTap: () => context.push('/library/${library.id}'),
-            );
-          },
-        );
-      },
+            ),
+          ),
+      ],
     );
   }
 }
@@ -821,7 +414,7 @@ class _LibrariesPage extends StatefulWidget {
 class _LibrariesPageState extends State<_LibrariesPage> {
   final _searchController = TextEditingController();
   _LibrarySort _sort = _LibrarySort.title;
-  LibraryCardLayout _layout = LibraryCardLayout.grid;
+  LibraryCardLayout _layout = LibraryCardLayout.list;
 
   @override
   void dispose() {
@@ -836,10 +429,7 @@ class _LibrariesPageState extends State<_LibrariesPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           StudyPageHeader(
-            eyebrow: 'Collections',
             title: 'Libraries',
-            description:
-                'Organise the course folders already on your device and keep every lesson easy to find.',
             actions: [
               FilledButton.icon(
                 onPressed: widget.scanning ? null : widget.onAddLibrary,
@@ -860,7 +450,19 @@ class _LibrariesPageState extends State<_LibrariesPage> {
               onCancel: widget.onCancelScan,
             ),
           ],
-          const SizedBox(height: AppSpace.xl),
+          const SizedBox(height: 24),
+          Text(
+            'Media categories',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 12),
+          const MediaCategories(),
+          const SizedBox(height: 24),
+          Text(
+            'Source libraries',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 12),
           _LibraryToolbar(
             controller: _searchController,
             sort: _sort,

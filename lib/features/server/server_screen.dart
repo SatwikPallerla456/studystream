@@ -17,6 +17,9 @@ import '../../data/sync/lan_sync_server.dart';
 import '../../domain/models/device_configuration.dart';
 import '../../domain/services/media_import_service.dart';
 import '../../shared/widgets/study_ui.dart';
+import 'library_grants_screen.dart';
+import '../library/library_setup_sheet.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
 
 class ServerScreen extends ConsumerStatefulWidget {
   const ServerScreen({super.key});
@@ -83,12 +86,14 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     if (path == null || !mounted) return;
     await FolderAccess.retain(path);
     if (!mounted) return;
+    final setup = await showLibrarySetup(context, p.basename(path));
+    if (setup == null || !mounted) return;
     final token = _scanToken = ScanCancellationToken();
-    await ref
+    final result = await ref
         .read(libraryIndexerProvider)
         .scanRootFolder(
           rootFolderPath: path,
-          title: p.basename(path),
+          title: setup.name,
           cancellationToken: token,
           onProgress: (progress) {
             if (mounted) {
@@ -99,6 +104,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             }
           },
         );
+    await MediaCatalogRepository(
+      ref.read(appDatabaseProvider),
+    ).setLibraryKind(result.libraryId, setup.kind);
     _scanToken = null;
   });
 
@@ -138,7 +146,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          'Tangerine / Server',
+          'Media server',
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
@@ -182,9 +190,6 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     StudyPageHeader(
-                      eyebrow: state.running
-                          ? 'Server online'
-                          : 'Your media, everywhere at home',
                       title: state.running
                           ? state.name
                           : 'Set up your media server',
@@ -342,7 +347,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                           ? 'Shared libraries'
                           : '2. Add your media',
                       description:
-                          'All local libraries are shared with approved players. Adding files copies them into this app; adding a folder keeps media in place.',
+                          'Choose library access for each approved player. Adding files copies them into this app; adding a folder keeps media in place.',
                       icon: Icons.video_library_outlined,
                       trailing: StudyStatusBadge(
                         label: '${libraries.length} libraries',
@@ -527,6 +532,12 @@ class _ApprovedPlayers extends StatelessWidget {
                 leading: const Icon(Icons.devices_rounded),
                 title: Text(device.name),
                 subtitle: Text(device.lastAddress ?? 'Paired player'),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        LibraryGrantsScreen(database: database, device: device),
+                  ),
+                ),
                 trailing: TextButton(
                   onPressed: () async {
                     final revoke = await showStudyAdaptiveModal<bool>(

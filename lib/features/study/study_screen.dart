@@ -79,7 +79,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
         return _EntryContext(
           libraryTitle: library?.title ?? 'Unknown library',
           sectionTitle: 'Missing section',
-          itemTitle: 'Missing lesson',
+          itemTitle: 'Missing item',
           item: null,
         );
       }
@@ -234,7 +234,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
       context: context,
       builder: (_) => const StudyConfirmDialog(
         title: 'Delete this note?',
-        message: 'This note will be removed from your Study space.',
+        message: 'This note will be removed from Notes & bookmarks.',
         confirmLabel: 'Delete note',
         icon: Icons.delete_outline_rounded,
         destructive: true,
@@ -251,7 +251,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
       context: context,
       builder: (_) => const StudyConfirmDialog(
         title: 'Delete this bookmark?',
-        message: 'This saved location will be removed from your Study space.',
+        message: 'This saved location will be removed from Notes & bookmarks.',
         confirmLabel: 'Delete bookmark',
         icon: Icons.bookmark_remove_outlined,
         destructive: true,
@@ -281,6 +281,12 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
         queryParameters: positionSeconds == null
             ? null
             : {'position': positionSeconds.toString()},
+      ).toString(),
+      'epub' || 'cbz' => Uri(
+        path: '/book/${Uri.encodeComponent(item.id)}',
+        queryParameters: pageNumber == null
+            ? null
+            : {'page': pageNumber.toString()},
       ).toString(),
       'pdf' => Uri(
         path: '/pdf/${item.id}',
@@ -312,12 +318,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const StudyPageHeader(
-                eyebrow: 'Your ideas and moments',
-                title: 'Study',
-                description:
-                    'Review the notes you wrote and the moments you marked across every library.',
-              ),
+              const StudyPageHeader(title: 'Notes & bookmarks'),
               const SizedBox(height: AppSpace.lg),
               SizedBox(
                 width: double.infinity,
@@ -414,7 +415,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
             icon: Icons.note_add_outlined,
             title: 'Your notes will collect here',
             message:
-                'Open a lesson and use Study tools to capture a thought at a moment or page.',
+                'Add notes while reading a book or document, or studying a course.',
           )
         : const ContentState(
             icon: Icons.filter_alt_off_rounded,
@@ -480,7 +481,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
             icon: Icons.bookmark_add_outlined,
             title: 'No bookmarks yet',
             message:
-                'Save useful moments and pages from the Study tools in any lesson.',
+                'Save a page in a reader or a moment in a course to find it here.',
           )
         : const ContentState(
             icon: Icons.filter_alt_off_rounded,
@@ -714,11 +715,11 @@ class _StudyFilters extends StatelessWidget {
                 child: DropdownButtonFormField<String>(
                   initialValue: itemId ?? '__all__',
                   isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'Lesson'),
+                  decoration: const InputDecoration(labelText: 'Title'),
                   items: [
                     const DropdownMenuItem(
                       value: '__all__',
-                      child: Text('All lessons'),
+                      child: Text('All titles'),
                     ),
                     for (final item in sectionItems)
                       DropdownMenuItem(

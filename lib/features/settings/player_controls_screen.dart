@@ -9,6 +9,7 @@ import '../../data/providers/app_providers.dart';
 import '../../domain/services/player_controls_repository.dart';
 import '../../domain/services/player_profile_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/study_ui.dart';
 
 class PlayerControlsScreen extends ConsumerStatefulWidget {
   const PlayerControlsScreen({super.key});
@@ -305,59 +306,70 @@ class _PlayerControlsScreenState extends ConsumerState<PlayerControlsScreen> {
                     },
                   ),
                 ),
-              const Text(
-                'Keyboard shortcuts',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const Text(
-                'Example: Control+Shift+P. Leave a binding empty to disable it.',
-              ),
-              for (final row in playerActionTitles.entries)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Wrap(
-                    spacing: 12,
-                    runSpacing: 8,
-                    children: [
-                      SizedBox(
-                        width: 260,
-                        child: TextField(
-                          controller: _local[row.key],
-                          decoration: InputDecoration(labelText: row.value),
+              const SizedBox(height: 16),
+              StudySection(
+                title: 'Keyboard shortcuts',
+                icon: Icons.keyboard_outlined,
+                collapsible: true,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Example: Control+Shift+P. Leave a binding empty to disable it.',
+                    ),
+                    for (final row in playerActionTitles.entries)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Wrap(
+                          spacing: 12,
+                          runSpacing: 8,
+                          children: [
+                            SizedBox(
+                              width: 260,
+                              child: TextField(
+                                controller: _local[row.key],
+                                decoration: InputDecoration(
+                                  labelText: row.value,
+                                ),
+                              ),
+                            ),
+                            if (Platform.isMacOS)
+                              SizedBox(
+                                width: 260,
+                                child: TextField(
+                                  controller: _global[row.key],
+                                  decoration: InputDecoration(
+                                    labelText: '${row.value} · global',
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
-                      if (Platform.isMacOS)
-                        SizedBox(
-                          width: 260,
-                          child: TextField(
-                            controller: _global[row.key],
-                            decoration: InputDecoration(
-                              labelText: '${row.value} · global',
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                    OutlinedButton(
+                      onPressed: () => setState(() {
+                        for (final action in playerActionTitles.keys) {
+                          _local[action]!.text =
+                              playerShortcutDefaults[action] ?? '';
+                          _global[action]!.clear();
+                        }
+                      }),
+                      child: const Text('Reset shortcuts'),
+                    ),
+                  ],
                 ),
-              OutlinedButton(
-                onPressed: () => setState(() {
-                  for (final action in playerActionTitles.keys) {
-                    _local[action]!.text = playerShortcutDefaults[action] ?? '';
-                    _global[action]!.clear();
-                  }
-                }),
-                child: const Text('Reset shortcuts'),
               ),
               if (_fields.isNotEmpty) ...[
-                const Divider(),
-                const Text(
-                  'Native libVLC preferences',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+                const SizedBox(height: 16),
+                StudySection(
+                  title: 'Native engine preferences',
+                  description: 'Decoder, track, network and output options.',
+                  icon: Icons.tune,
+                  collapsible: true,
+                  child: Column(
+                    children: [for (final field in _fields) _field(field)],
+                  ),
                 ),
-                const Text(
-                  'Supported decoder, track, network and output options from MyVLC. Credentials and account settings remain in their secure stores.',
-                ),
-                for (final field in _fields) _field(field),
               ],
             ],
           ),

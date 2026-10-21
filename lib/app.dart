@@ -10,10 +10,15 @@ import 'features/server/server_screen.dart';
 import 'features/server/network_screen.dart';
 import 'features/library/library_screen.dart';
 import 'features/library/library_sources_screen.dart';
+import 'features/library/media_category_screen.dart';
+import 'features/library/library_identification_screen.dart';
+import 'features/study/study_screen.dart';
+import 'domain/catalog/media_catalog_repository.dart';
 import 'features/media/media_details_screen.dart';
 import 'features/media/media_browse_screen.dart';
 import 'features/player/media_player_screen.dart';
 import 'features/reader/pdf_reader_screen.dart';
+import 'features/reader/book_reader_screen.dart';
 import 'features/resource/resource_screen.dart';
 import 'features/playlists/playlists_screen.dart';
 import 'features/settings/player_controls_screen.dart';
@@ -21,7 +26,29 @@ import 'features/settings/player_controls_screen.dart';
 final _router = GoRouter(
   initialLocation: '/',
   routes: [
-    GoRoute(path: '/', builder: (context, state) => const DeviceHome()),
+    GoRoute(
+      path: '/',
+      redirect: (context, state) =>
+          state.uri.queryParameters['tab'] == 'notes' ? '/study' : null,
+      builder: (context, state) =>
+          DeviceHome(tab: state.uri.queryParameters['tab']),
+    ),
+    GoRoute(path: '/study', builder: (_, _) => const StudyScreen()),
+    GoRoute(
+      path: '/category/:kind',
+      builder: (context, state) => MediaCategoryScreen(
+        kind: LibraryKind.values.firstWhere(
+          (kind) => kind.name == state.pathParameters['kind'],
+          orElse: () => LibraryKind.mixed,
+        ),
+      ),
+    ),
+    GoRoute(
+      path: '/library/:libraryId/identify',
+      builder: (context, state) => LibraryIdentificationScreen(
+        libraryId: state.pathParameters['libraryId']!,
+      ),
+    ),
     GoRoute(
       path: '/mode',
       builder: (context, state) => const ModeSelectionScreen(),
@@ -40,7 +67,11 @@ final _router = GoRouter(
       path: '/network',
       builder: (context, state) => const NetworkScreen(),
     ),
-    GoRoute(path:'/library/:libraryId/sources',builder:(context,state)=>LibrarySourcesScreen(libraryId:state.pathParameters['libraryId']!)),
+    GoRoute(
+      path: '/library/:libraryId/sources',
+      builder: (context, state) =>
+          LibrarySourcesScreen(libraryId: state.pathParameters['libraryId']!),
+    ),
     GoRoute(
       path: '/library/:libraryId',
       builder: (context, state) =>
@@ -58,11 +89,20 @@ final _router = GoRouter(
     GoRoute(
       path: '/player/:itemId',
       builder: (context, state) => MediaPlayerScreen(
+        key: ValueKey(state.uri.toString()),
+        multipartRepresentationId: state.uri.queryParameters['title'],
         itemId: state.pathParameters['itemId']!,
         fromQueue: state.uri.queryParameters['queue'] == '1',
         initialPositionSeconds: double.tryParse(
           state.uri.queryParameters['position'] ?? '',
         ),
+      ),
+    ),
+    GoRoute(
+      path: '/book/:itemId',
+      builder: (context, state) => BookReaderScreen(
+        itemId: state.pathParameters['itemId']!,
+        initialPage: int.tryParse(state.uri.queryParameters['page'] ?? ''),
       ),
     ),
     GoRoute(

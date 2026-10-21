@@ -1,16 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../domain/catalog/catalog_online_policy.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
+import '../../domain/catalog/catalog_playback.dart';
+import '../../domain/catalog/catalog_hints.dart';
+import '../../domain/catalog/media_experience.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
 import '../../shared/widgets/study_ui.dart';
+import 'catalog_editor_screen.dart';
+import 'media_versions_section.dart';
+import 'technical_media_panel.dart';
+import '../library/collections_screen.dart';
 
 class _Details {
   const _Details(
@@ -19,20 +28,29 @@ class _Details {
     this.metadata,
     this.favorite,
     this.playback,
-    this.reading,
-  );
+    this.reading, {
+    required this.experience,
+    this.multipart = false,
+    this.partsResume = false,
+    this.partsComplete = false,
+    this.partsAvailable = false,
+  });
   final Item item;
   final Library? library;
   final Map<String, dynamic> metadata;
   final bool favorite;
   final PlaybackProgressData? playback;
   final ReadingProgressData? reading;
-  bool get completed =>
-      playback?.completed == true || reading?.completed == true;
-  bool get hasResume =>
-      (playback?.resumePositionSeconds ?? 0) > 0 ||
-      (reading?.resumePage ?? 1) > 1 ||
-      (reading?.resumeScrollOffset ?? 0) > 0;
+  final MediaExperience experience;
+  final bool multipart, partsResume, partsComplete, partsAvailable;
+  bool get completed => multipart
+      ? partsComplete
+      : playback?.completed == true || reading?.completed == true;
+  bool get hasResume => multipart
+      ? partsResume
+      : (playback?.resumePositionSeconds ?? 0) > 0 ||
+            (reading?.resumePage ?? 1) > 1 ||
+            (reading?.resumeScrollOffset ?? 0) > 0;
 }
 
 class MediaDetailsScreen extends ConsumerStatefulWidget {
@@ -62,6 +80,16 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
     final item = await db.getItemById(widget.itemId);
     if (item == null) return null;
     final catalog = MediaCatalogRepository(db);
+    TitleFiles? files;
+    try {
+      files = await CatalogPlayback(db).files(item);
+    } on FormatException {
+      /* Exact-file Details remains usable without catalog identity. */
+    }
+    final parts = files?.parts ?? <CatalogPart>[];
+    final histories = await Future.wait(
+      parts.map((part) => db.getPlaybackByItemId(part.item.id)),
+    );
     return _Details(
       item,
       await db.getLibraryById(item.libraryId),
@@ -70,6 +98,20 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
           true,
       await db.getPlaybackByItemId(item.id),
       await db.getReadingByItemId(item.id),
+      experience: MediaExperience(
+        await catalog.libraryKind(item.libraryId),
+        item.itemType,
+      ),
+      multipart: parts.isNotEmpty,
+      partsResume: histories.any(
+        (progress) =>
+            progress?.completed == true ||
+            (progress?.resumePositionSeconds ?? 0) > 0,
+      ),
+      partsComplete:
+          histories.isNotEmpty &&
+          histories.every((progress) => progress?.completed == true),
+      partsAvailable: parts.every((part) => !part.item.unavailable),
     );
   }
 
@@ -96,12 +138,32 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
     }
   }
 
-  Future<void> _open(Item item) async {
-    await context.push(MediaVisuals.route(item));
-    if (mounted) {
-      setState(() {
-        _details = _load();
-      });
+  Future<void> _open(_Details details) async {
+    try {
+      final item = details.item;
+      var route = MediaVisuals.route(item);
+      if (details.multipart) {
+        final target = await CatalogPlayback(
+          ref.read(appDatabaseProvider),
+        ).resumePart(item.id);
+        route = CatalogPlayback.partRoute(
+          item.id,
+          target.itemId,
+          position: target.position,
+        );
+      }
+      if (!mounted) return;
+      await context.push(route);
+      if (mounted) setState(() => _details = _load());
+    } on Object {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'This title could not open. Check its files and source availability.',
+            ),
+          ),
+        );
     }
   }
 
@@ -168,10 +230,15 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                       const SizedBox(height: AppSpace.sm),
                       Text(
                         [
+                          if (CatalogHints.episodeLabel(details.metadata)
+                              case final String episode)
+                            episode,
                           if (details.metadata['year'] != null)
                             '${details.metadata['year']}',
                           item.itemType.toUpperCase(),
-                          if (details.completed) 'Completed',
+                          if (details.completed &&
+                              details.experience.completion)
+                            details.experience.completedLabel,
                           item.filePath.startsWith('remote:')
                               ? 'Server'
                               : 'Local',
@@ -194,9 +261,12 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                         runSpacing: AppSpace.sm,
                         children: [
                           FilledButton.icon(
-                            onPressed: item.unavailable
+                            onPressed:
+                                (details.multipart
+                                    ? !details.partsAvailable
+                                    : item.unavailable)
                                 ? null
-                                : () => _open(item),
+                                : () => _open(details),
                             icon: Icon(
                               MediaVisuals.isReading(item)
                                   ? Icons.menu_book
@@ -204,22 +274,60 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                             ),
                             label: Text(
                               details.hasResume && !details.completed
-                                  ? 'Resume'
+                                  ? (details.multipart
+                                        ? 'Resume title'
+                                        : 'Resume')
+                                  : details.multipart
+                                  ? 'Play title'
                                   : MediaVisuals.action(item),
                             ),
                           ),
-                          OutlinedButton.icon(
-                            onPressed: () => showLessonToolsSheet(
-                              context: context,
-                              database: ref.read(appDatabaseProvider),
-                              item: item,
-                              currentPage: details.reading?.resumePage,
-                              currentPositionSeconds:
-                                  details.playback?.resumePositionSeconds,
+                          TextButton.icon(
+                            onPressed: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => CollectionsScreen(
+                                  libraryId: item.libraryId,
+                                  item: item,
+                                ),
+                              ),
                             ),
-                            icon: const Icon(Icons.edit_note),
-                            label: const Text('Study'),
+                            icon: const Icon(
+                              Icons.collections_bookmark_outlined,
+                            ),
+                            label: const Text('Add to collection'),
                           ),
+                          TextButton.icon(
+                            onPressed: () async {
+                              await Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) =>
+                                      CatalogEditorScreen(item: item),
+                                ),
+                              );
+                              if (mounted)
+                                setState(() {
+                                  _details = _load();
+                                });
+                            },
+                            icon: const Icon(Icons.manage_search),
+                            label: const Text('Edit details'),
+                          ),
+                          if (details.experience.notes)
+                            TextButton.icon(
+                              onPressed: () => showLessonToolsSheet(
+                                context: context,
+                                database: ref.read(appDatabaseProvider),
+                                item: item,
+                                title: details.experience.course
+                                    ? 'Study tools'
+                                    : 'Notes & bookmarks',
+                                currentPage: details.reading?.resumePage,
+                                currentPositionSeconds:
+                                    details.playback?.resumePositionSeconds,
+                              ),
+                              icon: const Icon(Icons.edit_note),
+                              label: Text(details.experience.notesLabel),
+                            ),
                           OutlinedButton.icon(
                             onPressed: _saving
                                 ? null
@@ -237,34 +345,42 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                               details.favorite ? 'Favorited' : 'Favorite',
                             ),
                           ),
-                          OutlinedButton.icon(
-                            onPressed: _saving
-                                ? null
-                                : () => _change(
-                                    () => ref
-                                        .read(appDatabaseProvider)
-                                        .setItemCompletion(
-                                          item: item,
-                                          completed: !details.completed,
-                                        ),
-                                  ),
-                            icon: Icon(
-                              details.completed
-                                  ? Icons.check_circle
-                                  : Icons.check_circle_outline,
+                          if (details.experience.completion)
+                            TextButton.icon(
+                              onPressed: _saving
+                                  ? null
+                                  : () => _change(
+                                      () => details.multipart
+                                          ? CatalogPlayback(
+                                              ref.read(appDatabaseProvider),
+                                            ).setTitleCompletion(
+                                              item,
+                                              !details.completed,
+                                            )
+                                          : ref
+                                                .read(appDatabaseProvider)
+                                                .setItemCompletion(
+                                                  item: item,
+                                                  completed: !details.completed,
+                                                ),
+                                    ),
+                              icon: Icon(
+                                details.completed
+                                    ? Icons.check_circle
+                                    : Icons.check_circle_outline,
+                              ),
+                              label: Text(
+                                details.experience.completionLabel(
+                                  details.completed,
+                                ),
+                              ),
                             ),
-                            label: Text(
-                              details.completed
-                                  ? 'Mark incomplete'
-                                  : 'Mark complete',
-                            ),
-                          ),
                         ],
                       ),
                     ],
                   );
                   final art = SizedBox(
-                    width: box.maxWidth < 700 ? 160 : 240,
+                    width: box.maxWidth < 560 ? 140 : 180,
                     child: AspectRatio(
                       aspectRatio: MediaVisuals.isListening(item)
                           ? 1
@@ -275,7 +391,7 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                       ),
                     ),
                   );
-                  return box.maxWidth < 700
+                  return box.maxWidth < 560
                       ? Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -295,36 +411,80 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                 },
               ),
               const SizedBox(height: AppSpace.xl),
-              Text(
-                'About this title',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              const SizedBox(height: AppSpace.sm),
-              Text(
-                details.metadata['synopsis'] as String? ??
-                    'No synopsis has been added. Your original file is ready to open.',
-              ),
-              const SizedBox(height: AppSpace.xl),
-              Text(
-                'Available file',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              const SizedBox(height: AppSpace.sm),
-              SelectableText(item.filename),
-              Text(
-                [
-                  if (item.durationSeconds != null)
-                    '${(item.durationSeconds! / 60).toStringAsFixed(1)} minutes',
-                  if (item.pageCount != null) '${item.pageCount} pages',
-                  if (item.fileSize != null)
-                    '${(item.fileSize! / (1024 * 1024)).toStringAsFixed(1)} MiB',
-                ].join(' · '),
-              ),
-              const SizedBox(height: AppSpace.sm),
-              Text(
-                details.metadata['matchState'] == 'matched'
-                    ? 'Catalog metadata · file history is retained'
-                    : 'Local title · not matched to a catalog',
+              if ((details.metadata['synopsis'] as String? ?? '')
+                  .trim()
+                  .isNotEmpty) ...[
+                Text(
+                  details.experience.reading
+                      ? 'About this book or document'
+                      : 'About',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: AppSpace.sm),
+                Text(
+                  details.metadata['synopsis'] as String? ??
+                      'No description available.',
+                ),
+                const SizedBox(height: AppSpace.xl),
+              ],
+              if (details.metadata['attribution'] is String) ...[
+                Text(
+                  details.metadata['attribution'] as String,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                if (CatalogOnlinePolicy.source(
+                  details.metadata['sourceUrl'] as String?,
+                ))
+                  TextButton.icon(
+                    icon: const Icon(Icons.open_in_new, size: 16),
+                    label: const Text('View metadata source'),
+                    onPressed: () => launchUrl(
+                      Uri.parse(details.metadata['sourceUrl'] as String),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                  ),
+                const SizedBox(height: AppSpace.md),
+              ],
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                initiallyExpanded: details.multipart,
+                title: Text(
+                  details.experience.photo
+                      ? 'File information'
+                      : 'Files & versions',
+                ),
+                subtitle: Text(
+                  item.filename,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                children: [
+                  if (!details.experience.photo)
+                    MediaVersionsSection(
+                      item: item,
+                      onChanged: () => setState(() => _details = _load()),
+                    ),
+                  if (details.experience.photo) SelectableText(item.filename),
+                  if ({'audio', 'video'}.contains(item.itemType))
+                    TechnicalMediaPanel(key: ValueKey(item.id), item: item),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Text(
+                      [
+                        if (item.durationSeconds != null)
+                          '${(item.durationSeconds! / 60).toStringAsFixed(1)} minutes',
+                        if (item.pageCount != null) '${item.pageCount} pages',
+                        if (item.fileSize != null)
+                          '${(item.fileSize! / (1024 * 1024)).toStringAsFixed(1)} MiB',
+                      ].join(' · '),
+                    ),
+                  ),
+                  Text(
+                    details.metadata['matchState'] == 'matched'
+                        ? 'Catalog metadata'
+                        : 'Local metadata',
+                  ),
+                ],
               ),
               const SizedBox(height: AppSpace.lg),
               TextButton.icon(

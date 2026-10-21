@@ -19,6 +19,9 @@ import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/study_animated_list.dart';
 import '../../shared/widgets/study_ui.dart';
 import '../../shared/widgets/study_motion.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
+import 'typed_library_screen.dart';
+import 'collections_screen.dart';
 
 enum _LessonFilter { all, inProgress, completed, missing }
 
@@ -35,6 +38,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   final _searchController = TextEditingController();
   String? _selectedSectionId;
   Library? _library;
+  LibraryKind _kind = LibraryKind.mixed;
   Future<Item?>? _resumeItem;
   bool _loading = true;
   bool _rescanning = false;
@@ -55,8 +59,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   Future<void> _load() async {
     final database = ref.read(appDatabaseProvider);
     final library = await database.getLibraryById(widget.libraryId);
+    final kind = library == null
+        ? LibraryKind.mixed
+        : await MediaCatalogRepository(database).libraryKind(library.id);
     if (!mounted) return;
     setState(() {
+      _kind = kind;
       _library = library;
       _resumeItem = library == null
           ? null
@@ -429,12 +437,37 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       );
     }
 
+    if (_kind != LibraryKind.courses)
+      return TypedLibraryScreen(
+        library: library,
+        kind: _kind,
+        onChanged: _load,
+      );
     return Scaffold(
       appBar: AppTopBar(
         title: cleanDisplayTitle(library.title),
         showBack: true,
         showHome: true,
         onBack: () => context.go('/'),
+        actions: [
+          IconButton(
+            tooltip: 'Collections and albums',
+            icon: const Icon(Icons.collections_bookmark_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => CollectionsScreen(libraryId: library.id),
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Library type and sources',
+            icon: const Icon(Icons.folder_open_outlined),
+            onPressed: () async {
+              await context.push('/library/${library.id}/sources');
+              if (mounted) await _load();
+            },
+          ),
+        ],
       ),
       body: StreamBuilder<List<SectionProgressEntry>>(
         stream: database.watchSectionProgressForLibrary(widget.libraryId),

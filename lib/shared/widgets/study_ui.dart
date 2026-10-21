@@ -102,7 +102,7 @@ class StudyPageHeader extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final stack = constraints.maxWidth < 680 || actions.length > 1;
+        final stack = constraints.maxWidth < 560 || actions.length > 3;
         if (stack) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -265,6 +265,7 @@ class StudySection extends StatelessWidget {
     this.description,
     this.icon,
     this.trailing,
+    this.collapsible = false,
   });
 
   final String title;
@@ -272,9 +273,36 @@ class StudySection extends StatelessWidget {
   final IconData? icon;
   final Widget? trailing;
   final Widget child;
+  final bool collapsible;
 
   @override
   Widget build(BuildContext context) {
+    if (collapsible) {
+      return StudySurface(
+        padding: EdgeInsets.zero,
+        child: ExpansionTile(
+          key: PageStorageKey('section-$title'),
+          maintainState: true,
+          shape: const Border(),
+          collapsedShape: const Border(),
+          tilePadding: const EdgeInsets.all(AppSpace.md),
+          childrenPadding: const EdgeInsets.fromLTRB(
+            AppSpace.md,
+            0,
+            AppSpace.md,
+            AppSpace.md,
+          ),
+          leading: icon == null ? null : Icon(icon),
+          title: Text(title, style: Theme.of(context).textTheme.titleMedium),
+          subtitle: description == null ? null : Text(description!),
+          children: [
+            if (trailing != null)
+              Align(alignment: Alignment.centerLeft, child: trailing!),
+            child,
+          ],
+        ),
+      );
+    }
     return StudySurface(
       child: LayoutBuilder(
         builder: (context, constraints) => Column(

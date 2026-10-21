@@ -7,6 +7,7 @@ final class MyVLCBridge: NSObject, FlutterPlugin, FlutterPlatformViewFactory {
     private var engines: [Int64: VLCEngine] = [:]
     private var surfaces: [Int64: NSView] = [:]
     private var nextID: Int64 = 0
+    private var analyzingFile = false
     private var desktops: [Int64: MyVLCDesktop] = [:]
     private var sources: [Int64: URL] = [:]
     private var jobs: [Int64: [OutputJob]] = [:]
@@ -37,10 +38,80 @@ final class MyVLCBridge: NSObject, FlutterPlugin, FlutterPlatformViewFactory {
         }
     }
 
+    /// Bounded local-only parsing in a separate libVLC instance. This never
+    /// attaches a surface, starts playback, or applies the user's player effects.
+    @MainActor
+    private static func analyzeFile(_ path: String) async throws -> [String: Any] {
+        let engine = try VLCEngine(headless: true)
+        defer { withExtendedLifetime(engine) {} }
+        guard let media = libvlc_media_new_path(engine.instance, path) else { throw PlayerError.media }
+        defer { libvlc_media_parse_stop(media); libvlc_media_release(media) }
+        guard libvlc_media_parse_with_options(media, libvlc_media_parse_local, 3000) == 0 else { throw PlayerError.media }
+        let deadline = Date().addingTimeInterval(4)
+        var status = libvlc_media_get_parsed_status(media)
+        while status.rawValue == 0 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            status = libvlc_media_get_parsed_status(media)
+        }
+        guard status == libvlc_media_parsed_status_done else { throw PlayerError.media }
+        var tracks: UnsafeMutablePointer<UnsafeMutablePointer<libvlc_media_track_t>?>?
+        let count = libvlc_media_tracks_get(media, &tracks)
+        defer { if let tracks { libvlc_media_tracks_release(tracks, count) } }
+        var streams: [[String: Any]] = []
+        var payload: [String: Any] = ["container": URL(fileURLWithPath: path).pathExtension.lowercased(), "analysisState": "complete"]
+        let duration = libvlc_media_get_duration(media)
+        if duration > 0 { payload["durationSeconds"] = Double(duration) / 1000 }
+        if let tracks {
+            for index in 0..<min(Int(count), 128) {
+                guard let track = tracks[index]?.pointee else { continue }
+                let kind = track.i_type == libvlc_track_video ? "video" : track.i_type == libvlc_track_audio ? "audio" : track.i_type == libvlc_track_text ? "subtitle" : "unknown"
+                var row: [String: Any] = ["id": Int(track.i_id), "kind": kind]
+                if let codec = libvlc_media_get_codec_description(track.i_type, track.i_codec) {
+                    row["codec"] = String(String(cString: codec).prefix(256))
+                    if payload["codec"] == nil || kind == "video" { payload["codec"] = row["codec"] }
+                }
+                if track.i_bitrate > 0 { row["bitrate"] = Int(track.i_bitrate) }
+                if let language = track.psz_language { row["language"] = String(String(cString: language).prefix(32)) }
+                if track.i_type == libvlc_track_video, let video = track.video?.pointee {
+                    row["width"] = Int(video.i_width); row["height"] = Int(video.i_height)
+                    row["videoOrientation"] = Int(video.i_orientation.rawValue)
+                    if video.i_frame_rate_den > 0 { row["frameRate"] = Double(video.i_frame_rate_num) / Double(video.i_frame_rate_den) }
+                    if payload["width"] == nil {
+                        payload["width"] = row["width"]; payload["height"] = row["height"]
+                        payload["videoOrientation"] = row["videoOrientation"]
+                    }
+                }
+                if track.i_type == libvlc_track_audio, let audio = track.audio?.pointee {
+                    row["channels"] = Int(audio.i_channels); row["sampleRate"] = Int(audio.i_rate)
+                    if payload["channels"] == nil {
+                        payload["channels"] = row["channels"]; payload["sampleRate"] = row["sampleRate"]
+                    }
+                }
+                streams.append(row)
+            }
+        }
+        payload["streams"] = streams
+        if streams.isEmpty { payload["analysisState"] = "unsupported" }
+        return payload
+    }
+
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         MainActor.assumeIsolated {
             do {
                 let args = call.arguments as? [String: Any] ?? [:]
+                if call.method == "analyzeFile" {
+                    guard !analyzingFile, let path = args["path"] as? String,
+                          path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) else {
+                        result(FlutterError(code: "ANALYSIS_BUSY", message: "File analysis is unavailable or already running.", details: nil)); return
+                    }
+                    analyzingFile = true
+                    Task { @MainActor in
+                        defer { self.analyzingFile = false }
+                        do { result(try await Self.analyzeFile(path)) }
+                        catch { result(FlutterError(code: "ANALYSIS", message: "This file could not be analyzed.", details: nil)) }
+                    }
+                    return
+                }
                 if call.method == "preferences.importPreview" {
                     let panel = NSOpenPanel(); panel.allowedFileTypes = ["plist", "json"]; panel.allowsMultipleSelection = false
                     guard panel.runModal() == .OK, let url = panel.url else { result(nil); return }

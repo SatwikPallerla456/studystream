@@ -41,6 +41,24 @@ class _ModeSelectionScreenState extends ConsumerState<ModeSelectionScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+    appBar: ref.watch(deviceRuntimeProvider).asData?.value.role == null
+        ? null
+        : AppBar(
+            title: const Text('Device mode'),
+            leading: IconButton(
+              tooltip: 'Back',
+              icon: const Icon(Icons.arrow_back),
+              onPressed: _busy
+                  ? null
+                  : () {
+                      if (context.canPop()) {
+                        context.pop();
+                      } else {
+                        context.go('/?tab=home');
+                      }
+                    },
+            ),
+          ),
     body: SafeArea(
       child: Center(
         child: StudyPage(
@@ -49,25 +67,28 @@ class _ModeSelectionScreenState extends ConsumerState<ModeSelectionScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: AppSpace.md),
-              Image.asset(
-                'assets/brand/tangerine.png',
-                width: 48,
-                height: 48,
-                excludeFromSemantics: true,
-              ),
-              const SizedBox(height: AppSpace.md),
+              if (ref.watch(deviceRuntimeProvider).asData?.value.role ==
+                  null) ...[
+                Image.asset(
+                  'assets/brand/tangerine.png',
+                  width: 48,
+                  height: 48,
+                  excludeFromSemantics: true,
+                ),
+                const SizedBox(height: AppSpace.md),
+                Text(
+                  'Tangerine',
+                  style: Theme.of(context).textTheme.displaySmall,
+                ),
+                const SizedBox(height: AppSpace.xs),
+                Text(
+                  'Choose a device mode',
+                  style: Theme.of(context).textTheme.headlineMedium,
+                ),
+                const SizedBox(height: AppSpace.sm),
+              ],
               Text(
-                'Tangerine',
-                style: Theme.of(context).textTheme.displaySmall,
-              ),
-              const SizedBox(height: AppSpace.xs),
-              Text(
-                'All your media. One place.',
-                style: Theme.of(context).textTheme.headlineMedium,
-              ),
-              const SizedBox(height: AppSpace.sm),
-              Text(
-                'Choose how this device works. Play your own files or connect to a server. Turn this device into a server to share its library.',
+                'Play your media here, or share a library with your other devices.',
                 style: Theme.of(context).textTheme.bodyLarge,
               ),
               const SizedBox(height: AppSpace.xl),

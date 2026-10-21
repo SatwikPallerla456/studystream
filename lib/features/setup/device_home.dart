@@ -8,7 +8,8 @@ import '../server/server_screen.dart';
 import 'mode_selection_screen.dart';
 
 class DeviceHome extends ConsumerWidget {
-  const DeviceHome({super.key});
+  const DeviceHome({super.key, this.tab});
+  final String? tab;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) => ref
@@ -34,7 +35,14 @@ class DeviceHome extends ConsumerWidget {
           ),
         ),
         data: (configuration) => switch (configuration.role) {
-          AppRole.player => const HomeScreen(),
+          AppRole.player => HomeScreen(
+            initialDestination: switch (tab) {
+              'libraries' => 1,
+              'search' => 2,
+              'settings' => 3,
+              _ => 0,
+            },
+          ),
           AppRole.server => const ServerScreen(),
           null => const ModeSelectionScreen(),
         },

@@ -1,25 +1,29 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui' as ui;
+import 'dart:ui' show AppExitResponse, Offset, Size;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
-import 'package:flutter_html/flutter_html.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../data/reader/book_page_source.dart';
-import '../../domain/catalog/media_catalog_repository.dart';
+import '../../data/reader/reader_image_analysis.dart';
+import '../../domain/reader/reader_background.dart';
+import '../../domain/reader/reader_contract.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
+import '../../domain/reader/reader_jobs.dart';
+import '../../domain/reader/reader_session_store.dart';
 import '../../domain/services/progress_writer.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
-
-class _RenderedPage {
-  const _RenderedPage(this.page, this.left, this.right, this.wide);
-  final BookPage page;
-  final Color left, right;
-  final bool wide;
-}
+import 'reader_image_page.dart';
+import 'reader_text_analysis_sheet.dart';
+import 'reader_background_surface.dart';
+import 'publication_view.dart';
+import 'reader_preferences_sheet.dart';
 
 class BookReaderScreen extends ConsumerStatefulWidget {
   const BookReaderScreen({super.key, required this.itemId, this.initialPage});
@@ -32,27 +36,45 @@ class BookReaderScreen extends ConsumerStatefulWidget {
 class _BookReaderState extends ConsumerState<BookReaderScreen>
     with WidgetsBindingObserver {
   late final AppDatabase _db;
-  late final MediaCatalogRepository _catalog;
   Item? _item;
   BookPageSource? _source;
+  BookPageSource? _pendingSource;
+  ReaderSessionStore? _session;
   ReadingProgressWriter? _writer;
-  Directory? _temporary;
-  HttpClient? _http;
-  String? _error;
-  int _page = 1, _generation = 0;
-  bool _rtl = false;
-  String _mode = 'horizontal', _background = 'black', _fit = 'contain';
-  double _fontSize = 20, _lineHeight = 1.6, _restoredScroll = 0;
+  final _jobs = ReaderJobScheduler();
+  final _cancel = ReaderCancellation();
   final _scroll = ScrollController();
   final _visited = <int>{};
-  final _cache = <int, Future<_RenderedPage>>{};
-  Timer? _saveTimer;
-  bool _closing = false;
+  List<CanonicalPage> _pages = [];
+  PresentationMap? _presentation;
+  ContinuousPageLayout? _continuous;
+  Map<String, dynamic> _options = resolveReaderSettings();
+  final _colors = <int, ReaderEdgeColors>{};
+  ReaderLocator? _restored;
+  ReaderViewportState? _viewState;
+  Directory? _temporary;
+  HttpClient? _http;
+  Timer? _settle;
+  Future<void> _saveTail = Future.value();
+  String? _error;
+  String _revision = '';
+  int _page = 1, _generation = 0, _geometryLoaded = 0;
+  double _zoom = 1, _pointY = 0, _pointX = 0;
+  String? _selectedText;
+  int? _textOffset;
+  ReaderTextAnchor? _selectedRange, _restoreSelection;
+  bool _closing = false, _restoring = true, _chrome = true, _navigating = false;
+  final _touches = <int>{};
+  Offset? _swipeStart;
+  int _swipeStartedAt = 0;
+  bool _canSwipe = false;
+  bool get _rtl => _options['rtl'] == true;
+  String get _mode => _options['mode'] as String;
+  String get _background => _options['background'] as String;
   @override
   void initState() {
     super.initState();
     _db = ref.read(appDatabaseProvider);
-    _catalog = MediaCatalogRepository(_db);
     WidgetsBinding.instance.addObserver(this);
     _load();
   }
@@ -60,10 +82,12 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   Future<void> _load() async {
     try {
       final item = await _db.getItemById(widget.itemId);
-      if (item == null || item.unavailable) {
-        throw StateError('The book is missing. Relink it in the library.');
-      }
+      if (item == null || item.unavailable)
+        throw StateError(
+          'The book is unavailable. Reconnect or relink its source.',
+        );
       _item = item;
+      _revision = await CatalogIdentityStore(_db).contentRevision(item);
       var path = item.filePath;
       if (path.startsWith('remote:')) {
         final remote = await ref.read(lanSyncClientProvider).sourceFor(item);
@@ -77,21 +101,20 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
           const Duration(seconds: 30),
         );
         if (response.statusCode != 200 ||
-            response.contentLength > 512 * 1024 * 1024) {
+            response.contentLength > 512 * 1024 * 1024)
           throw StateError(
             'The server could not supply this book (maximum 512 MiB).',
           );
-        }
         final sink = file.openWrite();
         var bytes = 0;
         try {
           await for (final chunk in response.timeout(
             const Duration(seconds: 30),
           )) {
+            _cancel.check();
             bytes += chunk.length;
-            if (bytes > 512 * 1024 * 1024 || _closing) {
-              throw StateError('Book download stopped');
-            }
+            if (bytes > 512 * 1024 * 1024)
+              throw StateError('Book download exceeds 512 MiB');
             sink.add(chunk);
           }
         } finally {
@@ -103,477 +126,533 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
         path,
         epub: item.itemType == 'epub',
       );
+      _pendingSource = source;
       if (_closing) {
         await source.dispose();
         return;
       }
-      _source = source;
+      _session = ReaderSessionStore(_db, item);
+      _options = await _session!.settings();
       final saved = await _db.getReadingByItemId(item.id);
-      final defaults =
-          (await _catalog.record('library:${item.libraryId}'))?.data ?? {};
-      final options =
-          (await _catalog.record('reader:${item.id}'))?.data ?? defaults;
-      _rtl = options['rtl'] == true;
-      _mode = options['mode'] as String? ?? 'horizontal';
-      _background = options['background'] as String? ?? 'black';
-      _fit = options['fit'] as String? ?? 'contain';
-      _fontSize = (options['fontSize'] as num?)?.toDouble().clamp(12, 36) ?? 20;
-      _lineHeight =
-          (options['lineHeight'] as num?)?.toDouble().clamp(1.2, 2.4) ?? 1.6;
-      _page = (widget.initialPage ?? saved?.resumePage ?? 1).clamp(
-        1,
-        source.pageCount,
-      );
-      // Spine resource is a stable chapter locator even when font sizing changes.
-      if (widget.initialPage == null && options['locator'] is String) {
+      final locator = ReaderLocator.decode(_options['locator'] as String?);
+      _restored = locator?.compatible(item.id, _revision) == true
+          ? locator
+          : null;
+      _page = (widget.initialPage ?? _restored?.page ?? saved?.resumePage ?? 1)
+          .clamp(1, source.pageCount);
+      if (widget.initialPage == null && _restored != null) {
         for (var i = 1; i <= source.pageCount; i++) {
-          if (source.locator(i) == options['locator']) _page = i;
+          if (source.locator(i) == _restored!.pageKey) _page = i;
         }
+        _textOffset = _restored!.textOffset;
+        _zoom = _restored!.zoom;
+        _viewState = ReaderViewportState.decode(_restored!.viewState);
+        _pointY = _restored!.point.dy;
+        _pointX = _restored!.point.dx;
       }
-      _restoredScroll = widget.initialPage == null
-          ? saved?.resumeScrollOffset ?? 0
-          : 0;
+      // Only geometry is retained. Image buffers are released on every iteration.
+      // No speculative decoded renders are enabled before budget measurement.
+      for (var i = 1; i <= source.pageCount; i++) {
+        _cancel.check();
+        final geometry = await source.geometry(i, cancellation: _cancel);
+        _pages.add(CanonicalPage(i, source.locator(i), geometry));
+        if (i % 20 == 0 && mounted) setState(() => _geometryLoaded = i);
+      }
+      _source = source;
+      _pendingSource = null;
       _visited.add(_page);
       _writer = ReadingProgressWriter(database: _db, item: item)
         ..currentPage = _page
         ..totalPages = source.pageCount
-        ..pagesVisited = _visited.length
-        ..zoom = saved?.zoom ?? 1
+        ..pagesVisited = 1
+        ..zoom = _zoom
         ..readingMode = _mode;
       if (mounted) setState(() {});
-    } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+    } catch (error) {
+      if (mounted && error is! ReaderCancelled)
+        setState(() => _error = error.toString());
     }
   }
 
-  Future<_RenderedPage> _render(int page) {
-    final existing = _cache[page];
-    if (existing != null) return existing;
-    // Four compressed/rendered page resources maximum, independent of book length.
-    while (_cache.length >= 4) {
-      _cache.remove(_cache.keys.first);
-    }
-    return _cache[page] = _readPage(page);
-  }
-
-  Future<_RenderedPage> _readPage(int page) async {
-    final data = await _source!.load(page);
-    if (data.image == null) {
-      return _RenderedPage(
-        data,
-        const Color(0xffe8dfd0),
-        const Color(0xffd4c7ae),
-        false,
-      );
-    }
-    final buffer = await ui.ImmutableBuffer.fromUint8List(data.image!);
-    ui.ImageDescriptor? descriptor;
-    try {
-      descriptor = await ui.ImageDescriptor.encoded(buffer);
-      if (descriptor.width <= 0 ||
-          descriptor.height <= 0 ||
-          descriptor.width * descriptor.height > 80000000 ||
-          descriptor.width > 24000 ||
-          descriptor.height > 24000) {
-        throw const FormatException('Page exceeds the image size limit');
-      }
-      final codec = await descriptor.instantiateCodec(
-        targetWidth: 32,
-        targetHeight: 32,
-      );
-      final frame = await codec.getNextFrame();
-      codec.dispose();
-      try {
-        final pixels = await frame.image.toByteData(
-          format: ui.ImageByteFormat.rawRgba,
-        );
-        Color color(bool left) {
-          if (pixels == null) return const Color(0xff222222);
-          var r = 0, g = 0, b = 0, n = 0;
-          for (var y = 0; y < 32; y++)
-            for (var x = left ? 0 : 24; x < (left ? 8 : 32); x++) {
-              final i = (y * 32 + x) * 4;
-              if (pixels.getUint8(i + 3) < 128) continue;
-              r += pixels.getUint8(i);
-              g += pixels.getUint8(i + 1);
-              b += pixels.getUint8(i + 2);
-              n++;
-            }
-          return n == 0
-              ? const Color(0xff222222)
-              : Color.fromARGB(255, r ~/ n, g ~/ n, b ~/ n);
-        }
-
-        return _RenderedPage(
-          data,
-          color(true),
-          color(false),
-          descriptor.width > descriptor.height * 1.25,
-        );
-      } finally {
-        frame.image.dispose();
-      }
-    } finally {
-      descriptor?.dispose();
-      buffer.dispose();
-    }
-  }
-
-  Map<String, dynamic> _options() => {
-    'rtl': _rtl,
-    'mode': _mode,
-    'background': _background,
-    'fit': _fit,
-    'fontSize': _fontSize,
-    'lineHeight': _lineHeight,
-    'locator': _source?.locator(_page),
-  };
-  Future<void> _save() async {
-    final item = _item, source = _source;
-    if (item == null || source == null) return;
-    _writer
-      ?..currentPage = _page
-      ..totalPages = source.pageCount
+  ReaderLocator _locator() => ReaderLocator(
+    resourceId: _item!.id,
+    revision: _revision,
+    pageKey: _source!.locator(_page),
+    page: _page,
+    point: Offset(_pointX, _pointY),
+    fit: _options['fit'] as String,
+    zoom: _zoom,
+    textOffset: _textOffset,
+    viewState: _viewState?.toJson(),
+  );
+  Future<void> _save() {
+    if (_restoring || _item == null || _source == null) return _saveTail;
+    final locator = _locator();
+    final writer = _writer!
+      ..currentPage = _page
+      ..totalPages = _source!.pageCount
       ..pagesVisited = _visited.length
+      ..zoom = _zoom
       ..readingMode = _mode;
-    if (_scroll.hasClients) _writer?.scrollOffset = _scroll.offset;
-    await _writer?.save();
-    await _catalog.save(
-      'reader:${item.id}',
-      'reader',
-      item.libraryId,
-      _options(),
-      itemId: item.id,
+    if (_scroll.hasClients) writer.scrollOffset = _scroll.offset;
+    // Capture both before waiting; writes from rapid input cannot overtake.
+    final progress = writer.save();
+    final location = _session!.write(locator: locator);
+    final write = Future.wait([progress, location]).then<void>((_) {});
+    _saveTail = write.catchError((Object error) {
+      if (mounted)
+        setState(() => _error = 'Reading state could not be saved: $error');
+    });
+    return write;
+  }
+
+  void _schedule() {
+    if (_restoring) return;
+    _settle?.cancel();
+    _settle = Timer(
+      const Duration(milliseconds: 700),
+      () => unawaited(_save()),
     );
   }
 
   Future<void> _go(int value) async {
-    if (_source == null) return;
+    if (_source == null || _navigating) return;
     final next = value.clamp(1, _source!.pageCount);
     if (next == _page) return;
+    _navigating = true;
+    try {
+      await _save();
+      if (!mounted) return;
+      setState(() {
+        _page = next;
+        _selectedText = null;
+        _selectedRange = null;
+        _restoreSelection = null;
+        _textOffset = null;
+        _pointY = 0;
+        _pointX = 0;
+        _zoom = 1;
+        _viewState = null;
+        _visited.add(next);
+        _generation++;
+      });
+      if (_mode == 'vertical' && _scroll.hasClients && _continuous != null) {
+        _restoring = true;
+        _scroll.jumpTo(
+          _continuous!.offsets[next - 1].clamp(
+            0,
+            _scroll.position.maxScrollExtent,
+          ),
+        );
+        _restoring = false;
+      }
+      await _save();
+    } finally {
+      _navigating = false;
+    }
+  }
+
+  Future<void> _goToAnchor(ReaderLocator locator) async {
+    if (!locator.compatible(_item!.id, _revision)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This anchor belongs to an earlier content revision. Its original page reference has been preserved.',
+          ),
+        ),
+      );
+      return;
+    }
+    await _go(locator.page);
+    if (!mounted) return;
+    setState(() {
+      _pointX = locator.point.dx;
+      _pointY = locator.point.dy;
+      _zoom = locator.zoom;
+      _viewState = ReaderViewportState.decode(locator.viewState);
+      _textOffset = locator.textOffset;
+      _restoreSelection = null;
+      _selectedRange = null;
+      _selectedText = null;
+      _restoring = true;
+      _generation++;
+    });
+  }
+
+  Future<void> _goToTextAnchor(ReaderTextAnchor anchor) async {
+    if (_source == null ||
+        !anchor.compatible(_item!.id, _revision) ||
+        anchor.unit != 'domUtf16' ||
+        anchor.startPage != anchor.endPage ||
+        anchor.startPage > _source!.pageCount ||
+        anchor.startKey != _source!.locator(anchor.startPage) ||
+        !_source!.publicationPage(anchor.startPage)) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'This passage cannot be restored in the current content revision. Its original reference is kept.',
+            ),
+          ),
+        );
+      return;
+    }
+    await _go(anchor.startPage);
+    if (!mounted) return;
+    setState(() {
+      _restoreSelection = anchor;
+      _selectedRange = anchor;
+      _selectedText = anchor.quote;
+      _textOffset = anchor.startOffset;
+      _generation++;
+      _restoring = true;
+    });
+  }
+
+  void _advance(bool forward) => unawaited(
+    _go(_presentation?.advance(_page, forward) ?? _page + (forward ? 1 : -1)),
+  );
+  Future<void> _setting(String key, Object value) async {
     await _save();
     if (!mounted) return;
     setState(() {
-      _page = next;
+      _options = {..._options, key: value};
       _generation++;
-      _visited.add(next);
-      _restoredScroll = 0;
+      _restoring = true;
     });
-    if (_scroll.hasClients) _scroll.jumpTo(0);
-    unawaited(_save());
+    await _session?.write(changes: {key: value});
   }
 
-  void _advance(bool forward) => unawaited(_go(_page + (forward ? 1 : -1)));
-  void _change(VoidCallback mutate) {
-    setState(mutate);
-    unawaited(_save());
+  Future<void> _recognizePage() async {
+    final source = _source, page = _page;
+    if (source == null || source.publicationPage(page)) return;
+    final text = await showReaderTextAnalysis(
+      context: context,
+      jobs: _jobs,
+      pageKey: '$_revision:${source.locator(page)}',
+      raster: (token) async {
+        final content = await source.load(page, cancellation: token);
+        token.check();
+        if (content.image == null)
+          throw const FormatException('This page has no raster image.');
+        return ReaderImageAnalysis.raster(content.image!, token);
+      },
+    );
+    if (!mounted || page != _page || text == null) return;
+    _selectedText = text;
+    // OCR supplies a page quote, not a stable DOM/native-text offset range.
+    _selectedRange = null;
+    _study();
+  }
+
+  void _study() => showLessonToolsSheet(
+    context: context,
+    database: _db,
+    item: _item!,
+    currentPage: _page,
+    anchor: _locator(),
+    onJumpToAnchor: _goToAnchor,
+    selectedText: _selectedText,
+    textAnchor: _selectedRange,
+    onJumpToTextAnchor: _goToTextAnchor,
+    onJumpToPage: _go,
+  );
+
+  void _tapAction(Offset point, Size viewport) {
+    if (_restoring || _navigating || _zoom > 1.05 || _selectedRange != null)
+      return;
+    switch (ReaderTapPolicy.action(point, viewport, _options)) {
+      case 'previous':
+        _advance(false);
+      case 'next':
+        _advance(true);
+      case 'toggleChrome':
+        setState(() => _chrome = !_chrome);
+      case 'study':
+        _study();
+    }
   }
 
   Future<void> _settings() async {
-    await showModalBottomSheet<void>(
+    if (_session == null || _item == null) return;
+    await _save();
+    if (!mounted) return;
+    await showReaderPreferences(
       context: context,
-      isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModal) => SafeArea(
-          child: SingleChildScrollView(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Reading preferences'),
-                  SwitchListTile(
-                    title: const Text('Right to left'),
-                    subtitle: const Text(
-                      'Left advances in horizontal mode. Canonical page numbers stay the same.',
-                    ),
-                    value: _rtl,
-                    onChanged: (v) {
-                      _change(() => _rtl = v);
-                      setModal(() {});
-                    },
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: _mode,
-                    decoration: const InputDecoration(
-                      labelText: 'Reading mode',
-                    ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'horizontal',
-                        child: Text('Single page / chapter'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'spread',
-                        child: Text('Two page spreads'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'vertical',
-                        child: Text('Continuous vertical'),
-                      ),
-                    ],
-                    onChanged: (v) {
-                      _change(() => _mode = v!);
-                      setModal(() {});
-                    },
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: _background,
-                    decoration: const InputDecoration(labelText: 'Background'),
-                    items: ['black', 'white', 'color', 'immersive']
-                        .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                        .toList(),
-                    onChanged: (v) {
-                      _change(() => _background = v!);
-                      setModal(() {});
-                    },
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: _fit,
-                    decoration: const InputDecoration(labelText: 'Page fit'),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'contain',
-                        child: Text('Fit page'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'fitWidth',
-                        child: Text('Fit width'),
-                      ),
-                    ],
-                    onChanged: (v) {
-                      _change(() => _fit = v!);
-                      setModal(() {});
-                    },
-                  ),
-                  if (_source?.reflowable == true) ...[
-                    Text('Text size: ${_fontSize.round()}'),
-                    Slider(
-                      value: _fontSize,
-                      min: 12,
-                      max: 36,
-                      onChanged: (v) {
-                        _change(() => _fontSize = v);
-                        setModal(() {});
-                      },
-                    ),
-                    Text('Line spacing: ${_lineHeight.toStringAsFixed(1)}'),
-                    Slider(
-                      value: _lineHeight,
-                      min: 1.2,
-                      max: 2.4,
-                      onChanged: (v) {
-                        _change(() => _lineHeight = v);
-                        setModal(() {});
-                      },
-                    ),
-                  ],
-                  TextButton(
-                    onPressed: () async {
-                      final item = _item!;
-                      final old =
-                          (await _catalog.record(
-                            'library:${item.libraryId}',
-                          ))?.data ??
-                          {};
-                      await _catalog.save(
-                        'library:${item.libraryId}',
-                        'library',
-                        item.libraryId,
-                        {...old, ..._options()..remove('locator')},
-                      );
-                      if (context.mounted) Navigator.pop(context);
-                    },
-                    child: const Text('Use these defaults for this library'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Done'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+      database: _db,
+      libraryId: _item!.libraryId,
+      item: _item,
+      currentPage: _page,
+      typography: _source?.reflowable == true,
+      onChanged: () async {
+        await _save();
+        final resolved = await _session!.settings();
+        if (mounted)
+          setState(() {
+            _options = resolved;
+            _generation++;
+            _restoring = true;
+          });
+      },
     );
   }
 
-  Future<void> _contents() async {
-    final source = _source!;
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (context) => Directionality(
-        textDirection: _rtl ? TextDirection.rtl : TextDirection.ltr,
-        child: ListView.builder(
-          itemCount: source.pageCount,
-          itemBuilder: (context, index) => ListTile(
-            title: Text(source.titles[index]),
-            leading: Text('${index + 1}'),
-            selected: _page == index + 1,
-            onTap: () {
-              Navigator.pop(context);
-              _go(index + 1);
-            },
-          ),
+  Future<void> _contents() => showModalBottomSheet<void>(
+    context: context,
+    builder: (context) => ListView.builder(
+      itemCount: _source!.pageCount,
+      itemBuilder: (context, index) => ListTile(
+        leading: Text('${index + 1}'),
+        title: Text(_source!.titles[index]),
+        selected: index + 1 == _page,
+        onTap: () {
+          Navigator.pop(context);
+          _go(index + 1);
+        },
+        trailing: PopupMenuButton<String>(
+          tooltip: 'Pairing for this page',
+          onSelected: (value) async {
+            final key = value == 'single' ? 'singlePages' : 'pairingStarts';
+            final pages = List<int>.from(_options[key] as List? ?? []);
+            pages.contains(index + 1)
+                ? pages.remove(index + 1)
+                : pages.add(index + 1);
+            await _setting(key, pages);
+          },
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'single', child: Text('Toggle single page')),
+            PopupMenuItem(value: 'pair', child: Text('Toggle pairing start')),
+          ],
         ),
       ),
-    );
+    ),
+  );
+
+  void _receivedColors(int page, ReaderEdgeColors colors) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        setState(() {
+          _colors[page] = colors;
+          while (_colors.length > 8) {
+            _colors.remove(_colors.keys.first);
+          }
+        });
+      }
+    });
   }
 
-  Widget _pageView(int page, {bool vertical = false}) =>
-      FutureBuilder<_RenderedPage>(
-        future: _render(page),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('Page $page could not open: ${snapshot.error}'),
-              ),
-            );
-          }
-          final rendered = snapshot.data;
-          if (rendered == null) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final image = rendered.page.image;
-          if (image == null) {
-            return SingleChildScrollView(
-              key: ValueKey('text:$page:$_generation'),
-              controller: vertical ? null : _scroll,
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Html(
-                  data: rendered.page.html,
-                  style: {
-                    'body': Style(
-                      fontSize: FontSize(_fontSize),
-                      lineHeight: LineHeight(_lineHeight),
-                      color: _background == 'black'
-                          ? Colors.white
-                          : Colors.black,
-                    ),
-                  },
-                ),
-              ),
-            );
-          }
-          return InteractiveViewer(
-            minScale: 1,
-            maxScale: 5,
-            child: Image.memory(
-              image,
-              cacheWidth: 1600,
-              fit: _fit == 'fitWidth' ? BoxFit.fitWidth : BoxFit.contain,
-              gaplessPlayback: true,
-              errorBuilder: (_, e, st) => Text('Unsupported page image: $e'),
-            ),
-          );
+  Widget _pageWidget(int page, double width, {bool vertical = false}) {
+    if (_source!.publicationPage(page) && _source is ArchiveBookSource) {
+      return PublicationView(
+        key: ValueKey('publication:$page:$_generation'),
+        source: _source! as ArchiveBookSource,
+        page: page,
+        revision: _revision,
+        geometry: _pages[page - 1].size,
+        fit: _options['fit'] as String,
+        fontSize: (_options['fontSize'] as num).toDouble(),
+        lineHeight: (_options['lineHeight'] as num).toDouble(),
+        initialY: page == _page ? _pointY : 0,
+        initialSelection: page == _page ? _restoreSelection : null,
+        onTap: (point) => _tapAction(point, const Size(1, 1)),
+        onPosition: (x, y) {
+          _pointY = y;
+          _schedule();
+        },
+        onSelection: (text, offset, end) {
+          _restoreSelection = null;
+          _selectedText = text.isEmpty ? null : text;
+          _textOffset = text.isEmpty ? null : offset;
+          _selectedRange = text.isEmpty
+              ? null
+              : ReaderTextAnchor(
+                  resourceId: _item!.id,
+                  revision: _revision,
+                  startKey: _source!.locator(page),
+                  startPage: page,
+                  startOffset: offset,
+                  endKey: _source!.locator(page),
+                  endPage: page,
+                  endOffset: end,
+                  unit: 'domUtf16',
+                  quote: text,
+                );
         },
       );
-  Widget _readingBody() => FutureBuilder<_RenderedPage>(
-    future: _render(_page),
-    builder: (context, snapshot) {
-      final current = snapshot.data;
-      final left = switch (_background) {
+    }
+    return ReaderImagePage(
+      key: ValueKey('$page:$_generation:${width.round()}:$vertical'),
+      source: _source!,
+      page: page,
+      revision: _revision,
+      jobs: _jobs,
+      fit: _options['fit'] as String,
+      targetWidth: (width * MediaQuery.devicePixelRatioOf(context)).ceil(),
+      vertical: vertical,
+      layoutKey:
+          '$_mode:$_rtl:${_presentation?.pagesFor(page).join(',') ?? page}',
+      initialViewState: page == _page ? _viewState : null,
+      initialZoom: page == _page ? _zoom : 1,
+      initialPoint: page == _page ? Offset(_pointX, _pointY) : Offset.zero,
+      onColors: (colors) => _receivedColors(page, colors),
+      onSettled: (zoom, point, state) {
+        _viewState = state;
+        _page = page;
+        _zoom = zoom;
+        _pointX = point.dx;
+        _pointY = point.dy;
+        _schedule();
+      },
+    );
+  }
+
+  Widget _body() => LayoutBuilder(
+    builder: (context, box) {
+      final continuous = _mode == 'vertical' && !_source!.reflowable;
+      _presentation = PresentationMap(
+        _pages,
+        spreads:
+            _mode == 'spread' && box.maxWidth > 700 && !_source!.reflowable,
+        coverSingle: _options['coverSingle'] == true,
+        singlePages: Set<int>.from(_options['singlePages'] as List? ?? []),
+        pairingStarts: Set<int>.from(_options['pairingStarts'] as List? ?? []),
+      );
+      final cell = _presentation!.pagesFor(_page);
+      final first = _colors[_rtl && !continuous ? cell.last : cell.first],
+          last = _colors[_rtl && !continuous ? cell.first : cell.last];
+      final a = switch (_background) {
         'white' => Colors.white,
-        'color' => current?.left ?? Colors.black,
-        'immersive' => current?.left ?? Colors.black,
+        'color' => first?.combined ?? Colors.black,
+        'immersive' => first?.first ?? Colors.black,
         _ => Colors.black,
       };
-      final right = _background == 'immersive'
-          ? (current?.right ?? left)
-          : left;
-      final child = _mode == 'vertical' && !(_source?.reflowable ?? false)
-          ? LayoutBuilder(
-              builder: (context, box) =>
-                  NotificationListener<ScrollNotification>(
-                    onNotification: (n) {
-                      if (n is ScrollUpdateNotification) {
-                        final page =
-                            (n.metrics.pixels / box.maxHeight).floor() + 1;
-                        if (page != _page) {
-                          setState(
-                            () => _page = page.clamp(1, _source!.pageCount),
-                          );
-                          _visited.add(_page);
-                        }
-                        _saveTimer?.cancel();
-                        _saveTimer = Timer(
-                          const Duration(milliseconds: 700),
-                          () => unawaited(_save()),
-                        );
-                      }
-                      return false;
-                    },
-                    child: ListView.builder(
-                      controller: _scroll,
-                      itemExtent: box.maxHeight,
-                      scrollCacheExtent: const ScrollCacheExtent.pixels(0),
-                      itemCount: _source!.pageCount,
-                      itemBuilder: (_, i) => _pageView(i + 1, vertical: true),
-                    ),
+      final b = _background == 'immersive' ? (last?.second ?? a) : a;
+      Widget content;
+      if (continuous) {
+        _continuous = ContinuousPageLayout(_pages, box.maxWidth);
+        content = NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            if (notification is ScrollUpdateNotification && !_restoring) {
+              final page = _continuous!.pageAt(notification.metrics.pixels);
+              final start = _continuous!.offsets[page - 1],
+                  height = _continuous!.offsets[page] - start;
+              setState(() {
+                _page = page;
+                _viewState = null;
+                _pointY = ((notification.metrics.pixels - start) / height)
+                    .clamp(0, 1);
+                _visited.add(page);
+              });
+              _schedule();
+            }
+            return false;
+          },
+          child: ListView.builder(
+            controller: _scroll,
+            itemCount: _pages.length,
+            scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+            itemExtentBuilder: (index, dimensions) =>
+                _continuous!.offsets[index + 1] - _continuous!.offsets[index],
+            itemBuilder: (context, index) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _pageWidget(index + 1, box.maxWidth, vertical: true),
+            ),
+          ),
+        );
+      } else {
+        content = GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: (details) => _tapAction(details.localPosition, box.biggest),
+          child: Listener(
+            onPointerDown: (event) {
+              _touches.add(event.pointer);
+              if (_touches.length == 1) {
+                _swipeStart = event.localPosition;
+                _swipeStartedAt = DateTime.now().millisecondsSinceEpoch;
+                _canSwipe =
+                    !_restoring &&
+                    !_navigating &&
+                    _zoom <= 1.05 &&
+                    _selectedRange == null &&
+                    !_source!.publicationPage(_page);
+              } else {
+                _canSwipe = false;
+              }
+            },
+            onPointerCancel: (event) {
+              _touches.remove(event.pointer);
+              _canSwipe = false;
+            },
+            onPointerUp: (event) {
+              _touches.remove(event.pointer);
+              final start = _swipeStart;
+              if (_touches.isNotEmpty ||
+                  !_canSwipe ||
+                  start == null ||
+                  _zoom > 1.05)
+                return;
+              _canSwipe = false;
+              final delta = event.localPosition - start;
+              if (DateTime.now().millisecondsSinceEpoch - _swipeStartedAt >
+                      1000 ||
+                  delta.dx.abs() < (box.maxWidth * .15).clamp(48, 180) ||
+                  delta.dy.abs() > delta.dx.abs() * .5)
+                return;
+              _advance(_rtl ? delta.dx > 0 : delta.dx < 0);
+            },
+            child: Row(
+              textDirection: _rtl ? TextDirection.rtl : TextDirection.ltr,
+              children: [
+                for (final page in cell)
+                  Expanded(
+                    child: _pageWidget(page, box.maxWidth / cell.length),
                   ),
-            )
-          : LayoutBuilder(
-              builder: (context, box) {
-                final spread =
-                    _mode == 'spread' &&
-                    !_source!.reflowable &&
-                    box.maxWidth > 700 &&
-                    _page > 1 &&
-                    _page < _source!.pageCount &&
-                    current?.wide == false;
-                final pages = [
-                  Expanded(child: _pageView(_page)),
-                  if (spread) Expanded(child: _pageView(_page + 1)),
-                ];
-                return GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onHorizontalDragEnd: (d) {
-                    if ((d.primaryVelocity ?? 0).abs() > 100) {
-                      _advance(
-                        _rtl
-                            ? (d.primaryVelocity! > 0)
-                            : (d.primaryVelocity! < 0),
-                      );
-                    }
-                  },
-                  onTapUp: (d) {
-                    if (d.localPosition.dx < box.maxWidth * .18) {
-                      _advance(_rtl);
-                    } else if (d.localPosition.dx > box.maxWidth * .82)
-                      _advance(!_rtl);
-                  },
-                  child: Row(
-                    textDirection: _rtl ? TextDirection.rtl : TextDirection.ltr,
-                    children: pages,
-                  ),
-                );
-              },
+              ],
+            ),
+          ),
+        );
+      }
+      if (_restoring)
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          if (continuous && _scroll.hasClients) {
+            final layout = _continuous!;
+            _scroll.jumpTo(
+              (layout.offsets[_page - 1] +
+                      _pointY *
+                          (layout.offsets[_page] - layout.offsets[_page - 1]))
+                  .clamp(0, _scroll.position.maxScrollExtent),
             );
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        if (_restoredScroll > 0 && _scroll.hasClients) {
-          final offset = _mode == 'vertical' && !_source!.reflowable
-              ? (_page - 1) * MediaQuery.sizeOf(context).height
-              : _restoredScroll;
-          _scroll.jumpTo(offset.clamp(0, _scroll.position.maxScrollExtent));
-          _restoredScroll = 0;
-        }
-      });
-      return AnimatedContainer(
-        duration: MediaQuery.disableAnimationsOf(context)
-            ? Duration.zero
-            : const Duration(milliseconds: 180),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(colors: [left, right]),
-        ),
-        child: child,
+          }
+          _restoring = false;
+        });
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: ReaderBackgroundSurface(
+              first: a,
+              second: b,
+              vertical: continuous,
+            ),
+          ),
+          Positioned.fill(child: content),
+        ],
       );
     },
   );
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await _save();
+    await _session?.flushed;
+    return AppExitResponse.exit;
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    _jobs.releaseSpeculative();
+    _colors.clear();
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) unawaited(_save());
@@ -582,13 +661,18 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   @override
   void dispose() {
     _closing = true;
-    WidgetsBinding.instance.removeObserver(this);
-    _saveTimer?.cancel();
+    _cancel.cancel();
+    _settle?.cancel();
     _http?.close(force: true);
+    WidgetsBinding.instance.removeObserver(this);
+    final save = _save();
+    _jobs.dispose();
     unawaited(
-      _save().whenComplete(() async {
+      save.catchError((Object _) {}).whenComplete(() async {
         await _writer?.dispose();
+        await _session?.flushed;
         await _source?.dispose();
+        await _pendingSource?.dispose();
         await _temporary?.delete(recursive: true);
       }),
     );
@@ -604,92 +688,119 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
           _advance(!_rtl),
       const SingleActivator(LogicalKeyboardKey.pageDown): () => _advance(true),
       const SingleActivator(LogicalKeyboardKey.pageUp): () => _advance(false),
+      const SingleActivator(LogicalKeyboardKey.home): () => _go(1),
+      const SingleActivator(LogicalKeyboardKey.end): () =>
+          _go(_source?.pageCount ?? 1),
     },
     child: Focus(
       autofocus: true,
       child: Scaffold(
-        appBar: AppTopBar(
-          title: _item?.userTitle ?? _item?.title ?? 'Reader',
-          showBack: true,
-          actions: [
-            if (_source != null) ...[
-              IconButton(
-                tooltip: 'Contents / pages',
-                onPressed: _contents,
-                icon: const Icon(Icons.view_list),
-              ),
-              IconButton(
-                tooltip: 'Reading preferences',
-                onPressed: _settings,
-                icon: const Icon(Icons.tune),
-              ),
-              IconButton(
-                tooltip: 'Notes and bookmarks',
-                onPressed: () => showLessonToolsSheet(
-                  context: context,
-                  database: _db,
-                  item: _item!,
-                  currentPage: _page,
-                ),
-                icon: const Icon(Icons.bookmark_outline),
-              ),
-            ],
-          ],
-        ),
+        appBar: _chrome
+            ? AppTopBar(
+                title: _item?.userTitle ?? _item?.title ?? 'Reader',
+                showBack: true,
+                actions: [
+                  if (_source != null) ...[
+                    IconButton(
+                      tooltip: 'Contents / pages',
+                      onPressed: _contents,
+                      icon: const Icon(Icons.view_list),
+                    ),
+                    IconButton(
+                      tooltip: 'Reading preferences',
+                      onPressed: _settings,
+                      icon: const Icon(Icons.tune),
+                    ),
+                    if (ReaderImageAnalysis.available &&
+                        !_source!.publicationPage(_page))
+                      IconButton(
+                        tooltip: 'Recognize page text',
+                        onPressed: _recognizePage,
+                        icon: const Icon(Icons.document_scanner_outlined),
+                      ),
+                    IconButton(
+                      tooltip: 'Notes and bookmarks',
+                      onPressed: _study,
+                      icon: const Icon(Icons.bookmark_outline),
+                    ),
+                  ],
+                ],
+              )
+            : null,
         body: _error != null
             ? Center(
                 child: Padding(
                   padding: const EdgeInsets.all(24),
-                  child: Text(_error!),
-                ),
-              )
-            : _source == null
-            ? const Center(child: CircularProgressIndicator())
-            : _readingBody(),
-        bottomNavigationBar: _source == null
-            ? null
-            : SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Row(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      IconButton(
-                        tooltip: _rtl
-                            ? 'Next canonical page'
-                            : 'Previous canonical page',
-                        onPressed: () => _advance(_rtl),
-                        icon: const Icon(Icons.chevron_left),
+                      const Text(
+                        'This book could not be opened. Check its file and try again.',
                       ),
-                      Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              '${_source!.reflowable ? 'Chapter' : 'Page'} $_page / ${_source!.pageCount} · ${_rtl ? 'Right to left' : 'Left to right'}',
-                            ),
-                            Slider(
-                              value: _page.toDouble(),
-                              min: 1,
-                              max: _source!.pageCount > 1
-                                  ? _source!.pageCount.toDouble()
-                                  : 2,
-                              secondaryTrackValue: null,
-                              onChanged: _source!.pageCount < 2
-                                  ? null
-                                  : (v) => _go(v.round()),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: _rtl
-                            ? 'Previous canonical page'
-                            : 'Next canonical page',
-                        onPressed: () => _advance(!_rtl),
-                        icon: const Icon(Icons.chevron_right),
+                      const SizedBox(height: 12),
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('Back'),
                       ),
                     ],
                   ),
+                ),
+              )
+            : _source == null
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    Text(
+                      _geometryLoaded > 0
+                          ? 'Preparing pages · $_geometryLoaded ready'
+                          : 'Opening your book…',
+                    ),
+                  ],
+                ),
+              )
+            : _body(),
+        bottomNavigationBar: _source == null || !_chrome
+            ? null
+            : SafeArea(
+                child: Row(
+                  children: [
+                    IconButton(
+                      tooltip: _source!.reflowable
+                          ? 'Previous chapter'
+                          : 'Previous page',
+                      onPressed: () => _advance(false),
+                      icon: const Icon(Icons.skip_previous),
+                    ),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${_source!.reflowable ? 'Chapter' : 'Page'} $_page / ${_source!.pageCount}',
+                          ),
+                          Slider(
+                            value: _page.toDouble(),
+                            min: 1,
+                            max: _source!.pageCount > 1
+                                ? _source!.pageCount.toDouble()
+                                : 2,
+                            onChanged: _source!.pageCount < 2
+                                ? null
+                                : (value) => _go(value.round()),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: _source!.reflowable
+                          ? 'Next chapter'
+                          : 'Next page',
+                      onPressed: () => _advance(true),
+                      icon: const Icon(Icons.skip_next),
+                    ),
+                  ],
                 ),
               ),
       ),

@@ -177,6 +177,25 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
     );
   }
 
+  void _addMedia(List<String> ids, NamedMediaPlaylist? playlist) {
+    _chooseMedia(
+      ids,
+      (chosen) => _run(() async {
+        if (playlist == null) {
+          for (final id in chosen.where((id) => !ids.contains(id))) {
+            await repository.enqueue(id);
+          }
+        } else {
+          await repository.savePlaylist(
+            playlist.title,
+            chosen,
+            playlistId: playlist.id,
+          );
+        }
+      }),
+    );
+  }
+
   Future<List<Item>> _media(String query) async {
     final db = ref.read(appDatabaseProvider);
     return (db.select(db.items)
@@ -250,121 +269,112 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                   ],
                   onChanged: (value) => setState(() => _selected = value),
                 ),
-                Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  children: [
-                    if (playlist == null) ...[
-                      FilterChip(
-                        label: const Text('Shuffle'),
-                        selected: state.shuffle,
-                        onSelected: (value) =>
-                            _run(() => repository.setShuffle(value)),
-                      ),
-                      SizedBox(width: 240, child: DropdownButton<QueueRepeat>(isExpanded: true,
-                        value: state.repeat,
-                        items: [
-                          for (final value in QueueRepeat.values)
-                            DropdownMenuItem(
-                              value: value,
-                              child: Text('Repeat: ${value.name}'),
-                            ),
-                        ],
-                        onChanged: (value) {
-                          if (value != null) {
-                            _run(() => repository.setRepeat(value));
-                          }
-                        },
-                      )),
-                      TextButton(
-                        onPressed: () => _run(() async {
-                          final title = await _name('');
-                          if (title != null) {
-                            await repository.savePlaylist(title, ids);
-                          }
-                        }),
-                        child: const Text('Save as playlist'),
-                      ),
-                    ] else ...[
-                      FilledButton.icon(
-                        onPressed: ids.isEmpty
-                            ? null
-                            : () => _run(() async {
-                                await repository.setQueue(ids);
-                                if (mounted) _open(ids.first);
-                              }),
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('Play'),
-                      ),
-                      TextButton(
-                        onPressed: () => _run(() async {
-                          final title = await _name(playlist.title);
-                          if (title != null) {
-                            await repository.savePlaylist(
-                              title,
-                              ids,
-                              playlistId: playlist.id,
+                if (ids.isNotEmpty || playlist != null)
+                  Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    children: [
+                      if (playlist == null && ids.isNotEmpty) ...[
+                        FilterChip(
+                          label: const Text('Shuffle'),
+                          selected: state.shuffle,
+                          onSelected: (value) =>
+                              _run(() => repository.setShuffle(value)),
+                        ),
+                        SizedBox(
+                          width: 240,
+                          child: DropdownButton<QueueRepeat>(
+                            isExpanded: true,
+                            value: state.repeat,
+                            items: [
+                              for (final value in QueueRepeat.values)
+                                DropdownMenuItem(
+                                  value: value,
+                                  child: Text('Repeat: ${value.name}'),
+                                ),
+                            ],
+                            onChanged: (value) {
+                              if (value != null) {
+                                _run(() => repository.setRepeat(value));
+                              }
+                            },
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => _run(() async {
+                            final title = await _name('');
+                            if (title != null) {
+                              await repository.savePlaylist(title, ids);
+                            }
+                          }),
+                          child: const Text('Save as playlist'),
+                        ),
+                      ] else if (playlist != null) ...[
+                        FilledButton.icon(
+                          onPressed: ids.isEmpty
+                              ? null
+                              : () => _run(() async {
+                                  await repository.setQueue(ids);
+                                  if (mounted) _open(ids.first);
+                                }),
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('Play'),
+                        ),
+                        TextButton(
+                          onPressed: () => _run(() async {
+                            final title = await _name(playlist.title);
+                            if (title != null) {
+                              await repository.savePlaylist(
+                                title,
+                                ids,
+                                playlistId: playlist.id,
+                              );
+                            }
+                          }),
+                          child: const Text('Rename'),
+                        ),
+                        TextButton(
+                          onPressed: () => _export(playlist),
+                          child: const Text('Export'),
+                        ),
+                        TextButton(
+                          onPressed: () => _run(() async {
+                            final confirmed = await showStudyAdaptiveModal<bool>(
+                              context: context,
+                              builder: (context) => const StudyConfirmDialog(
+                                title: 'Delete playlist?',
+                                message:
+                                    'Only this playlist is removed. Media and progress stay in your libraries.',
+                                confirmLabel: 'Delete',
+                                destructive: true,
+                              ),
                             );
-                          }
-                        }),
-                        child: const Text('Rename'),
-                      ),
-                      TextButton(
-                        onPressed: () => _export(playlist),
-                        child: const Text('Export'),
-                      ),
-                      TextButton(
-                        onPressed: () => _run(() async {
-                          final confirmed = await showStudyAdaptiveModal<bool>(
-                            context: context,
-                            builder: (context) => const StudyConfirmDialog(
-                              title: 'Delete playlist?',
-                              message:
-                                  'Only this playlist is removed. Media and progress stay in your libraries.',
-                              confirmLabel: 'Delete',
-                              destructive: true,
-                            ),
-                          );
-                          if (confirmed == true) {
-                            await repository.deletePlaylist(playlist.id);
-                            if (mounted) setState(() => _selected = null);
-                          }
-                        }),
-                        child: const Text('Delete'),
+                            if (confirmed == true) {
+                              await repository.deletePlaylist(playlist.id);
+                              if (mounted) setState(() => _selected = null);
+                            }
+                          }),
+                          child: const Text('Delete'),
+                        ),
+                      ],
+                      TextButton.icon(
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add media'),
+                        onPressed: _busy
+                            ? null
+                            : () => _addMedia(ids, playlist),
                       ),
                     ],
-                    TextButton.icon(
-                      icon: const Icon(Icons.add),
-                      label: const Text('Add media'),
-                      onPressed: () => _chooseMedia(
-                        ids,
-                        (chosen) => _run(() async {
-                          if (playlist == null) {
-                            for (final id in chosen.where(
-                              (id) => !ids.contains(id),
-                            )) {
-                              await repository.enqueue(id);
-                            }
-                          } else {
-                            await repository.savePlaylist(
-                              playlist.title,
-                              chosen,
-                              playlistId: playlist.id,
-                            );
-                          }
-                        }),
-                      ),
-                    ),
-                  ],
-                ),
-                if (_busy) const LinearProgressIndicator(),
-                TextField(
-                  decoration: const InputDecoration(
-                    prefixIcon: Icon(Icons.search),
-                    hintText: 'Filter entries',
                   ),
-                  onChanged: (value) => setState(() => _search = value),
-                ),
+                if (_busy) const LinearProgressIndicator(),
+                if (ids.isNotEmpty)
+                  TextField(
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.search),
+                      hintText: 'Filter entries',
+                    ),
+                    onChanged: (value) => setState(() => _search = value),
+                  ),
                 Expanded(
                   child: FutureBuilder<List<Item?>>(
                     future: Future.wait(
@@ -378,9 +388,29 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                         return const Center(child: CircularProgressIndicator());
                       }
                       if (items.isEmpty) {
-                        return const Center(
-                          child: Text(
-                            'Add media from your libraries to get started.',
+                        return Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                playlist == null
+                                    ? 'Your queue is empty'
+                                    : 'This playlist is empty',
+                                style: Theme.of(context).textTheme.titleLarge,
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Choose audio or video from your libraries.',
+                              ),
+                              const SizedBox(height: 16),
+                              FilledButton.icon(
+                                onPressed: _busy
+                                    ? null
+                                    : () => _addMedia(ids, playlist),
+                                icon: const Icon(Icons.add),
+                                label: const Text('Add media'),
+                              ),
+                            ],
                           ),
                         );
                       }
@@ -390,7 +420,10 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                         onReorderItem: (old, next) => _run(() async {
                           if (_search.isNotEmpty) return;
                           if (playlist == null) {
-                            await repository.reorder(old, next > old ? next + 1 : next);
+                            await repository.reorder(
+                              old,
+                              next > old ? next + 1 : next,
+                            );
                           } else {
                             final reordered = List.of(ids);
                             reordered.insert(next, reordered.removeAt(old));

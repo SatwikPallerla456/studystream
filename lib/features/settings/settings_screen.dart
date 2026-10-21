@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import '../../domain/services/myvlc_import_service.dart';
 
 import 'sync_client_section.dart';
+import 'metadata_provider_settings.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,6 +16,8 @@ import '../../data/providers/device_runtime_provider.dart';
 import '../../data/sync/lan_sync_server.dart';
 import '../../domain/models/app_preferences.dart';
 import '../../domain/services/backup_service.dart';
+import '../../domain/reader/reader_session_store.dart';
+import '../reader/reader_preferences_sheet.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/study_ui.dart';
 
@@ -247,7 +250,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     final playback = StudySection(
       title: 'Playback',
-      description: 'Defaults for newly opened video and audio lessons.',
+      collapsible: true,
+      description: 'Defaults for video and audio playback.',
       icon: Icons.play_circle_outline_rounded,
       child: _PlaybackPreferences(
         value: preferences,
@@ -256,23 +260,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
 
-    final reading = const StudySection(
+    final reading = StudySection(
       title: 'Reading',
-      description: 'Document behaviour is kept simple and local.',
+      collapsible: true,
+      description:
+          'Set reader defaults here. Libraries and individual titles can override each preference.',
       icon: Icons.menu_book_outlined,
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _InformationRow(
+          const _InformationRow(
             icon: Icons.bookmark_added_outlined,
             title: 'Resume automatically',
-            description: 'PDFs reopen at your saved page and zoom level.',
-          ),
-          SizedBox(height: AppSpace.sm),
-          _InformationRow(
-            icon: Icons.done_all_rounded,
-            title: 'Reading progress',
             description:
-                'Completion follows the same threshold used for media.',
+                'Books and PDFs reopen at their saved reading position.',
+          ),
+          const SizedBox(height: AppSpace.sm),
+          OutlinedButton.icon(
+            onPressed: () => showReaderPreferences(
+              context: context,
+              database: database,
+              initialScope: ReaderPreferenceScope.app,
+            ),
+            icon: const Icon(Icons.tune),
+            label: const Text('App reading defaults'),
           ),
         ],
       ),
@@ -280,6 +291,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     final backup = StudySection(
       title: 'Backup & restore',
+      collapsible: true,
       description:
           'Backups contain libraries, progress, notes, bookmarks, metadata, and settings. Source media is never included.',
       icon: Icons.inventory_2_outlined,
@@ -302,7 +314,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 const SizedBox(width: AppSpace.sm),
                 Expanded(
                   child: Text(
-                    'Keep your source folders separately backed up. A Tangerine backup restores your learning data, not the media itself.',
+                    'Keep your source folders separately backed up. A Tangerine backup restores your library data. Media files are backed up separately.',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ),
@@ -345,14 +357,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const StudyPageHeader(
-            eyebrow: 'Make it yours',
-            title: 'Settings',
-            description:
-                'Tune your learning experience, protect your progress, and manage local connections.',
+          const StudyPageHeader(title: 'Settings'),
+          ListTile(
+            leading: const Icon(Icons.manage_search),
+            title: const Text('Metadata providers & credits'),
+            subtitle: const Text(
+              'Online identification, artwork and TMDB setup',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const MetadataProviderSettings(),
+              ),
+            ),
           ),
-          const SizedBox(height: AppSpace.xl),
-          _SettingsGrid(children: [appearance, playback, reading, backup]),
+          const SizedBox(height: AppSpace.lg),
+          appearance,
+          const SizedBox(height: AppSpace.md),
+          playback,
+          const SizedBox(height: AppSpace.md),
+          reading,
+          const SizedBox(height: AppSpace.md),
+          backup,
           const SizedBox(height: AppSpace.md),
           Wrap(
             spacing: 8,
@@ -370,26 +396,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
           const SizedBox(height: AppSpace.md),
-          StreamBuilder<List<AppSetting>>(
-            stream: database.select(database.appSettings).watch(),
-            builder: (context, snapshot) => SwitchListTile(
-              title: const Text('Allow paired players to control playback'),
-              subtitle: const Text(
-                'Approved devices can play, pause and seek the host player while the server is running. Off by default; device revocation removes access.',
-              ),
-              value:
-                  snapshot.data?.any(
-                    (setting) =>
-                        setting.key == 'sync.allowPlaybackControl' &&
-                        setting.value == 'true',
-                  ) ??
-                  false,
-              onChanged: (value) =>
-                  database.setSetting('sync.allowPlaybackControl', '$value'),
-            ),
-          ),
           StudySection(
-            title: 'Bring your MyVLC library',
+            title: 'Import from MyVLC',
+            collapsible: true,
             description:
                 'Preview a library.json import before merging local media, resume positions and playlists.',
             icon: Icons.move_to_inbox_outlined,
@@ -404,36 +413,71 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const SizedBox(height: AppSpace.md),
-          StreamBuilder<LanSyncState>(
-            stream: server.states,
-            initialData: server.state,
-            builder: (context, snapshot) => _SyncSection(
-              server: server,
-              state: snapshot.data ?? server.state,
-              onMessage: _message,
-              onToggle: () async {
-                final runtime = ref.read(deviceRuntimeProvider.notifier);
-                if (server.state.running) {
-                  await runtime.stopServer();
-                } else {
-                  final configuration = await ref.read(
-                    deviceRuntimeProvider.future,
-                  );
-                  await runtime.startServer(
-                    name: configuration.serverName,
-                    port: configuration.port,
-                    autoStart: configuration.autoStart,
-                  );
-                }
-              },
+          StudySection(
+            title: 'Network & devices',
+            description:
+                'Pair players, manage sharing and review approved devices.',
+            icon: Icons.devices_outlined,
+            collapsible: true,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                StreamBuilder<LanSyncState>(
+                  stream: server.states,
+                  initialData: server.state,
+                  builder: (context, snapshot) => _SyncSection(
+                    server: server,
+                    state: snapshot.data ?? server.state,
+                    onMessage: _message,
+                    onToggle: () async {
+                      final runtime = ref.read(deviceRuntimeProvider.notifier);
+                      if (server.state.running) {
+                        await runtime.stopServer();
+                      } else {
+                        final configuration = await ref.read(
+                          deviceRuntimeProvider.future,
+                        );
+                        await runtime.startServer(
+                          name: configuration.serverName,
+                          port: configuration.port,
+                          autoStart: configuration.autoStart,
+                        );
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(height: AppSpace.md),
+                const SyncClientSection(),
+                const SizedBox(height: AppSpace.md),
+                _DevicesSection(
+                  database: database,
+                  onRevoke: (device) => _revokeDevice(database, device),
+                ),
+                const SizedBox(height: AppSpace.md),
+                StreamBuilder<List<AppSetting>>(
+                  stream: database.select(database.appSettings).watch(),
+                  builder: (context, snapshot) => SwitchListTile(
+                    title: const Text(
+                      'Allow paired players to control playback',
+                    ),
+                    subtitle: const Text(
+                      'Approved devices can play, pause and seek the host player while the server is running. Off by default; device revocation removes access.',
+                    ),
+                    value:
+                        snapshot.data?.any(
+                          (setting) =>
+                              setting.key == 'sync.allowPlaybackControl' &&
+                              setting.value == 'true',
+                        ) ??
+                        false,
+                    onChanged: (value) => database.setSetting(
+                      'sync.allowPlaybackControl',
+                      '$value',
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ),
-          const SizedBox(height: AppSpace.md),
-          const SyncClientSection(),
-          const SizedBox(height: AppSpace.md),
-          _DevicesSection(
-            database: database,
-            onRevoke: (device) => _revokeDevice(database, device),
           ),
           const SizedBox(height: AppSpace.md),
           const _SettingsGrid(
@@ -491,7 +535,7 @@ class _PlaybackPreferences extends StatelessWidget {
       children: [
         _SettingRow(
           label: 'Default speed',
-          description: 'Applied when a lesson has no saved speed.',
+          description: 'Applied when a title has no saved speed.',
           control: DropdownButton<double>(
             value: value.defaultPlaybackSpeed,
             items: playbackSpeeds
@@ -531,7 +575,8 @@ class _PlaybackPreferences extends StatelessWidget {
         const Divider(height: AppSpace.lg),
         _SettingRow(
           label: 'Completion point',
-          description: 'Automatically mark a lesson complete near its end.',
+          description:
+              'Automatically finish a video or long-form audio title near its end.',
           control: DropdownButton<double>(
             value: value.completionThreshold,
             items: const [0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
@@ -553,7 +598,9 @@ class _PlaybackPreferences extends StatelessWidget {
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text('Auto-advance'),
-          subtitle: const Text('Offer the next lesson after media finishes.'),
+          subtitle: const Text(
+            'Advance course lessons, TV episodes, or an explicit queue.',
+          ),
           value: value.autoAdvance,
           onChanged: (enabled) =>
               onChanged(value.copyWith(autoAdvance: enabled)),
@@ -626,7 +673,7 @@ class _SyncSection extends StatelessWidget {
     return StudySection(
       title: 'Media server',
       description:
-          'Share local media and learning progress with approved players on your private network.',
+          'Share local media and progress with approved players on your private network.',
       icon: Icons.wifi_tethering_rounded,
       trailing: StudyStatusBadge(
         label: state.running ? 'Host running' : 'Host stopped',
@@ -967,7 +1014,8 @@ class _KeyboardSection extends StatelessWidget {
   Widget build(BuildContext context) {
     return const StudySection(
       title: 'Keyboard shortcuts',
-      description: 'Fast controls for desktop learning sessions.',
+      collapsible: true,
+      description: 'Controls while playing media on this device.',
       icon: Icons.keyboard_outlined,
       child: Column(
         children: [
@@ -975,7 +1023,7 @@ class _KeyboardSection extends StatelessWidget {
           Divider(),
           _ShortcutRow(label: 'Seek backward / forward', keys: '←  →'),
           Divider(),
-          _ShortcutRow(label: 'Previous / next lesson', keys: 'P  N'),
+          _ShortcutRow(label: 'Previous / next in sequence', keys: 'P  N'),
           Divider(),
           _ShortcutRow(label: 'Mute', keys: 'M'),
           Divider(),
@@ -1016,6 +1064,7 @@ class _DiagnosticsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     return const StudySection(
       title: 'Storage, diagnostics & about',
+      collapsible: true,
       description: 'Technical context, kept out of the everyday experience.',
       icon: Icons.info_outline_rounded,
       child: Column(

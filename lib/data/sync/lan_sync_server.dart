@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
+import 'package:pdfrx/pdfrx.dart';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' as drift;
@@ -13,7 +15,16 @@ import '../playback/remote_playback_controller.dart';
 import 'sync_snapshot_merger.dart';
 import 'approved_media_source.dart';
 import 'lan_discovery.dart';
+import 'library_access_store.dart';
+import 'sync_change_journal.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
+import '../../domain/catalog/media_record_contract.dart';
+import '../../domain/services/thumbnail_cache.dart';
+import '../../domain/services/catalog_artwork_cache.dart';
+import '../reader/book_page_source.dart';
 import 'web_player.dart';
+import '../../domain/study/study_catalog_repository.dart';
 
 class LanSyncState {
   const LanSyncState({
@@ -45,6 +56,8 @@ class LanSyncServer {
   StreamSubscription<HttpRequest>? _requestSubscription;
   Timer? _pairingTimer;
   String? _pairingCode;
+  final _artwork = ThumbnailCache();
+  int _pageJobs = 0;
   String _name = 'Tangerine server';
   Future<void>? _starting;
 
@@ -75,6 +88,7 @@ class LanSyncServer {
         shared: false,
       );
       _server = server;
+      await SyncChangeJournal(database).trim();
       await _discovery.advertise(server.port, name: _name);
       regeneratePairingCode();
       _requestSubscription = server.listen(
@@ -181,6 +195,7 @@ class LanSyncServer {
         return await _json(request, HttpStatus.ok, {
           'service': 'StudyStream',
           'version': 1,
+          'protocolVersion': 2,
           'name': _name,
           'product': 'Tangerine',
           'capabilities': [
@@ -188,6 +203,13 @@ class LanSyncServer {
             'streaming',
             'range-requests',
             'study-sync',
+            'study-pages-v1',
+            'catalog-v2',
+            'catalog-bootstrap-v2',
+            'change-feed-v2',
+            'library-grants-v1',
+            'reader-locator-v1',
+            'field-overrides-v1',
           ],
         });
       }
@@ -199,7 +221,17 @@ class LanSyncServer {
       if (request.method == 'GET' && request.uri.path == '/v1/session') {
         return await _json(request, HttpStatus.ok, {
           'deviceId': device.id,
+          'capabilities': ['study-pages-v1'],
           'name': _name,
+          'protocolVersion': 2,
+          'libraries': [
+            for (final library
+                in await database.select(database.libraries).get())
+              if ((await LibraryAccessStore(
+                database,
+              ).allowed(device.id, 'browse')).contains(library.id))
+                {'id': library.id, 'title': library.title},
+          ],
         });
       }
       if (request.method == 'POST' && request.uri.path == '/v1/logout') {
@@ -207,6 +239,13 @@ class LanSyncServer {
         request.response.cookies.add(
           Cookie('myvlc_session', '')
             ..path = '/v1'
+            ..httpOnly = true
+            ..sameSite = SameSite.strict
+            ..maxAge = 0,
+        );
+        request.response.cookies.add(
+          Cookie('myvlc_session', '')
+            ..path = '/'
             ..httpOnly = true
             ..sameSite = SameSite.strict
             ..maxAge = 0,
@@ -223,7 +262,134 @@ class LanSyncServer {
               ),
             ),
       );
+      final access = LibraryAccessStore(database);
+      final browse = await access.allowed(device.id, 'browse');
+      final mutate = await access.allowed(device.id, 'mutate');
+      final stream = await access.allowed(device.id, 'stream');
+      final scopeIds = browse.toList()..sort();
+      final scope = stableId(scopeIds.join('::'));
+      if (request.method == 'GET' && request.uri.path == '/v2/bootstrap') {
+        return _json(request, HttpStatus.ok, {
+          'protocolVersion': 2,
+          'scope': scope,
+          'libraries': scopeIds,
+          ...await SyncChangeJournal(
+            database,
+          ).bootstrap(browse, cursor: request.uri.queryParameters['cursor']),
+        });
+      }
+      if (request.method == 'GET' && request.uri.path == '/v2/changes') {
+        if (request.uri.queryParameters['scope'] != scope)
+          return _json(request, HttpStatus.ok, {
+            'protocolVersion': 2,
+            'scope': scope,
+            'libraries': scopeIds,
+            'resetRequired': true,
+            'events': [],
+          });
+        final since = int.tryParse(request.uri.queryParameters['since'] ?? '');
+        final limit = int.tryParse(
+          request.uri.queryParameters['limit'] ?? '100',
+        );
+        if (since == null || limit == null)
+          throw const FormatException(
+            'A valid change cursor and limit are required',
+          );
+        return _json(request, HttpStatus.ok, {
+          'protocolVersion': 2,
+          'scope': scope,
+          'libraries': scopeIds,
+          ...await SyncChangeJournal(
+            database,
+          ).page(since, browse, limit: limit),
+        });
+      }
+      if (request.method == 'GET' &&
+          path.length == 3 &&
+          path[0] == 'v2' &&
+          path[1] == 'study') {
+        final item = await database.getItemById(path[2]);
+        if (item == null || !browse.contains(item.libraryId))
+          return _json(request, HttpStatus.notFound, {
+            'error': 'Item unavailable',
+          });
+        final args = request.uri.queryParameters;
+        final limit = int.tryParse(args['limit'] ?? '40');
+        if (limit == null)
+          throw const FormatException('Invalid Study page limit');
+        final repository = StudyCatalogRepository(database);
+        final kind = args['kind'];
+        if (kind != null) {
+          if (!{'notes', 'bookmarks'}.contains(kind))
+            throw const FormatException('Unknown Study entry kind');
+          final page = await repository.page(
+            item,
+            kind == 'notes' ? StudyKind.notes : StudyKind.bookmarks,
+            query: args['q'] ?? '',
+            cursor: args['cursor'],
+            limit: limit,
+          );
+          return _json(request, HttpStatus.ok, {
+            'protocolVersion': 2,
+            'kind': kind,
+            ...page.toJson(),
+          });
+        }
+        if (args.containsKey('cursor'))
+          throw const FormatException('A Study cursor requires an entry kind');
+        // Preserve the original response shape for older browser clients.
+        final notes = await repository.page(
+          item,
+          StudyKind.notes,
+          query: args['q'] ?? '',
+          limit: limit,
+        );
+        final bookmarks = await repository.page(
+          item,
+          StudyKind.bookmarks,
+          query: args['q'] ?? '',
+          limit: limit,
+        );
+        return _json(request, HttpStatus.ok, {
+          'notes': notes.entries,
+          'bookmarks': bookmarks.entries,
+          'pages': {
+            'notes': {'next': notes.next},
+            'bookmarks': {'next': bookmarks.next},
+          },
+        });
+      }
+
+      if ((request.method == 'GET' || request.method == 'HEAD') &&
+          path.length == 3 &&
+          path[0] == 'v2' &&
+          path[1] == 'artwork')
+        return _serveArtwork(request, path[2], browse);
+      if ((request.method == 'GET' || request.method == 'HEAD') &&
+          path.length == 4 &&
+          path[0] == 'v2' &&
+          path[1] == 'pages')
+        return _servePage(request, path[2], path[3], stream);
+      if (request.method == 'GET' && request.uri.path == '/v2/catalog')
+        return await _catalogPage(request, browse);
       if (request.uri.path == '/v1/playback') {
+        final active = playbackController?.status['itemId'];
+        final activeItem = active is String
+            ? await database.getItemById(active)
+            : null;
+        if (activeItem == null ||
+            !browse.contains(activeItem.libraryId) ||
+            request.method == 'POST' &&
+                !mutate.contains(activeItem.libraryId)) {
+          if (request.method == 'GET')
+            return _json(request, HttpStatus.ok, {
+              'enabled': false,
+              'active': false,
+            });
+          return _json(request, HttpStatus.forbidden, {
+            'error': 'This library is not approved for playback control',
+          });
+        }
         final enabled =
             await database.getSetting('sync.allowPlaybackControl') == 'true';
         if (request.method == 'GET') {
@@ -247,6 +413,12 @@ class LanSyncServer {
           if (action is! String || value != null && value is! num) {
             throw const FormatException('Invalid player command.');
           }
+          if ({'next', 'previous'}.contains(action) &&
+              !(await _hostedLibraryIds()).every(mutate.contains))
+            return await _json(request, HttpStatus.forbidden, {
+              'error':
+                  'Queue navigation requires access to all hosted libraries',
+            });
           await playbackController!.execute(
             action,
             (value as num?)?.toDouble(),
@@ -255,7 +427,7 @@ class LanSyncServer {
         }
       }
       if (request.method == 'GET' && request.uri.path == '/v1/snapshot') {
-        final snapshot = await _hostedSnapshot();
+        final snapshot = await _hostedSnapshot(allowed: browse);
         await database.markDeviceSynced(
           device.id,
           address: request.connectionInfo?.remoteAddress.address,
@@ -266,7 +438,7 @@ class LanSyncServer {
         final body = await _readJson(request);
         await SyncSnapshotMerger(
           database,
-        ).merge(body, allowedLibraryIds: await _hostedLibraryIds());
+        ).merge(body, allowedLibraryIds: mutate);
         await database.markDeviceSynced(
           device.id,
           address: request.connectionInfo?.remoteAddress.address,
@@ -277,7 +449,7 @@ class LanSyncServer {
           path.length == 3 &&
           path[0] == 'v1' &&
           path[1] == 'media') {
-        return await _serveMedia(request, path[2]);
+        return await _serveMedia(request, path[2], stream);
       }
       await _json(request, HttpStatus.notFound, {'error': 'Not found'});
     } on FormatException catch (error) {
@@ -337,10 +509,18 @@ class LanSyncServer {
         lastAddress: drift.Value(request.connectionInfo?.remoteAddress.address),
       ),
     );
+    await LibraryAccessStore(database).approveCurrentLibraries(deviceId);
     regeneratePairingCode();
     request.response.cookies.add(
-      Cookie('myvlc_session', token)
+      Cookie('myvlc_session', '')
         ..path = '/v1'
+        ..httpOnly = true
+        ..sameSite = SameSite.strict
+        ..maxAge = 0,
+    );
+    request.response.cookies.add(
+      Cookie('myvlc_session', token)
+        ..path = '/'
         ..httpOnly = true
         ..sameSite = SameSite.strict
         ..secure = request.requestedUri.scheme == 'https'
@@ -362,10 +542,12 @@ class LanSyncServer {
           .map((library) => library.id)
           .toSet();
 
-  Future<Map<String, Object?>> _hostedSnapshot() =>
+  Future<Map<String, Object?>> _hostedSnapshot({Set<String>? allowed}) =>
       database.transaction(() async {
         final snapshot = await database.exportSyncData();
-        final localLibraries = await _hostedLibraryIds();
+        final localLibraries = (await _hostedLibraryIds()).intersection(
+          allowed ?? await _hostedLibraryIds(),
+        );
         List<Map<String, dynamic>> rows(String key) =>
             (snapshot[key] as List).cast<Map<String, dynamic>>();
         final libraries = rows(
@@ -399,6 +581,12 @@ class LanSyncServer {
           'schemaVersion': snapshot['schemaVersion'],
           'exportedAt': snapshot['exportedAt'],
           'protocolVersion': snapshot['protocolVersion'],
+          'changeCursor': await SyncChangeJournal(database).head(),
+          'capabilities': snapshot['capabilities'],
+          'catalogRows': await CatalogIdentityStore(database).transportRows(
+            libraries: localLibraries,
+            itemIds: itemLibraries.keys.cast<String>().toSet(),
+          ),
           'libraries': libraries,
           'sections': sections,
           'items': items,
@@ -422,6 +610,257 @@ class LanSyncServer {
           }).toList(),
         };
       });
+
+  Future<void> _serveArtwork(
+    HttpRequest request,
+    String id,
+    Set<String> allowed,
+  ) async {
+    final item = await database.getItemById(id);
+    if (item == null || item.unavailable || !allowed.contains(item.libraryId))
+      return _json(request, HttpStatus.notFound, {
+        'error': 'Artwork unavailable',
+      });
+    try {
+      final metadata = await MediaCatalogRepository(database).metadata(item);
+      var path = await CatalogArtworkCache.instance.get(
+        metadata['artworkUrl'] as String?,
+      );
+      if (path == null) {
+        final source = await resolveApprovedMedia(database, item);
+        final lease = _artwork.acquire(item.copyWith(filePath: source.path));
+        try {
+          path = await lease.future;
+        } finally {
+          lease.release();
+        }
+      }
+      if (path == null) {
+        return _json(request, HttpStatus.notFound, {
+          'error': 'Artwork is not available for this format',
+        });
+      }
+      final file = File(path), length = await File(path).length();
+      if (length > 2 * 1024 * 1024) {
+        return _json(request, HttpStatus.notFound, {
+          'error': 'Artwork exceeds delivery limit',
+        });
+      }
+      request.response.headers
+        ..contentType = ContentType('image', 'png')
+        ..contentLength = length;
+      if (request.method == 'GET')
+        await request.response.addStream(file.openRead());
+      await request.response.close();
+    } on MediaSourceException catch (error) {
+      return _json(request, error.statusCode, {'error': error.message});
+    } on FileSystemException {
+      return _json(request, HttpStatus.notFound, {
+        'error': 'Artwork is temporarily unavailable',
+      });
+    }
+  }
+
+  Future<void> _servePage(
+    HttpRequest request,
+    String id,
+    String rawPage,
+    Set<String> allowed,
+  ) async {
+    final item = await database.getItemById(id), number = int.tryParse(rawPage);
+    if (item == null || item.unavailable || !allowed.contains(item.libraryId))
+      return _json(request, HttpStatus.notFound, {'error': 'Page unavailable'});
+    if (number == null || number < 1 || number > 10000)
+      throw const FormatException('Invalid canonical page');
+    if (_pageJobs >= 2)
+      return _json(request, HttpStatus.serviceUnavailable, {
+        'error': 'Page renderer is busy. Retry shortly.',
+      });
+    _pageJobs++;
+    try {
+      final file = await resolveApprovedMedia(database, item);
+      late Uint8List bytes;
+      ContentType type = ContentType('image', 'png');
+      if (item.itemType == 'pdf') {
+        final document = await PdfDocument.openFile(file.path);
+        try {
+          if (number > document.pages.length)
+            throw const FormatException('Page is outside this document');
+          final page = document.pages[number - 1], scale = 1024 / page.width;
+          final height = (page.height * scale).round();
+          if (height < 1 || height > 4096)
+            throw const FormatException(
+              'Page dimensions exceed the delivery budget',
+            );
+          final bitmap = await page.render(
+            width: 1024,
+            height: height,
+            fullWidth: 1024,
+            fullHeight: height.toDouble(),
+          );
+          if (bitmap == null)
+            throw const FormatException('Page could not render');
+          try {
+            final image = await bitmap.createImage();
+            try {
+              final data = await image.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              if (data == null)
+                throw const FormatException('Page could not encode');
+              bytes = data.buffer.asUint8List();
+            } finally {
+              image.dispose();
+            }
+          } finally {
+            bitmap.dispose();
+          }
+        } finally {
+          await document.dispose();
+        }
+      } else if (item.itemType == 'cbz') {
+        final source = await ArchiveBookSource.open(file.path, epub: false);
+        try {
+          if (number > source.pageCount)
+            throw const FormatException('Page is outside this comic');
+          final page = await source.load(number);
+          bytes = page.image!;
+          type = _contentType(source.locator(number));
+        } finally {
+          await source.dispose();
+        }
+      } else {
+        return _json(request, HttpStatus.unprocessableEntity, {
+          'error':
+              'Use the publication renderer or original file for this format',
+        });
+      }
+      if (bytes.length > 32 * 1024 * 1024)
+        throw const FormatException('Page exceeds delivery budget');
+      request.response.headers
+        ..contentType = type
+        ..contentLength = bytes.length;
+      if (request.method == 'GET') request.response.add(bytes);
+      await request.response.close();
+    } on MediaSourceException catch (error) {
+      return _json(request, error.statusCode, {'error': error.message});
+    } finally {
+      _pageJobs--;
+    }
+  }
+
+  Future<void> _catalogPage(HttpRequest request, Set<String> allowed) async {
+    final args = request.uri.queryParameters;
+    final library = args['library'];
+    if (library != null && !allowed.contains(library))
+      return _json(request, HttpStatus.forbidden, {
+        'error': 'This library is not approved for browsing',
+      });
+    final limit = int.tryParse(args['limit'] ?? '60');
+    if (limit == null ||
+        limit < 1 ||
+        limit > 100 ||
+        (args['q']?.length ?? 0) > 512)
+      throw const FormatException('Invalid catalog page limits');
+    final clauses = <String>['i.unavailable=0'];
+    final variables = <drift.Variable>[];
+    final scope = library == null ? allowed : {library};
+    if (scope.isEmpty)
+      return _json(request, HttpStatus.ok, {
+        'protocolVersion': 2,
+        'items': [],
+        'next': null,
+      });
+    clauses.add('i.library_id IN (${scope.map((_) => '?').join(',')})');
+    variables.addAll(scope.map(drift.Variable.new));
+    final type = args['type'];
+    if (type == 'documents') {
+      clauses.add("i.item_type NOT IN ('video','audio')");
+    } else if (type != null) {
+      clauses.add('i.item_type=?');
+      variables.add(drift.Variable(type));
+    }
+    final query = args['q']?.trim() ?? '';
+    if (query.isNotEmpty) {
+      final terms = query
+          .split(RegExp(r'\s+'))
+          .take(8)
+          .map((term) => '"${term.replaceAll('"', '""')}"*')
+          .join(' AND ');
+      clauses.add(
+        'i.id IN (SELECT item_id FROM catalog_search WHERE catalog_search MATCH ?)',
+      );
+      variables.add(drift.Variable(terms));
+    }
+    final cursor = args['cursor'];
+    if (cursor != null) {
+      if (cursor.length > 4096)
+        throw const FormatException('Invalid catalog cursor');
+      final data = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(cursor))),
+      );
+      if (data is! Map ||
+          data['title'] is! String ||
+          data['id'] is! String ||
+          data['library'] != library ||
+          data['q'] != query ||
+          data['type'] != type)
+        throw const FormatException('Cursor does not match this query');
+      clauses.add(
+        '(COALESCE(s.title,i.title)>? OR (COALESCE(s.title,i.title)=? AND i.id>?))',
+      );
+      variables.addAll([
+        drift.Variable(data['title'] as String),
+        drift.Variable(data['title'] as String),
+        drift.Variable(data['id'] as String),
+      ]);
+    }
+    final rows = await database
+        .customSelect(
+          'SELECT i.*,COALESCE(s.title,i.title) AS catalog_title FROM items i LEFT JOIN catalog_search s ON s.item_id=i.id WHERE ${clauses.join(' AND ')} ORDER BY COALESCE(s.title,i.title),i.id LIMIT ?',
+          variables: [...variables, drift.Variable(limit + 1)],
+        )
+        .get();
+    final page = rows.take(limit).toList();
+    final catalog = MediaCatalogRepository(database);
+    final items = <Map<String, dynamic>>[];
+    for (final row in page) {
+      final item = database.items.map(row.data);
+      final metadata = await catalog.metadata(item);
+      items.add({
+        ...item.toJson(),
+        'filePath': '',
+        'thumbnailPath': null,
+        'fingerprint': null,
+        'libraryKind': (await catalog.libraryKind(item.libraryId)).name,
+        'metadata': {
+          for (final key in MediaRecordContract.fields('metadata')!)
+            if (metadata.containsKey(key)) key: metadata[key],
+        },
+        'playback': (await database.getPlaybackByItemId(item.id))?.toJson(),
+        'reading': (await database.getReadingByItemId(item.id))?.toJson(),
+      });
+    }
+    final next = rows.length > limit
+        ? base64UrlEncode(
+            utf8.encode(
+              jsonEncode({
+                'title': page.last.data['catalog_title'],
+                'id': page.last.data['id'],
+                'library': library,
+                'q': query,
+                'type': type,
+              }),
+            ),
+          )
+        : null;
+    return _json(request, HttpStatus.ok, {
+      'protocolVersion': 2,
+      'items': items,
+      'next': next,
+      'limit': limit,
+    });
+  }
 
   Future<KnownDevice?> _authorise(HttpRequest request) async {
     final header = request.headers.value(HttpHeaders.authorizationHeader);
@@ -449,9 +888,13 @@ class LanSyncServer {
     return device;
   }
 
-  Future<void> _serveMedia(HttpRequest request, String itemId) async {
+  Future<void> _serveMedia(
+    HttpRequest request,
+    String itemId,
+    Set<String> allowed,
+  ) async {
     final item = await database.getItemById(itemId);
-    if (item == null || item.unavailable) {
+    if (item == null || item.unavailable || !allowed.contains(item.libraryId)) {
       return await _json(request, HttpStatus.notFound, {
         'error': 'Media unavailable',
       });

@@ -38,9 +38,22 @@ Future<File> resolveApprovedMedia(AppDatabase database, Item item) async {
   final sources = await MediaCatalogRepository(database).sources(library.id);
   final secondary =
       relative == '@sources' || relative.startsWith('@sources${p.separator}');
-  final binding=await database.customSelect('SELECT * FROM item_assets WHERE item_id = ?',variables:[Variable(item.id)]).getSingleOrNull();
-  final owners=sources.where((source)=>binding != null ? source.id==binding.data['source_id'] : secondary
-    ? source.namespace.isNotEmpty && p.isWithin(source.namespace,relative) : source.namespace.isEmpty).toList();
+  final binding = await database
+      .customSelect(
+        'SELECT * FROM item_assets WHERE item_id = ?',
+        variables: [Variable(item.id)],
+      )
+      .getSingleOrNull();
+  final owners = sources
+      .where(
+        (source) => binding != null
+            ? source.id == binding.data['source_id']
+            : secondary
+            ? source.namespace.isNotEmpty &&
+                  p.isWithin(source.namespace, relative)
+            : source.namespace.isEmpty,
+      )
+      .toList();
   if (owners.length != 1) {
     throw const MediaSourceException(
       HttpStatus.forbidden,
@@ -70,7 +83,10 @@ Future<File> resolveApprovedMedia(AppDatabase database, Item item) async {
         'Media unavailable',
       );
     }
-    if(binding == null) await LibrarySourceStore(database).bind(item,source.id,p.relative(item.filePath,from:source.root));
+    if (binding == null)
+      await LibrarySourceStore(
+        database,
+      ).bind(item, source.id, p.relative(item.filePath, from: source.root));
     return file;
   } on FileSystemException {
     throw const MediaSourceException(

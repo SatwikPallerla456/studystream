@@ -1,5 +1,12 @@
 # Tangerine implementation status
 
+> Implementation resumed on 19–20 October 2026. The current working tree adds
+> substantial catalog, reader and scoped-sync source, described in
+> [TANGERINE_IMPLEMENTATION_WORKLOG.md](TANGERINE_IMPLEMENTATION_WORKLOG.md).
+> The full master plan remains incomplete. All verification below is historical;
+> it has not been rerun for these changes. Testing is deferred until implementation
+> is complete, as requested by the user.
+
 Updated 19 October 2026 (Europe/London). This implements the initial engine,
 rebrand and local-data migration work. **The full update plan remains incomplete.**
 

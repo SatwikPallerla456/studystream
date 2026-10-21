@@ -171,15 +171,11 @@ class LibraryCard extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            StudyProgress(
-              value: value.percent / 100,
-              label: 'Library completion',
-            ),
-            const SizedBox(height: AppSpace.xs),
             StudyMeta(
               items: [
-                '${value.totalItems} ${value.totalItems == 1 ? 'lesson' : 'lessons'}',
-                '${value.completedItems} complete',
+                '${value.totalItems} ${value.totalItems == 1 ? 'item' : 'items'}',
+                if (value.completedItems > 0)
+                  '${value.completedItems} finished',
                 if (value.inProgressItems > 0)
                   '${value.inProgressItems} in progress',
               ],

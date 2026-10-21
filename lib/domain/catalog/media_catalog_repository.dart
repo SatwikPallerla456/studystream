@@ -3,6 +3,7 @@ import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import '../../data/db/app_database.dart';
+import '../../core/utils/id_utils.dart';
 import '../../data/indexer/library_source_store.dart';
 import 'media_record_contract.dart';
 import 'catalog_identity_store.dart';
@@ -134,6 +135,8 @@ class MediaCatalogRepository {
           },
         ],
       });
+      if (itemId != null && {'metadata', 'organization'}.contains(kind))
+        await CatalogIdentityStore(db).reindex((await db.getItemById(itemId))!);
     });
   }
 
@@ -143,6 +146,23 @@ class MediaCatalogRepository {
       ...old,
       'type': kind.name,
     });
+    var cursor = '';
+    while (true) {
+      final rows = await db
+          .customSelect(
+            'SELECT id FROM items WHERE library_id=? AND id>? ORDER BY id LIMIT 200',
+            variables: [Variable(libraryId), Variable(cursor)],
+          )
+          .get();
+      if (rows.isEmpty) break;
+      await db.transaction(() async {
+        for (final row in rows) {
+          final item = await db.getItemById(row.data['id'] as String);
+          if (item != null) await CatalogIdentityStore(db).reindex(item);
+        }
+      });
+      cursor = rows.last.data['id'] as String;
+    }
   }
 
   Future<List<LibrarySource>> sources(String libraryId) async {
@@ -208,16 +228,36 @@ class MediaCatalogRepository {
     }
     await db.transaction(() async {
       await LibrarySourceStore(db).backfill();
-      final assets=await db.customSelect('SELECT * FROM item_assets WHERE source_id = ?',variables:[Variable(source.id)]).get();
-      for(final asset in assets) {
-        final path=p.normalize(p.join(normalized,asset.data['relative_path'] as String));
-        if(!p.isWithin(normalized,path)) throw const FormatException('Asset is outside the relinked source');
-        await db.customStatement('UPDATE items SET file_path = ? WHERE id = ? AND library_id = ?', [path,asset.data['item_id'],source.libraryId]);
+      final assets = await db
+          .customSelect(
+            'SELECT * FROM item_assets WHERE source_id = ?',
+            variables: [Variable(source.id)],
+          )
+          .get();
+      for (final asset in assets) {
+        final path = p.normalize(
+          p.join(normalized, asset.data['relative_path'] as String),
+        );
+        if (!p.isWithin(normalized, path))
+          throw const FormatException('Asset is outside the relinked source');
+        await db.customStatement(
+          'UPDATE items SET file_path = ? WHERE id = ? AND library_id = ?',
+          [path, asset.data['item_id'], source.libraryId],
+        );
       }
-      await db.customStatement('UPDATE library_sources SET root_path = ?, unavailable = 0, updated_at = ? WHERE id = ?',
-        [normalized,DateTime.now().millisecondsSinceEpoch,source.id]);
-      if(source.namespace.isEmpty) await db.customStatement('UPDATE libraries SET root_folder_path = ? WHERE id = ?', [normalized,source.libraryId]);
-      db.notifyUpdates({TableUpdate.onTable(db.items),TableUpdate.onTable(db.libraries)});
+      await db.customStatement(
+        'UPDATE library_sources SET root_path = ?, unavailable = 0, updated_at = ? WHERE id = ?',
+        [normalized, DateTime.now().millisecondsSinceEpoch, source.id],
+      );
+      if (source.namespace.isEmpty)
+        await db.customStatement(
+          'UPDATE libraries SET root_folder_path = ? WHERE id = ?',
+          [normalized, source.libraryId],
+        );
+      db.notifyUpdates({
+        TableUpdate.onTable(db.items),
+        TableUpdate.onTable(db.libraries),
+      });
     });
   }
 
@@ -228,15 +268,30 @@ class MediaCatalogRepository {
     'UPDATE library_sources SET unavailable = ?, updated_at = ? WHERE id = ?',
     [unavailable ? 1 : 0, DateTime.now().millisecondsSinceEpoch, source.id],
   );
-  Future<Map<String,dynamic>> metadata(Item item) async => CatalogIdentityStore(db).resolve(item,(await record('metadata:${item.id}'))?.data??{});
-  Future<void> saveMetadata(Item item,Map<String,dynamic> data) => db.transaction(()async{
-    final store=CatalogIdentityStore(db);
-    for(final entry in data.entries) {
-      if(MediaRecordContract.fields('metadata')!.contains(entry.key) && !['matchState','source','providerId','providerItemId'].contains(entry.key)) {
-        await store.override(item,entry.key,entry.value,remove:entry.value==null);
-      }
-    }
-  });
+  Future<Map<String, dynamic>> metadata(Item item) async =>
+      CatalogIdentityStore(
+        db,
+      ).resolve(item, (await record('metadata:${item.id}'))?.data ?? {});
+  Future<void> saveMetadata(Item item, Map<String, dynamic> data) =>
+      db.transaction(() async {
+        final store = CatalogIdentityStore(db);
+        for (final entry in data.entries) {
+          if (MediaRecordContract.fields('metadata')!.contains(entry.key) &&
+              ![
+                'matchState',
+                'source',
+                'providerId',
+                'providerItemId',
+              ].contains(entry.key)) {
+            await store.override(
+              item,
+              entry.key,
+              entry.value,
+              remove: entry.value == null,
+            );
+          }
+        }
+      });
   Future<void> setFavorite(Item item, bool value) async {
     final old = (await record('organization:${item.id}'))?.data ?? {};
     await save('organization:${item.id}', 'organization', item.libraryId, {
@@ -264,16 +319,44 @@ class MediaCatalogRepository {
     List<String> itemIds, {
     String? id,
     String type = 'collection',
-  }) async {
+  }) => db.transaction(() async {
+    if (!{'collection', 'album', 'playlist'}.contains(type))
+      throw const FormatException('Invalid collection type');
     final valid = <String>[];
-    for (final id in itemIds.toSet()) {
-      if ((await db.getItemById(id))?.libraryId == libraryId) valid.add(id);
+    for (final itemId in itemIds.toSet()) {
+      if ((await db.getItemById(itemId))?.libraryId != libraryId)
+        throw const FormatException(
+          'Collection member is outside this library',
+        );
+      valid.add(itemId);
     }
-    await save(id ?? const Uuid().v4(), type, libraryId, {
+    final identity = id ?? const Uuid().v4();
+    await save(identity, type, libraryId, {
       'title': title.trim(),
       'items': valid,
     });
-  }
-
-  static Map<String,dynamic> parseFilename(String filename) => CatalogIdentityStore.filenameHints(filename);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.customStatement(
+      'UPDATE catalog_memberships SET deleted=1,updated_at=? WHERE collection_id=?',
+      [now, identity],
+    );
+    for (var position = 0; position < valid.length; position++) {
+      final item = valid[position];
+      await db.customStatement(
+        'INSERT INTO catalog_memberships(id,library_id,collection_id,kind,item_id,position,deleted,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET position=excluded.position,deleted=0,updated_at=excluded.updated_at',
+        [
+          stableId('$identity:$item'),
+          libraryId,
+          identity,
+          type,
+          item,
+          position,
+          0,
+          now,
+        ],
+      );
+    }
+  });
+  static Map<String, dynamic> parseFilename(String filename) =>
+      CatalogIdentityStore.filenameHints(filename);
 }

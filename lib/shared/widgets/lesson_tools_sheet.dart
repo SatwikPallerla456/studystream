@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
@@ -5,6 +7,8 @@ import 'package:uuid/uuid.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
+import '../../domain/reader/reader_contract.dart';
+import '../../domain/study/study_catalog_repository.dart';
 import 'content_state.dart';
 import 'study_animated_list.dart';
 import 'study_ui.dart';
@@ -13,8 +17,14 @@ Future<void> showLessonToolsSheet({
   required BuildContext context,
   required AppDatabase database,
   required Item item,
+  String title = 'Notes & bookmarks',
   double? currentPositionSeconds,
   int? currentPage,
+  ReaderLocator? anchor,
+  ReaderTextAnchor? textAnchor,
+  ValueChanged<ReaderTextAnchor>? onJumpToTextAnchor,
+  ValueChanged<ReaderLocator>? onJumpToAnchor,
+  String? selectedText,
   ValueChanged<double>? onJumpToPosition,
   ValueChanged<int>? onJumpToPage,
 }) {
@@ -23,8 +33,14 @@ Future<void> showLessonToolsSheet({
     builder: (_) => LessonToolsSheet(
       database: database,
       item: item,
+      title: title,
       currentPositionSeconds: currentPositionSeconds,
       currentPage: currentPage,
+      anchor: anchor,
+      textAnchor: textAnchor,
+      onJumpToTextAnchor: onJumpToTextAnchor,
+      onJumpToAnchor: onJumpToAnchor,
+      selectedText: selectedText,
       onJumpToPosition: onJumpToPosition,
       onJumpToPage: onJumpToPage,
     ),
@@ -36,16 +52,28 @@ class LessonToolsSheet extends StatefulWidget {
     super.key,
     required this.database,
     required this.item,
+    this.title = 'Notes & bookmarks',
     this.currentPositionSeconds,
     this.currentPage,
+    this.anchor,
+    this.textAnchor,
+    this.onJumpToTextAnchor,
+    this.onJumpToAnchor,
+    this.selectedText,
     this.onJumpToPosition,
     this.onJumpToPage,
   });
 
   final AppDatabase database;
   final Item item;
+  final String title;
   final double? currentPositionSeconds;
   final int? currentPage;
+  final ReaderLocator? anchor;
+  final ReaderTextAnchor? textAnchor;
+  final ValueChanged<ReaderTextAnchor>? onJumpToTextAnchor;
+  final ValueChanged<ReaderLocator>? onJumpToAnchor;
+  final String? selectedText;
   final ValueChanged<double>? onJumpToPosition;
   final ValueChanged<int>? onJumpToPage;
 
@@ -55,6 +83,60 @@ class LessonToolsSheet extends StatefulWidget {
 
 class _LessonToolsSheetState extends State<LessonToolsSheet> {
   int _tab = 0;
+  final _search = TextEditingController();
+  final _cursors = <String?>[null, null];
+  final _history = [<String?>[], <String?>[]];
+  String _query = '';
+  StudyCatalogRepository get _catalog =>
+      StudyCatalogRepository(widget.database);
+  late final _pages = <Stream<StudyPageResult>>[_watchPage(0), _watchPage(1)];
+  Stream<StudyPageResult> _watchPage(int tab) => _catalog.watch(
+    widget.item,
+    tab == 0 ? StudyKind.notes : StudyKind.bookmarks,
+    query: _query,
+    cursor: _cursors[tab],
+  );
+  void _firstPages() => setState(() {
+    for (var tab = 0; tab < 2; tab++) {
+      _cursors[tab] = null;
+      _history[tab].clear();
+      _pages[tab] = _watchPage(tab);
+    }
+  });
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  Widget _pager(int tab, StudyPageResult page) => Row(
+    children: [
+      TextButton(
+        onPressed: _history[tab].isEmpty
+            ? null
+            : () => setState(() {
+                _cursors[tab] = _history[tab].removeLast();
+                _pages[tab] = _watchPage(tab);
+              }),
+        child: const Text('Previous'),
+      ),
+      Text('Page ${_history[tab].length + 1}'),
+      TextButton(
+        onPressed: page.next == null
+            ? null
+            : () => setState(() {
+                _history[tab].add(_cursors[tab]);
+                _cursors[tab] = page.next;
+                _pages[tab] = _watchPage(tab);
+              }),
+        child: const Text('Next'),
+      ),
+    ],
+  );
+  bool _useSelection = true;
+  int? get _anchorPage => _useSelection && widget.textAnchor != null
+      ? widget.textAnchor!.startPage
+      : widget.currentPage;
 
   Future<String?> _askForText({
     required String title,
@@ -85,6 +167,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             autofocus: true,
             minLines: 5,
             maxLines: 12,
+            maxLength: 100000,
             decoration: InputDecoration(
               labelText: label,
               alignLabelWithHint: true,
@@ -101,21 +184,84 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
   }
 
   Future<void> _addNote() async {
-    final content = await _askForText(title: 'Add note', label: 'Note');
+    final content = await _askForText(
+      title: 'Add note',
+      label: 'Note',
+      initial: widget.selectedText ?? '',
+    );
     if (content == null || content.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    await widget.database.upsertNote(
-      NotesCompanion.insert(
-        id: const Uuid().v4(),
-        libraryId: widget.item.libraryId,
-        itemId: drift.Value(widget.item.id),
-        content: content,
-        positionSeconds: drift.Value(widget.currentPositionSeconds),
-        pageNumber: drift.Value(widget.currentPage),
-        createdAt: now,
-        updatedAt: now,
-        deviceId: await widget.database.getDeviceId(),
-      ),
+    final id = const Uuid().v4();
+    await widget.database.transaction(() async {
+      await widget.database.upsertNote(
+        NotesCompanion.insert(
+          id: id,
+          libraryId: widget.item.libraryId,
+          itemId: drift.Value(widget.item.id),
+          content: content,
+          positionSeconds: drift.Value(widget.currentPositionSeconds),
+          pageNumber: drift.Value(_anchorPage),
+          createdAt: now,
+          updatedAt: now,
+          deviceId: await widget.database.getDeviceId(),
+        ),
+      );
+      await _saveAnchor(id, note: true);
+    });
+    if (mounted) _firstPages();
+  }
+
+  Future<void> _saveAnchor(String id, {required bool note}) async {
+    final source = widget.anchor;
+    if (source == null) return;
+    final range = _useSelection ? widget.textAnchor : null;
+    if (range != null &&
+        (!range.compatible(source.resourceId, source.revision) ||
+            ReaderTextAnchor.decode(range.toJson()) == null))
+      throw const FormatException('Invalid Study passage');
+    final anchor = range != null
+        ? ReaderLocator(
+            resourceId: source.resourceId,
+            revision: source.revision,
+            pageKey: range.startKey,
+            page: range.startPage,
+            textOffset: range.startOffset,
+            point: range.startPage == source.page ? source.point : Offset.zero,
+            fit: source.fit,
+            zoom: source.zoom,
+          )
+        : ReaderLocator(
+            resourceId: source.resourceId,
+            revision: source.revision,
+            pageKey: source.pageKey,
+            page: source.page,
+            point: source.point,
+            fit: source.fit,
+            zoom: source.zoom,
+          );
+    if (anchor.resourceId != widget.item.id)
+      throw const FormatException('Study anchor belongs to a different item');
+    await widget.database.customStatement(
+      'INSERT INTO study_anchors(id,library_id,item_id,note_id,bookmark_id,payload,updated_at) VALUES(?,?,?,?,?,?,?)',
+      [
+        '${note ? 'note' : 'bookmark'}:$id',
+        widget.item.libraryId,
+        widget.item.id,
+        note ? id : null,
+        note ? null : id,
+        jsonEncode({
+          'kind': range != null
+              ? 'textRange'
+              : anchor.textOffset == null
+              ? 'page'
+              : 'text',
+          if (range != null) 'textRange': range.toJson(),
+          'locator': anchor.encode(),
+          if (widget.selectedText != null) 'text': widget.selectedText,
+          if (anchor.textOffset != null) 'offset': anchor.textOffset,
+        }),
+        DateTime.now().millisecondsSinceEpoch,
+      ],
     );
   }
 
@@ -145,20 +291,25 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
     );
     if (value == null) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    await widget.database.upsertBookmark(
-      BookmarksCompanion.insert(
-        id: const Uuid().v4(),
-        libraryId: widget.item.libraryId,
-        itemId: widget.item.id,
-        title: value.title,
-        description: drift.Value(value.description),
-        positionSeconds: drift.Value(widget.currentPositionSeconds),
-        pageNumber: drift.Value(widget.currentPage),
-        createdAt: now,
-        updatedAt: now,
-        deviceId: await widget.database.getDeviceId(),
-      ),
-    );
+    final id = const Uuid().v4();
+    await widget.database.transaction(() async {
+      await widget.database.upsertBookmark(
+        BookmarksCompanion.insert(
+          id: id,
+          libraryId: widget.item.libraryId,
+          itemId: widget.item.id,
+          title: value.title,
+          description: drift.Value(value.description),
+          positionSeconds: drift.Value(widget.currentPositionSeconds),
+          pageNumber: drift.Value(_anchorPage),
+          createdAt: now,
+          updatedAt: now,
+          deviceId: await widget.database.getDeviceId(),
+        ),
+      );
+      await _saveAnchor(id, note: false);
+    });
+    if (mounted) _firstPages();
   }
 
   Future<void> _editBookmark(Bookmark bookmark) async {
@@ -259,7 +410,37 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
     return cleanDisplayTitle(widget.item.title);
   }
 
-  void _jump({double? position, int? page}) {
+  Future<void> _jump({double? position, int? page, String? anchorId}) async {
+    if (anchorId != null &&
+        (widget.onJumpToAnchor != null || widget.onJumpToTextAnchor != null)) {
+      final row = await widget.database
+          .customSelect(
+            'SELECT payload FROM study_anchors WHERE id=?',
+            variables: [drift.Variable(anchorId)],
+          )
+          .getSingleOrNull();
+      final payload = row == null
+          ? null
+          : jsonDecode(row.data['payload'] as String) as Map;
+      final passage = ReaderTextAnchor.decode(payload?['textRange']);
+      if (passage != null && widget.onJumpToTextAnchor != null) {
+        if (mounted) Navigator.pop(context);
+        widget.onJumpToTextAnchor!(passage);
+        return;
+      }
+      final locator = row == null
+          ? null
+          : ReaderLocator.decode(
+              (jsonDecode(row.data['payload'] as String) as Map)['locator']
+                  as String?,
+            );
+      if (locator != null && widget.onJumpToAnchor != null) {
+        if (mounted) Navigator.pop(context);
+        widget.onJumpToAnchor!(locator);
+        return;
+      }
+    }
+    if (!mounted) return;
     Navigator.pop(context);
     if (position != null) widget.onJumpToPosition?.call(position);
     if (page != null) widget.onJumpToPage?.call(page);
@@ -333,7 +514,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Study tools',
+                            widget.title,
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                           Text(
@@ -373,6 +554,29 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
               ],
             ),
           ),
+          if (widget.textAnchor != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpace.md),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.textAnchor!.quote,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Attach new notes and bookmarks to this passage',
+                    ),
+                    value: _useSelection,
+                    onChanged: (value) => setState(() => _useSelection = value),
+                  ),
+                ],
+              ),
+            ),
           SegmentedButton<int>(
             segments: const [
               ButtonSegment(
@@ -389,6 +593,28 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             selected: {_tab},
             onSelectionChanged: (value) => setState(() => _tab = value.first),
           ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpace.md),
+            child: TextField(
+              controller: _search,
+              maxLength: 256,
+              decoration: InputDecoration(
+                labelText: 'Search this title’s Study entries',
+                suffixIcon: IconButton(
+                  tooltip: 'Search entries',
+                  icon: const Icon(Icons.search),
+                  onPressed: () {
+                    _query = _search.text.trim();
+                    _firstPages();
+                  },
+                ),
+              ),
+              onSubmitted: (value) {
+                _query = value.trim();
+                _firstPages();
+              },
+            ),
+          ),
           const SizedBox(height: AppSpace.sm),
           Expanded(child: _tab == 0 ? _notes() : _bookmarks()),
         ],
@@ -401,8 +627,8 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
   }
 
   Widget _notes() {
-    return StreamBuilder<List<Note>>(
-      stream: widget.database.watchNotes(itemId: widget.item.id),
+    return StreamBuilder<StudyPageResult>(
+      stream: _pages[0],
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return const Padding(
@@ -410,7 +636,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             child: ContentState(
               icon: Icons.error_outline_rounded,
               title: 'Notes could not load',
-              message: 'Your lesson notes are temporarily unavailable.',
+              message: 'Your notes are temporarily unavailable.',
               tone: ContentStateTone.error,
               compact: true,
             ),
@@ -420,75 +646,94 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             !snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.all(AppSpace.md),
-            child: ContentLoadingState(label: 'Loading lesson notes'),
+            child: ContentLoadingState(label: 'Loading notes'),
           );
         }
-        final notes = snapshot.data ?? const [];
-        return StudyAnimatedList<Note>(
-          key: const ValueKey('lesson-notes'),
-          items: notes,
-          itemId: (note) => note.id,
-          emptyState: Padding(
-            padding: const EdgeInsets.all(AppSpace.md),
-            child: ContentState(
-              icon: Icons.note_add_outlined,
-              title: 'No notes in this lesson',
-              message:
-                  'Capture a thought at the current ${widget.currentPage != null ? 'page' : 'moment'}.',
-              action: FilledButton.icon(
-                onPressed: _addNote,
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add note'),
-              ),
-              compact: true,
-            ),
-          ),
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-          separatorBuilder: (_, _) => const SizedBox(height: 8),
-          itemBuilder: (context, note) {
-            return StudySurface(
-              padding: EdgeInsets.zero,
-              child: ListTile(
-                leading: const Icon(Icons.notes_rounded),
-                title: Text(note.content),
-                subtitle: Padding(
-                  padding: const EdgeInsets.only(top: AppSpace.xs),
-                  child: StudyStatusBadge(
-                    label: _location(note.positionSeconds, note.pageNumber),
-                    icon: note.pageNumber != null
-                        ? Icons.menu_book_rounded
-                        : Icons.schedule_rounded,
-                    tone: StudyStatusTone.info,
+        final page =
+            snapshot.data ?? const StudyPageResult(entries: [], anchors: {});
+        final notes = page.entries.map(Note.fromJson).toList();
+        return Column(
+          children: [
+            Expanded(
+              child: StudyAnimatedList<Note>(
+                key: const ValueKey('lesson-notes'),
+                items: notes,
+                itemId: (note) => note.id,
+                emptyState: Padding(
+                  padding: const EdgeInsets.all(AppSpace.md),
+                  child: ContentState(
+                    icon: Icons.note_add_outlined,
+                    title: 'No notes for this title',
+                    message:
+                        'Capture a thought at the current ${widget.currentPage != null ? 'page' : 'moment'}.',
+                    action: FilledButton.icon(
+                      onPressed: _addNote,
+                      icon: const Icon(Icons.add_rounded),
+                      label: const Text('Add note'),
+                    ),
+                    compact: true,
                   ),
                 ),
-                onTap: note.positionSeconds != null || note.pageNumber != null
-                    ? () => _jump(
-                        position: note.positionSeconds,
-                        page: note.pageNumber,
-                      )
-                    : null,
-                trailing: PopupMenuButton<String>(
-                  tooltip: 'Note actions',
-                  onSelected: (value) {
-                    if (value == 'edit') _editNote(note);
-                    if (value == 'delete') _deleteNote(note);
-                  },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'edit', child: Text('Edit')),
-                    PopupMenuItem(value: 'delete', child: Text('Delete')),
-                  ],
-                ),
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (context, note) {
+                  return StudySurface(
+                    padding: EdgeInsets.zero,
+                    child: ListTile(
+                      leading: const Icon(Icons.notes_rounded),
+                      title: Text(
+                        note.content,
+                        maxLines: 6,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Padding(
+                        padding: const EdgeInsets.only(top: AppSpace.xs),
+                        child: StudyStatusBadge(
+                          label: _location(
+                            note.positionSeconds,
+                            note.pageNumber,
+                          ),
+                          icon: note.pageNumber != null
+                              ? Icons.menu_book_rounded
+                              : Icons.schedule_rounded,
+                          tone: StudyStatusTone.info,
+                        ),
+                      ),
+                      onTap:
+                          note.positionSeconds != null ||
+                              note.pageNumber != null
+                          ? () => _jump(
+                              position: note.positionSeconds,
+                              page: note.pageNumber,
+                              anchorId: 'note:${note.id}',
+                            )
+                          : null,
+                      trailing: PopupMenuButton<String>(
+                        tooltip: 'Note actions',
+                        onSelected: (value) {
+                          if (value == 'edit') _editNote(note);
+                          if (value == 'delete') _deleteNote(note);
+                        },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'edit', child: Text('Edit')),
+                          PopupMenuItem(value: 'delete', child: Text('Delete')),
+                        ],
+                      ),
+                    ),
+                  );
+                },
               ),
-            );
-          },
+            ),
+            _pager(0, page),
+          ],
         );
       },
     );
   }
 
   Widget _bookmarks() {
-    return StreamBuilder<List<Bookmark>>(
-      stream: widget.database.watchBookmarks(itemId: widget.item.id),
+    return StreamBuilder<StudyPageResult>(
+      stream: _pages[1],
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return const Padding(
@@ -507,62 +752,75 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
             !snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.all(AppSpace.md),
-            child: ContentLoadingState(label: 'Loading lesson bookmarks'),
+            child: ContentLoadingState(label: 'Loading bookmarks'),
           );
         }
-        final bookmarks = snapshot.data ?? const [];
-        return StudyAnimatedList<Bookmark>(
-          key: const ValueKey('lesson-bookmarks'),
-          items: bookmarks,
-          itemId: (bookmark) => bookmark.id,
-          emptyState: Padding(
-            padding: const EdgeInsets.all(AppSpace.md),
-            child: ContentState(
-              icon: Icons.bookmark_add_outlined,
-              title: 'No bookmarks in this lesson',
-              message:
-                  'Save this ${widget.currentPage != null ? 'page' : 'moment'} so it is easy to find again.',
-              action: FilledButton.icon(
-                onPressed: _addBookmark,
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add bookmark'),
+        final page =
+            snapshot.data ?? const StudyPageResult(entries: [], anchors: {});
+        final bookmarks = page.entries.map(Bookmark.fromJson).toList();
+        return Column(
+          children: [
+            Expanded(
+              child: StudyAnimatedList<Bookmark>(
+                key: const ValueKey('lesson-bookmarks'),
+                items: bookmarks,
+                itemId: (bookmark) => bookmark.id,
+                emptyState: Padding(
+                  padding: const EdgeInsets.all(AppSpace.md),
+                  child: ContentState(
+                    icon: Icons.bookmark_add_outlined,
+                    title: 'No bookmarks for this title',
+                    message:
+                        'Save this ${widget.currentPage != null ? 'page' : 'moment'} so it is easy to find again.',
+                    action: FilledButton.icon(
+                      onPressed: _addBookmark,
+                      icon: const Icon(Icons.add_rounded),
+                      label: const Text('Add bookmark'),
+                    ),
+                    compact: true,
+                  ),
+                ),
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (context, bookmark) {
+                  return StudySurface(
+                    padding: EdgeInsets.zero,
+                    child: ListTile(
+                      leading: const Icon(Icons.bookmark_rounded),
+                      title: Text(bookmark.title),
+                      subtitle: Text(
+                        [
+                          _location(
+                            bookmark.positionSeconds,
+                            bookmark.pageNumber,
+                          ),
+                          if ((bookmark.description ?? '').isNotEmpty)
+                            bookmark.description!,
+                        ].join(' · '),
+                      ),
+                      onTap: () => _jump(
+                        position: bookmark.positionSeconds,
+                        page: bookmark.pageNumber,
+                        anchorId: 'bookmark:${bookmark.id}',
+                      ),
+                      trailing: PopupMenuButton<String>(
+                        tooltip: 'Bookmark actions',
+                        onSelected: (value) {
+                          if (value == 'edit') _editBookmark(bookmark);
+                          if (value == 'delete') _deleteBookmark(bookmark);
+                        },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'edit', child: Text('Edit')),
+                          PopupMenuItem(value: 'delete', child: Text('Delete')),
+                        ],
+                      ),
+                    ),
+                  );
+                },
               ),
-              compact: true,
             ),
-          ),
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-          separatorBuilder: (_, _) => const SizedBox(height: 8),
-          itemBuilder: (context, bookmark) {
-            return StudySurface(
-              padding: EdgeInsets.zero,
-              child: ListTile(
-                leading: const Icon(Icons.bookmark_rounded),
-                title: Text(bookmark.title),
-                subtitle: Text(
-                  [
-                    _location(bookmark.positionSeconds, bookmark.pageNumber),
-                    if ((bookmark.description ?? '').isNotEmpty)
-                      bookmark.description!,
-                  ].join(' · '),
-                ),
-                onTap: () => _jump(
-                  position: bookmark.positionSeconds,
-                  page: bookmark.pageNumber,
-                ),
-                trailing: PopupMenuButton<String>(
-                  tooltip: 'Bookmark actions',
-                  onSelected: (value) {
-                    if (value == 'edit') _editBookmark(bookmark);
-                    if (value == 'delete') _deleteBookmark(bookmark);
-                  },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'edit', child: Text('Edit')),
-                    PopupMenuItem(value: 'delete', child: Text('Delete')),
-                  ],
-                ),
-              ),
-            );
-          },
+            _pager(1, page),
+          ],
         );
       },
     );

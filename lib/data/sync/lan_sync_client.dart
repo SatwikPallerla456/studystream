@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../db/app_database.dart';
 import 'sync_snapshot_merger.dart';
 import '../../domain/services/sync_conflict_resolver.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
 
 enum ConnectionPhase { disconnected, connecting, connected, retrying, error }
 
@@ -169,18 +170,29 @@ class LanSyncClient {
     _timer?.cancel();
     _emit(_attempt > 0 ? ConnectionPhase.retrying : ConnectionPhase.connecting);
     try {
-      // Upload offline edits before pulling the host's current catalogue.
-      await _request(
-        address,
-        '/v1/snapshot',
-        body: await database.exportSyncData(),
+      final health = await _request(address, '/v1/health', authenticate: false);
+      final modern = (health['capabilities'] as List? ?? []).contains(
+        'catalog-bootstrap-v2',
       );
-      final snapshot = await _request(address, '/v1/snapshot');
-      if (_disposed || generation != _generation) return;
-      await database.transaction(() async {
-        await _importCatalogue(snapshot);
-        await SyncSnapshotMerger(database).merge(snapshot);
-      });
+      if (modern) {
+        await _uploadChanges(address);
+        await _pullModern(address, generation);
+      } else {
+        final legacy =
+            Map<String, Object?>.from(await database.exportSyncData())
+              ..remove('catalogRows')
+              ..remove('capabilities');
+        legacy['protocolVersion'] = 1;
+        await _request(address, '/v1/snapshot', body: legacy);
+        final snapshot = await _request(address, '/v1/snapshot');
+        if (_disposed || generation != _generation) return;
+        await database.transaction(() async {
+          await _importCatalogue(snapshot);
+          await SyncSnapshotMerger(
+            database,
+          ).merge(snapshot, allowedLibraryIds: await _remoteLibraryIds());
+        });
+      }
       if (_disposed || generation != _generation) return;
       _attempt = 0;
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -208,6 +220,271 @@ class LanSyncClient {
     }
   }
 
+  String _cursorKey(Uri address) => 'sync.v2.${address.toString()}';
+  Future<Set<String>> _remoteLibraryIds() async =>
+      (await (database.select(database.libraries)..where(
+                (library) => library.rootFolderPath.equals('remote:$_address'),
+              ))
+              .get())
+          .map((library) => library.id)
+          .toSet();
+
+  Future<void> _uploadChanges(Uri address) async {
+    final since =
+        int.tryParse(
+          await database.getSetting('${_cursorKey(address)}.uploadedAt') ?? '0',
+        ) ??
+        0;
+    final started = DateTime.now().millisecondsSinceEpoch;
+    final snapshot = await database.exportSyncData();
+    final entries =
+        <({String kind, Map<String, dynamic> record, bool typed})>[];
+    for (final key in [
+      'libraries',
+      'sections',
+      'items',
+      'playback',
+      'reading',
+      'notes',
+      'bookmarks',
+      'mediaRecords',
+    ]) {
+      for (final row in (snapshot[key] as List).cast<Map<String, dynamic>>()) {
+        final updated =
+            row['lastEventAt'] ?? row['updatedAt'] ?? row['updated_at'] ?? 0;
+        if (updated is num && updated > since)
+          entries.add((kind: key, record: row, typed: false));
+      }
+    }
+    final typed = snapshot['catalogRows'] as Map;
+    for (final table in CatalogIdentityStore.tables) {
+      for (final row
+          in (typed[table] as List? ?? []).cast<Map<String, dynamic>>()) {
+        if ((row['updated_at'] as int) > since)
+          entries.add((kind: table, record: row, typed: true));
+      }
+    }
+    var batch = <({String kind, Map<String, dynamic> record, bool typed})>[],
+        bytes = 0;
+    Future<void> flush() async {
+      if (batch.isEmpty) return;
+      final body = <String, dynamic>{
+        'schemaVersion': 3,
+        'protocolVersion': 2,
+        'catalogRows': <String, List<Map<String, dynamic>>>{},
+      };
+      for (final entry in batch) {
+        if (entry.typed) {
+          ((body['catalogRows']
+                      as Map<String, List<Map<String, dynamic>>>)[entry
+                      .kind] ??=
+                  [])
+              .add(entry.record);
+        } else {
+          (body[entry.kind] ??= <Map<String, dynamic>>[]).add(entry.record);
+        }
+      }
+      await _request(address, '/v1/snapshot', body: body);
+      batch = [];
+      bytes = 0;
+    }
+
+    for (final entry in entries) {
+      final length = utf8.encode(jsonEncode(entry.record)).length;
+      if (batch.length >= 100 || bytes + length > 512 * 1024) await flush();
+      batch.add(entry);
+      bytes += length;
+    }
+    await flush();
+    await database.setSetting('${_cursorKey(address)}.uploadedAt', '$started');
+  }
+
+  Future<void> _applyEvents(List<dynamic> events) async {
+    if (events.length > 100)
+      throw const FormatException('Too many sync events');
+    final snapshot = <String, dynamic>{
+      'schemaVersion': 3,
+      'protocolVersion': 2,
+      for (final key in [
+        'libraries',
+        'sections',
+        'items',
+        'playback',
+        'reading',
+        'notes',
+        'bookmarks',
+        'mediaRecords',
+      ])
+        key: <Map<String, dynamic>>[],
+      'catalogRows': <String, List<Map<String, dynamic>>>{},
+    };
+    final tombstones = <Map<String, dynamic>>[];
+    const names = {
+      'playback_progress': 'playback',
+      'reading_progress': 'reading',
+      'media_records': 'mediaRecords',
+    };
+    for (final raw in events) {
+      if (raw is! Map<String, dynamic> ||
+          raw['entity_kind'] is! String ||
+          raw['entity_id'] is! String)
+        throw const FormatException('Invalid sync event');
+      final kind = raw['entity_kind'] as String, record = raw['record'];
+      if (record == null) {
+        tombstones.add(raw);
+        continue;
+      }
+      if (record is! Map<String, dynamic>)
+        throw const FormatException('Invalid sync record');
+      if (CatalogIdentityStore.tables.contains(kind)) {
+        ((snapshot['catalogRows']
+                    as Map<String, List<Map<String, dynamic>>>)[kind] ??=
+                [])
+            .add(record);
+      } else {
+        final key = names[kind] ?? kind;
+        if (snapshot[key] is! List)
+          throw const FormatException('Unknown sync entity');
+        (snapshot[key] as List).add(record);
+      }
+    }
+    await database.transaction(() async {
+      await _importCatalogue(snapshot);
+      final allowed = await _remoteLibraryIds();
+      await SyncSnapshotMerger(
+        database,
+      ).merge(snapshot, allowedLibraryIds: allowed);
+      for (final event in tombstones) {
+        final id = event['entity_id'] as String;
+        if (!allowed.contains(event['library_id'])) continue;
+        switch (event['entity_kind']) {
+          case 'items':
+            await database.customStatement(
+              'UPDATE items SET unavailable=1 WHERE id=? AND library_id=?',
+              [id, event['library_id']],
+            );
+          case 'sections':
+            await database.customStatement(
+              'UPDATE sections SET unavailable=1 WHERE id=? AND library_id=?',
+              [id, event['library_id']],
+            );
+          case 'libraries':
+            await database.customStatement(
+              'UPDATE libraries SET unavailable=1 WHERE id=?',
+              [id],
+            );
+          case 'notes':
+            await database.deleteNoteSoft(id);
+          case 'bookmarks':
+            await database.deleteBookmarkSoft(id);
+          case 'media_parts':
+          case 'media_extras':
+            final table = event['entity_kind'] as String;
+            await database.customStatement(
+              'DELETE FROM $table WHERE id=? AND library_id=?',
+              [id, event['library_id']],
+            );
+          default:
+            break; // Retain asset-linked history after descriptive cascades.
+        }
+      }
+    });
+  }
+
+  Future<void> _pruneScope(List<dynamic> ids) async {
+    final allowed = ids.whereType<String>().toSet();
+    for (final id in await _remoteLibraryIds()) {
+      if (allowed.contains(id)) continue;
+      await database.customStatement(
+        'UPDATE libraries SET unavailable=1 WHERE id=?',
+        [id],
+      );
+      await database.customStatement(
+        'UPDATE items SET unavailable=1 WHERE library_id=?',
+        [id],
+      );
+    }
+    database.notifyUpdates({
+      drift.TableUpdate.onTable(database.items),
+      drift.TableUpdate.onTable(database.libraries),
+    });
+  }
+
+  Future<void> _pullModern(
+    Uri address,
+    int generation, {
+    int resets = 0,
+  }) async {
+    if (resets > 2)
+      throw const FormatException(
+        'Host access changed repeatedly. Sync again.',
+      );
+    final key = _cursorKey(address);
+    var cursor = int.tryParse(await database.getSetting('$key.cursor') ?? '');
+    var scope = await database.getSetting('$key.scope');
+    if (cursor != null && scope != null) {
+      while (true) {
+        final page = await _request(
+          address,
+          Uri(
+            path: '/v2/changes',
+            queryParameters: {'since': '$cursor', 'scope': scope!},
+          ).toString(),
+        );
+        if (_disposed || generation != _generation) return;
+        if (page['resetRequired'] == true) {
+          cursor = null;
+          await database.setSetting('${_cursorKey(address)}.uploadedAt', '0');
+          await _uploadChanges(address);
+          break;
+        }
+        final next = page['cursor'];
+        if (next is! int || next < cursor!)
+          throw const FormatException('Invalid host change cursor');
+        await database.transaction(() async {
+          await _applyEvents(page['events'] as List);
+          await _pruneScope(page['libraries'] as List);
+          await database.setSetting('$key.cursor', '$next');
+        });
+        cursor = next;
+        if (page['hasMore'] != true) return;
+      }
+    }
+    String? next;
+    int? start;
+    String? transferScope;
+    List<dynamic> libraries = [];
+    do {
+      final page = await _request(
+        address,
+        Uri(
+          path: '/v2/bootstrap',
+          queryParameters: {if (next != null) 'cursor': next},
+        ).toString(),
+      );
+      if (_disposed || generation != _generation) return;
+      if (page['head'] is! int || page['scope'] is! String)
+        throw const FormatException('Invalid initial transfer');
+      start ??= page['head'] as int;
+      transferScope ??= page['scope'] as String;
+      if (page['scope'] != transferScope)
+        throw const FormatException(
+          'Library access changed during transfer. Sync again.',
+        );
+      libraries = page['libraries'] as List;
+      await _applyEvents(page['events'] as List);
+      next = page['next'] as String?;
+    } while (next != null);
+    await database.transaction(() async {
+      await _pruneScope(libraries);
+      await database.setSetting('$key.cursor', '$start');
+      await database.setSetting('$key.scope', transferScope!);
+    });
+    // Replay changes since the first bootstrap page, including deletions that
+    // happened while later pages were in flight.
+    await _pullModern(address, generation, resets: resets + 1);
+  }
+
   Future<void> _importCatalogue(Map<String, dynamic> snapshot) async {
     final version = snapshot['schemaVersion'];
     if (version is! int || version < 1 || version > database.schemaVersion) {
@@ -221,7 +498,14 @@ class LanSyncClient {
       for (final row
           in (snapshot['libraries'] as List).cast<Map<String, dynamic>>()) {
         final remote = Library.fromJson(row);
-        if (await database.getLibraryById(remote.id) == null) {
+        final existing = await database.getLibraryById(remote.id);
+        if (existing?.rootFolderPath == 'remote:$hostKey')
+          await database.upsertLibrary(
+            existing!
+                .copyWith(unavailable: remote.unavailable)
+                .toCompanion(true),
+          );
+        if (existing == null) {
           await database.upsertLibrary(
             remote
                 .copyWith(rootFolderPath: 'remote:$hostKey')
@@ -266,6 +550,14 @@ class LanSyncClient {
       // Device identity is local and never comes from a host snapshot.
       await database.setSetting('deviceId', deviceId);
     });
+  }
+
+  Future<RemoteMediaSource> artworkFor(Item item) async {
+    final media = await sourceFor(item);
+    return RemoteMediaSource(
+      media.uri.replace(path: '/v2/artwork/${Uri.encodeComponent(item.id)}'),
+      media.headers,
+    );
   }
 
   Future<RemoteMediaSource> sourceFor(Item item) async {

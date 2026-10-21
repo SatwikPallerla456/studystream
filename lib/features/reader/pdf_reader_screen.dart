@@ -1,5 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+import 'package:flutter/services.dart';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
@@ -10,13 +15,22 @@ import 'package:pdfrx/pdfrx.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
+import '../../data/reader/reader_image_analysis.dart';
 import '../../data/providers/app_providers.dart';
 import '../../data/sync/lan_sync_client.dart';
 import '../../domain/services/progress_writer.dart';
+import '../../domain/reader/reader_contract.dart';
+import '../../domain/catalog/catalog_identity_store.dart';
+import '../../domain/reader/reader_session_store.dart';
+import '../../domain/reader/reader_background.dart';
+import '../../domain/reader/reader_jobs.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
 import '../../shared/widgets/study_ui.dart';
+import 'reader_preferences_sheet.dart';
+import 'reader_text_analysis_sheet.dart';
+import 'reader_background_surface.dart';
 
 class PdfReaderScreen extends ConsumerStatefulWidget {
   const PdfReaderScreen({super.key, required this.itemId, this.initialPage});
@@ -36,6 +50,21 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   final _visitedPages = <int>{};
   Item? _item;
   ReadingProgressWriter? _writer;
+  ReaderSessionStore? _session;
+  ReaderLocator? _locator;
+  String _revision = '';
+  String _fitMode = 'fitWidth';
+  String _layoutMode = 'vertical', _background = 'black';
+  bool _rtl = false;
+  Map<String, dynamic> _readerOptions = {};
+  PresentationMap? _presentation;
+  Size _viewport = const Size(900, 700);
+  ReaderEdgeColors? _edgeColors;
+  final _sampleJobs = ReaderJobScheduler();
+  ReaderLease<ReaderEdgeColors>? _sampleLease;
+  String? _selectedText;
+  ReaderTextAnchor? _selectionRange;
+  int _selectionGeneration = 0;
   PdfTextSearcher? _searcher;
   Timer? _saveTimer;
   String? _filePath;
@@ -49,6 +78,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   bool _searchVisible = false;
   bool _ready = false;
   bool _focusMode = false;
+  bool _interacting = false;
 
   @override
   void initState() {
@@ -74,12 +104,25 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       if (remote) {
         _remoteSource = await ref.read(lanSyncClientProvider).sourceFor(item);
       }
+      _revision = await CatalogIdentityStore(_database).contentRevision(item);
+      _session = ReaderSessionStore(_database, item);
+      final settings = await _session!.settings();
+      _readerOptions = settings;
+      _layoutMode = settings['mode'] as String? ?? 'vertical';
+      _rtl = settings['rtl'] == true;
+      _background = settings['background'] as String? ?? 'black';
+      _fitMode = settings['fit'] as String? ?? 'fitWidth';
+      final restored = ReaderLocator.decode(settings['locator'] as String?);
+      _locator = restored?.compatible(item.id, _revision) == true
+          ? restored
+          : null;
       final saved = await _database.getReadingByItemId(item.id);
       final preferences = await ref
           .read(appPreferencesRepositoryProvider)
           .load();
-      _currentPage = widget.initialPage ?? saved?.resumePage ?? 1;
-      _savedZoom = saved?.zoom ?? 1;
+      _currentPage =
+          widget.initialPage ?? _locator?.page ?? saved?.resumePage ?? 1;
+      _savedZoom = _locator?.zoom ?? saved?.zoom ?? 1;
       _savedOffset = widget.initialPage == null
           ? saved?.resumeScrollOffset ?? 0
           : 0;
@@ -128,16 +171,22 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
         duration: Duration.zero,
       );
       if (!mounted) return;
-      await controller.goToPosition(
-        documentOffset: Offset(
-          controller.visibleRect.left,
-          _savedOffset > 0 ? _savedOffset : controller.visibleRect.top,
-        ),
-        zoom: _savedZoom,
-        duration: Duration.zero,
-      );
+      final locator = widget.initialPage == null ? _locator : null;
+      if (locator != null) {
+        await _restoreLocator(locator);
+      } else {
+        await controller.goToPosition(
+          documentOffset: Offset(
+            controller.visibleRect.left,
+            _savedOffset > 0 ? _savedOffset : controller.visibleRect.top,
+          ),
+          zoom: _savedZoom,
+          duration: Duration.zero,
+        );
+      }
       if (mounted) {
         _restoring = false;
+        _sampleBackground();
         setState(() {});
       }
     });
@@ -154,7 +203,10 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
 
   Future<void> _fit(bool width) async {
     if (!_ready) return;
-    _writer?.readingMode = width ? 'fitWidth' : 'fitPage';
+    _fitMode = width ? 'fitWidth' : 'contain';
+    _readerOptions['fit'] = _fitMode;
+    _writer?.readingMode = _fitMode;
+    await _session?.write(changes: {'fit': _fitMode});
     await _controller.goToPage(
       pageNumber: _currentPage,
       anchor: width ? PdfPageAnchor.top : PdfPageAnchor.all,
@@ -169,8 +221,12 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
 
   void _pageChanged(int? page) {
     if (!mounted || _restoring || page == null || page == _currentPage) return;
+    if (_presentation != null &&
+        _presentation!.cellFor(page) == _presentation!.cellFor(_currentPage))
+      return;
     setState(() => _currentPage = page);
     _visitedPages.add(page);
+    _sampleBackground();
     final writer = _writer;
     if (writer != null) {
       writer
@@ -185,13 +241,96 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     );
   }
 
+  PageTransform _pageTransform(int number) {
+    final page = _controller.document.pages[number - 1];
+    final rotation = page.rotation.index * 90;
+    final size = Size(page.width, page.height);
+    final original = rotation == 90 || rotation == 270
+        ? Size(size.height, size.width)
+        : size;
+    // pdfrx exposes already cropped page dimensions. This origin is the public
+    // cropped page's origin; PDF media-box coordinates remain a distinct space.
+    return PageTransform(
+      crop: Offset.zero & original,
+      viewport: _controller.layout.pageLayouts[number - 1].size,
+      rotation: rotation,
+    );
+  }
+
+  String get _viewportLayout =>
+      '$_layoutMode:$_rtl:$_totalPages:${sha256.convert(utf8.encode(jsonEncode([_readerOptions['coverSingle'], _readerOptions['singlePages'], _readerOptions['pairingStarts']])))}';
+
+  Future<void> _restoreLocator(ReaderLocator locator) async {
+    final number = locator.page.clamp(1, _totalPages);
+    final rect = _controller.layout.pageLayouts[number - 1];
+    final saved = ReaderViewportState.decode(locator.viewState);
+    if (saved != null &&
+        saved.compatible(
+          renderer: 'pdfrx-v1',
+          layout: _viewportLayout,
+          fit: _fitMode,
+          viewport: _viewport,
+          pageSize: rect.size,
+        )) {
+      await _controller.goToPosition(
+        documentOffset: saved.offset,
+        zoom: saved.scale,
+        duration: Duration.zero,
+      );
+    } else {
+      final point = _pageTransform(number).toViewport(locator.point);
+      final base = _controller
+          .calcMatrixForPage(pageNumber: number)
+          .getMaxScaleOnAxis();
+      await _controller.goToPosition(
+        documentOffset: rect.topLeft + point,
+        zoom: base * locator.zoom,
+        duration: Duration.zero,
+      );
+    }
+  }
+
+  ReaderLocator? _captureLocator() {
+    if (!_controller.isReady || _item == null || _totalPages == 0) return null;
+    final rect = _controller.layout.pageLayouts[_currentPage - 1];
+    final point = _pageTransform(
+      _currentPage,
+    ).toPage(_controller.visibleRect.topLeft - rect.topLeft);
+    final base = _controller
+        .calcMatrixForPage(pageNumber: _currentPage)
+        .getMaxScaleOnAxis();
+    return ReaderLocator(
+      resourceId: _item!.id,
+      revision: _revision,
+      pageKey: 'pdf:$_currentPage',
+      page: _currentPage,
+      point: point,
+      fit: _fitMode,
+      zoom: (_controller.currentZoom / base).clamp(1, 5),
+      viewState: ReaderViewportState(
+        renderer: 'pdfrx-v1',
+        layout: _viewportLayout,
+        fit: _fitMode,
+        viewport: _viewport,
+        pageSize: rect.size,
+        scale: _controller.currentZoom,
+        offset: _controller.visibleRect.topLeft,
+        focalPoint: _pageTransform(
+          _currentPage,
+        ).toPage(_controller.visibleRect.center - rect.topLeft),
+      ).toJson(),
+    );
+  }
+
   Future<void> _saveProgress() async {
     final writer = _writer;
     if (writer == null || !_ready || _restoring || !_controller.isReady) return;
     writer
       ..zoom = _controller.currentZoom
       ..scrollOffset = _controller.visibleRect.top;
+    final locator = _captureLocator();
     await writer.save();
+    if (locator != null) await _session?.write(locator: locator);
   }
 
   Future<void> _jumpToPage([int? requested]) async {
@@ -230,7 +369,266 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       page = value;
     }
     if (page == null || !_ready) return;
-    await _controller.goToPage(pageNumber: page.clamp(1, _totalPages));
+    _currentPage = page.clamp(1, _totalPages);
+    await _controller.goToPage(pageNumber: _currentPage);
+    _sampleBackground();
+  }
+
+  void _advanceCell(bool forward) {
+    final page =
+        _presentation?.advance(_currentPage, forward) ??
+        (_currentPage + (forward ? 1 : -1)).clamp(1, _totalPages);
+    unawaited(_jumpToPage(page));
+  }
+
+  PdfPageLayout _layoutPdf(List<PdfPage> pages, PdfViewerParams params) {
+    final canonical = [
+      for (final page in pages)
+        CanonicalPage(
+          page.pageNumber,
+          'pdf:${page.pageNumber}',
+          Size(page.width, page.height),
+        ),
+    ];
+    _presentation = PresentationMap(
+      canonical,
+      spreads: _layoutMode == 'spread' && _viewport.width > 700,
+      coverSingle: _readerOptions['coverSingle'] != false,
+      singlePages: Set<int>.from(_readerOptions['singlePages'] as List? ?? []),
+      pairingStarts: Set<int>.from(
+        _readerOptions['pairingStarts'] as List? ?? [],
+      ),
+    );
+    final rects = List<Rect>.filled(pages.length, Rect.zero),
+        margin = params.margin;
+    if (_layoutMode == 'vertical') {
+      final width =
+          pages.fold<double>(0, (width, page) => math.max(width, page.width)) +
+          margin * 2;
+      var y = margin;
+      for (final page in pages) {
+        rects[page.pageNumber - 1] = Rect.fromLTWH(
+          (width - page.width) / 2,
+          y,
+          page.width,
+          page.height,
+        );
+        y += page.height + margin;
+      }
+      return PdfPageLayout(pageLayouts: rects, documentSize: Size(width, y));
+    }
+    final cellWidth = _viewport.width, cellHeight = _viewport.height;
+    for (var index = 0; index < _presentation!.cells.length; index++) {
+      final cell = _presentation!.cells[index],
+          slotWidth = (cellWidth - margin * 2) / cell.length;
+      for (var slot = 0; slot < cell.length; slot++) {
+        final page = pages[cell[slot] - 1];
+        final scale = math.min(
+          (slotWidth - margin) / page.width,
+          (cellHeight - margin * 2) / page.height,
+        );
+        final width = page.width * scale, height = page.height * scale;
+        final visual = _rtl ? cell.length - 1 - slot : slot;
+        final cellIndex = _rtl
+            ? _presentation!.cells.length - 1 - index
+            : index;
+        rects[page.pageNumber - 1] = Rect.fromLTWH(
+          cellIndex * cellWidth +
+              margin +
+              visual * slotWidth +
+              (slotWidth - width) / 2,
+          (cellHeight - height) / 2,
+          width,
+          height,
+        );
+      }
+    }
+    return PdfPageLayout(
+      pageLayouts: rects,
+      documentSize: Size(cellWidth * _presentation!.cells.length, cellHeight),
+    );
+  }
+
+  bool _readerTap(
+    BuildContext context,
+    PdfViewerController controller,
+    PdfViewerGeneralTapHandlerDetails details,
+  ) {
+    // Native text and link handling run first; selection never turns a page.
+    if (!_ready ||
+        _restoring ||
+        _interacting ||
+        details.tapOn != PdfViewerPart.background ||
+        controller.textSelectionDelegate.hasSelectedText)
+      return false;
+    final base = controller
+        .calcMatrixForPage(pageNumber: _currentPage)
+        .getMaxScaleOnAxis();
+    final relative = controller.currentZoom / base;
+    if (details.type == PdfViewerGeneralTapType.doubleTap) {
+      unawaited(
+        controller.zoomOnLocalPosition(
+          localPosition: details.localPosition,
+          newZoom: base * (relative > 1.05 ? 1 : 2.5),
+          duration: MediaQuery.disableAnimationsOf(context)
+              ? Duration.zero
+              : const Duration(milliseconds: 200),
+        ),
+      );
+      return true;
+    }
+    if (details.type != PdfViewerGeneralTapType.tap || relative > 1.05)
+      return false;
+    switch (ReaderTapPolicy.action(
+      details.localPosition,
+      _viewport,
+      _readerOptions,
+    )) {
+      case 'previous':
+        _advanceCell(false);
+      case 'next':
+        _advanceCell(true);
+      case 'toggleChrome':
+        setState(() => _focusMode = !_focusMode);
+      case 'study':
+        _showTools();
+      default:
+        return false;
+    }
+    return true;
+  }
+
+  void _interactionEnded() {
+    _interacting = false;
+    if (!_ready || _restoring) return;
+    final base = _controller
+        .calcMatrixForPage(pageNumber: _currentPage)
+        .getMaxScaleOnAxis();
+    final relative = _controller.currentZoom / base;
+    if (relative < 1 || relative > 5)
+      unawaited(
+        _controller.zoomOnLocalPosition(
+          localPosition: _viewport.center(Offset.zero),
+          newZoom: base * relative.clamp(1, 5),
+        ),
+      );
+  }
+
+  Future<void> _applyReaderPreferences() async {
+    final anchor = _captureLocator();
+    await _saveProgress();
+    final options = await _session!.settings();
+    if (!mounted) return;
+    _restoring = true;
+    setState(() {
+      _readerOptions = options;
+      _layoutMode = options['mode'] as String? ?? 'vertical';
+      _rtl = options['rtl'] == true;
+      _background = options['background'] as String? ?? 'black';
+      _fitMode = options['fit'] as String? ?? 'contain';
+    });
+    _controller.invalidate();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      try {
+        if (anchor != null) await _goToAnchor(anchor);
+      } finally {
+        _restoring = false;
+        if (mounted) _sampleBackground();
+      }
+    });
+  }
+
+  Future<void> _readerSettings() async {
+    if (_session == null || _item == null) return;
+    await _saveProgress();
+    if (!mounted) return;
+    await showReaderPreferences(
+      context: context,
+      database: _database,
+      libraryId: _item!.libraryId,
+      item: _item,
+      currentPage: _currentPage,
+      typography: false,
+      onChanged: _applyReaderPreferences,
+    );
+  }
+
+  Future<void> _sampleBackground() async {
+    _sampleLease?.release();
+    _sampleLease = null;
+    if (!_ready ||
+        !_controller.isReady ||
+        !{'color', 'immersive'}.contains(_background))
+      return;
+    final number = _currentPage;
+    var numbers = _presentation?.pagesFor(number) ?? [number];
+    if (_rtl && _layoutMode != 'vertical') numbers = numbers.reversed.toList();
+    final lease = _sampleJobs.request<ReaderEdgeColors>(
+      key: '$_revision:${numbers.join(',')}:$_layoutMode:$_rtl:edge-v1-white',
+      priority: ReaderPriority.background,
+      estimatedBytes: 1024 * 1024,
+      run: (token) async {
+        Future<ReaderEdgeColors> sample(int number) async {
+          token.check();
+          final page = _controller.document.pages[number - 1];
+          final cancellation = page.createCancellationToken();
+          token.onCancel(cancellation.cancel);
+          final bitmap = await page.render(
+            width: 128,
+            height: 128,
+            fullWidth: 128,
+            fullHeight: 128,
+            cancellationToken: cancellation,
+          );
+          if (bitmap == null) throw const ReaderCancelled();
+          try {
+            final image = await bitmap.createImage();
+            try {
+              final data = await image.toByteData(
+                format: ui.ImageByteFormat.rawRgba,
+              );
+              token.check();
+              return data == null
+                  ? const ReaderEdgeColors(
+                      Colors.black,
+                      Colors.black,
+                      Colors.black,
+                    )
+                  : ReaderEdgeColors.sample(
+                      data,
+                      128,
+                      128,
+                      sourceWidth: page.width.round(),
+                      sourceHeight: page.height.round(),
+                      vertical: _layoutMode == 'vertical',
+                    );
+            } finally {
+              image.dispose();
+            }
+          } finally {
+            bitmap.dispose();
+          }
+        }
+
+        final first = await sample(numbers.first);
+        if (numbers.length == 1) return first;
+        final last = await sample(numbers.last);
+        return ReaderEdgeColors(
+          first.first,
+          last.second,
+          Color.lerp(first.combined, last.combined, .5)!,
+        );
+      },
+    );
+    _sampleLease = lease;
+    try {
+      final colors = await lease.future;
+      if (mounted && identical(_sampleLease, lease) && number == _currentPage)
+        setState(() => _edgeColors = colors);
+    } catch (_) {
+      /* Background sampling cannot block the native PDF surface. */
+    }
   }
 
   Future<void> _setCompleted(bool value) async {
@@ -240,9 +638,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     await _database.setItemCompletion(item: item, completed: value);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(value ? 'Marked complete' : 'Marked incomplete'),
-        ),
+        SnackBar(content: Text(value ? 'Marked read' : 'Marked unread')),
       );
     }
   }
@@ -254,6 +650,158 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     context.go(libraryId == null ? '/' : '/library/$libraryId');
   }
 
+  Future<void> _goToAnchor(ReaderLocator locator) async {
+    if (!_ready || !locator.compatible(_item!.id, _revision)) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'This anchor belongs to a different content revision. The original page reference is retained.',
+            ),
+          ),
+        );
+      return;
+    }
+    final number = locator.page.clamp(1, _totalPages);
+    _currentPage = number;
+    await _restoreLocator(locator);
+  }
+
+  Future<void> _selectionChanged(PdfTextSelection selection) async {
+    final generation = ++_selectionGeneration;
+    if (!selection.hasSelectedText || !selection.isCopyAllowed) {
+      _selectedText = null;
+      _selectionRange = null;
+      return;
+    }
+    final range = selection.textSelectionPointRange;
+    if (range == null ||
+        range.end.text.pageNumber - range.start.text.pageNumber > 20) {
+      _selectedText = null;
+      _selectionRange = null;
+      return;
+    }
+    final text = await selection.getSelectedText();
+    if (!mounted || generation != _selectionGeneration) return;
+    _selectedText = text.length > 16000 ? text.substring(0, 16000) : text;
+    final page = range.start.text.pageNumber;
+    _selectionRange = ReaderTextAnchor(
+      resourceId: _item!.id,
+      revision: _revision,
+      startKey: 'pdf:$page',
+      startPage: page,
+      startOffset: range.start.index,
+      endKey: 'pdf:${range.end.text.pageNumber}',
+      endPage: range.end.text.pageNumber,
+      endOffset: range.end.index + 1,
+      unit: 'pdfCharacter',
+      quote: _selectedText!,
+    );
+  }
+
+  Future<void> _goToTextAnchor(ReaderTextAnchor anchor) async {
+    if (!_ready ||
+        !anchor.compatible(_item!.id, _revision) ||
+        anchor.unit != 'pdfCharacter' ||
+        anchor.startKey != 'pdf:${anchor.startPage}' ||
+        anchor.endKey != 'pdf:${anchor.endPage}' ||
+        anchor.endPage > _totalPages ||
+        anchor.endPage - anchor.startPage > 20) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'This passage belongs to another content revision. Its original reference is kept.',
+            ),
+          ),
+        );
+      return;
+    }
+    try {
+      final document = _controller.document;
+      final first = await document.pages[anchor.startPage - 1]
+          .loadStructuredText();
+      final last = anchor.startPage == anchor.endPage
+          ? first
+          : await document.pages[anchor.endPage - 1].loadStructuredText();
+      if (!mounted || !_ready || !anchor.compatible(_item!.id, _revision))
+        return;
+      if (anchor.startOffset >= first.charRects.length ||
+          anchor.endOffset > last.charRects.length)
+        throw const FormatException('Passage offsets changed');
+      await _controller.textSelectionDelegate.setTextSelectionPointRange(
+        PdfTextSelectionRange.fromPoints(
+          PdfTextSelectionPoint(first, anchor.startOffset),
+          PdfTextSelectionPoint(last, anchor.endOffset - 1),
+        ),
+      );
+      final selected = await _controller.textSelectionDelegate
+          .getSelectedText();
+      if (!selected.startsWith(anchor.quote)) {
+        await _controller.textSelectionDelegate.clearTextSelection();
+        throw const FormatException('Passage text changed');
+      }
+      await _controller.goToRectInsidePage(
+        pageNumber: anchor.startPage,
+        rect: first.charRects[anchor.startOffset],
+      );
+      _currentPage = anchor.startPage;
+    } on Object {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The passage could not be restored. Your note and original reference are retained.',
+            ),
+          ),
+        );
+    }
+  }
+
+  Future<void> _recognizePage() async {
+    if (!_ready || !_controller.isReady) return;
+    final number = _currentPage,
+        page = _controller.document.pages[_currentPage - 1];
+    final text = await showReaderTextAnalysis(
+      context: context,
+      jobs: _sampleJobs,
+      pageKey: '$_revision:pdf:$number:${page.rotation.index}',
+      raster: (token) async {
+        final scale = math.min(
+          1.0,
+          math.min(
+            2048 / math.max(page.width, page.height),
+            math.sqrt(4 * 1024 * 1024 / (page.width * page.height)),
+          ),
+        );
+        final cancellation = page.createCancellationToken();
+        token.onCancel(cancellation.cancel);
+        final bitmap = await page.render(
+          width: math.max(1, (page.width * scale).round()),
+          height: math.max(1, (page.height * scale).round()),
+          fullWidth: math.max(1, (page.width * scale).round()).toDouble(),
+          fullHeight: math.max(1, (page.height * scale).round()).toDouble(),
+          cancellationToken: cancellation,
+        );
+        if (bitmap == null) throw const ReaderCancelled();
+        try {
+          final image = await bitmap.createImage();
+          try {
+            return await ReaderImageAnalysis.opaquePng(image, token);
+          } finally {
+            image.dispose();
+          }
+        } finally {
+          bitmap.dispose();
+        }
+      },
+    );
+    if (!mounted || number != _currentPage || text == null) return;
+    _selectedText = text;
+    _selectionRange = null;
+    _showTools();
+  }
+
   void _showTools() {
     final item = _item;
     if (item == null) return;
@@ -262,6 +810,11 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       database: _database,
       item: item,
       currentPage: _currentPage,
+      anchor: _captureLocator(),
+      textAnchor: _selectionRange,
+      onJumpToTextAnchor: _goToTextAnchor,
+      selectedText: _selectedText,
+      onJumpToAnchor: _goToAnchor,
       onJumpToPage: _jumpToPage,
     );
   }
@@ -281,6 +834,14 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   }
 
   @override
+  void didHaveMemoryPressure() {
+    _sampleLease?.release();
+    _sampleLease = null;
+    _sampleJobs.releaseSpeculative();
+    _edgeColors = null;
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) unawaited(_saveProgress());
   }
@@ -289,6 +850,8 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
+    _sampleLease?.release();
+    _sampleJobs.dispose();
     _controller.removeListener(_viewChanged);
     _searcher?.removeListener(_searchChanged);
     _searcher?.dispose();
@@ -298,7 +861,13 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
         ?..zoom = _controller.currentZoom
         ..scrollOffset = _controller.visibleRect.top;
     }
-    unawaited(_writer?.dispose());
+    final locator = _ready && !_restoring ? _captureLocator() : null;
+    unawaited(
+      Future.wait([
+        if (_writer != null) _writer!.dispose(),
+        if (locator != null) _session!.write(locator: locator),
+      ]),
+    );
     super.dispose();
   }
 
@@ -317,6 +886,21 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
               showHome: true,
               onBack: _back,
               actions: [
+                IconButton(
+                  tooltip: 'Reading preferences',
+                  onPressed: _ready ? _readerSettings : null,
+                  icon: const Icon(Icons.tune),
+                ),
+                IconButton(
+                  tooltip: 'Previous reading cell',
+                  onPressed: _ready ? () => _advanceCell(false) : null,
+                  icon: const Icon(Icons.chevron_left),
+                ),
+                IconButton(
+                  tooltip: 'Next reading cell',
+                  onPressed: _ready ? () => _advanceCell(true) : null,
+                  icon: const Icon(Icons.chevron_right),
+                ),
                 PopupMenuButton<bool>(
                   tooltip: 'Fit document',
                   onSelected: _fit,
@@ -330,6 +914,12 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
                     onPressed: _jumpToPage,
                     icon: const Icon(Icons.find_in_page_outlined),
                     label: Text('$_currentPage / $_totalPages'),
+                  ),
+                if (ReaderImageAnalysis.available)
+                  IconButton(
+                    tooltip: 'Recognize page text',
+                    onPressed: _ready ? _recognizePage : null,
+                    icon: const Icon(Icons.document_scanner_outlined),
                   ),
                 if (!compact) ...[
                   IconButton(
@@ -348,7 +938,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
                     icon: const Icon(Icons.zoom_in_rounded),
                   ),
                   IconButton(
-                    tooltip: 'Study tools',
+                    tooltip: 'Notes & bookmarks',
                     onPressed: item == null ? null : _showTools,
                     icon: const Icon(Icons.note_alt_outlined),
                   ),
@@ -377,11 +967,11 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
                       ),
                     const PopupMenuItem(
                       value: 'complete',
-                      child: Text('Mark complete'),
+                      child: Text('Mark read'),
                     ),
                     const PopupMenuItem(
                       value: 'incomplete',
-                      child: Text('Mark incomplete'),
+                      child: Text('Mark unread'),
                     ),
                   ],
                 ),
@@ -389,7 +979,21 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
             ),
       body: Stack(
         children: [
-          Positioned.fill(child: _body()),
+          Positioned.fill(
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+                    _advanceCell(_rtl),
+                const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+                    _advanceCell(!_rtl),
+                const SingleActivator(LogicalKeyboardKey.pageDown): () =>
+                    _advanceCell(true),
+                const SingleActivator(LogicalKeyboardKey.pageUp): () =>
+                    _advanceCell(false),
+              },
+              child: Focus(autofocus: true, child: _body()),
+            ),
+          ),
           if (_focusMode)
             Positioned(
               top: AppSpace.md,
@@ -443,55 +1047,102 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       children: [
         if (_searchVisible) _searchBar(),
         Expanded(
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: PdfViewer(
-                  _remoteSource == null
-                      ? PdfDocumentRefFile(_filePath!)
-                      : PdfDocumentRefUri(
-                          _remoteSource!.uri,
-                          headers: _remoteSource!.headers,
-                        ),
-                  controller: _controller,
-                  params: PdfViewerParams(
-                    enableKeyboardNavigation: true,
-                    onViewerReady: _viewerReady,
-                    onDocumentLoadFinished: (documentRef, succeeded) {
-                      if (!succeeded && mounted) {
-                        setState(
-                          () => _error =
-                              'This PDF could not be loaded. Check the file or the desktop connection and try again.',
-                        );
-                      }
-                    },
-                    onPageChanged: _pageChanged,
-                    pagePaintCallbacks: _searcher == null
-                        ? null
-                        : [_searcher!.pageTextMatchPaintCallback],
-                    backgroundColor: context.studyColors.surfaceSubtle,
-                    errorBannerBuilder:
-                        (
-                          context,
-                          error,
-                          stackTrace,
-                          documentRef,
-                        ) => const Padding(
-                          padding: EdgeInsets.all(AppSpace.lg),
-                          child: ContentState(
-                            icon: Icons.error_outline_rounded,
-                            title: 'A page could not be rendered',
-                            message:
-                                'The document may contain unsupported or damaged page data.',
-                            tone: ContentStateTone.error,
-                            compact: true,
-                          ),
-                        ),
+          child: LayoutBuilder(
+            builder: (context, box) {
+              final size = box.biggest;
+              if (size != _viewport) {
+                final anchor = _ready ? _captureLocator() : null;
+                _viewport = size;
+                if (_ready)
+                  WidgetsBinding.instance.addPostFrameCallback((_) async {
+                    if (!mounted) return;
+                    _controller.invalidate();
+                    if (anchor != null) await _goToAnchor(anchor);
+                  });
+              }
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: ReaderBackgroundSurface(
+                      first: _background == 'white'
+                          ? Colors.white
+                          : _background == 'color'
+                          ? _edgeColors?.combined ?? Colors.black
+                          : _background == 'immersive'
+                          ? _edgeColors?.first ?? Colors.black
+                          : Colors.black,
+                      second: _background == 'white'
+                          ? Colors.white
+                          : _background == 'color'
+                          ? _edgeColors?.combined ?? Colors.black
+                          : _background == 'immersive'
+                          ? _edgeColors?.second ?? Colors.black
+                          : Colors.black,
+                      vertical: _layoutMode == 'vertical',
+                    ),
                   ),
-                ),
-              ),
-              if (!_ready) const Positioned.fill(child: _ReaderLoadingState()),
-            ],
+                  Positioned.fill(
+                    child: PdfViewer(
+                      _remoteSource == null
+                          ? PdfDocumentRefFile(_filePath!)
+                          : PdfDocumentRefUri(
+                              _remoteSource!.uri,
+                              headers: _remoteSource!.headers,
+                            ),
+                      controller: _controller,
+                      params: PdfViewerParams(
+                        maxImageBytesCachedOnMemory: 64 * 1024 * 1024,
+                        horizontalCacheExtent: 0,
+                        verticalCacheExtent: 0,
+                        limitRenderingCache: true,
+                        onePassRenderingSizeThreshold: 2000,
+                        enableKeyboardNavigation: false,
+                        onGeneralTap: _readerTap,
+                        onInteractionStart: (_) => _interacting = true,
+                        onInteractionEnd: (_) => _interactionEnded(),
+                        layoutPages: _layoutPdf,
+                        textSelectionParams: PdfTextSelectionParams(
+                          onTextSelectionChange: _selectionChanged,
+                        ),
+                        onViewerReady: _viewerReady,
+                        onDocumentLoadFinished: (documentRef, succeeded) {
+                          if (!succeeded && mounted) {
+                            setState(
+                              () => _error =
+                                  'This PDF could not be loaded. Check the file or the desktop connection and try again.',
+                            );
+                          }
+                        },
+                        onPageChanged: _pageChanged,
+                        pagePaintCallbacks: _searcher == null
+                            ? null
+                            : [_searcher!.pageTextMatchPaintCallback],
+                        backgroundColor: Colors.transparent,
+                        errorBannerBuilder:
+                            (
+                              context,
+                              error,
+                              stackTrace,
+                              documentRef,
+                            ) => const Padding(
+                              padding: EdgeInsets.all(AppSpace.lg),
+                              child: ContentState(
+                                icon: Icons.error_outline_rounded,
+                                title: 'A page could not be rendered',
+                                message:
+                                    'The document may contain unsupported or damaged page data.',
+                                tone: ContentStateTone.error,
+                                compact: true,
+                              ),
+                            ),
+                      ),
+                    ),
+                  ),
+                  if (!_ready)
+                    const Positioned.fill(child: _ReaderLoadingState()),
+                ],
+              );
+            },
           ),
         ),
       ],
@@ -647,7 +1298,7 @@ class _ReaderBottomBar extends StatelessWidget {
               ],
             ),
             IconButton(
-              tooltip: 'Study tools',
+              tooltip: 'Notes & bookmarks',
               onPressed: ready ? onStudy : null,
               icon: const Icon(Icons.note_alt_outlined),
             ),

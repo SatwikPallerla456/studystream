@@ -10,19 +10,12 @@ class NetworkScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Tangerine / Network')),
+    appBar: AppBar(title: const Text('Network')),
     body: StudyPage(
       maxWidth: 1000,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const StudyPageHeader(
-            eyebrow: 'Your devices, connected',
-            title: 'Network',
-            description:
-                'Connect this player to your media server. Paired libraries appear beside your local media.',
-          ),
-          const SizedBox(height: AppSpace.lg),
           const SyncClientSection(),
           const SizedBox(height: AppSpace.md),
           StudySection(

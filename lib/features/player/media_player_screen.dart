@@ -18,6 +18,10 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
+import '../../data/media/subtitle_sidecars.dart';
+import '../../domain/catalog/catalog_playback.dart';
+import '../../domain/catalog/media_experience.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/services/progress_writer.dart';
 import '../../domain/services/resume_service.dart';
@@ -34,11 +38,13 @@ class MediaPlayerScreen extends ConsumerStatefulWidget {
     required this.itemId,
     this.initialPositionSeconds,
     this.fromQueue = false,
+    this.multipartRepresentationId,
   });
 
   final String itemId;
   final double? initialPositionSeconds;
   final bool fromQueue;
+  final String? multipartRepresentationId;
 
   @override
   ConsumerState<MediaPlayerScreen> createState() => _MediaPlayerScreenState();
@@ -49,6 +55,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   late final AppDatabase _database;
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Item? _item;
+  MediaExperience _experience = const MediaExperience(
+    LibraryKind.mixed,
+    'video',
+  );
   PlaybackEngine? _player;
   MediaProgressWriter? _progressWriter;
   String? _error;
@@ -85,7 +95,22 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       }
       _completionHandled = false;
       final item = await _database.getItemById(widget.itemId);
-      if (item == null) throw StateError('This lesson no longer exists.');
+      if (item == null) throw StateError('This file no longer exists.');
+      _experience = MediaExperience(
+        await MediaCatalogRepository(_database).libraryKind(item.libraryId),
+        item.itemType,
+      );
+      final title = widget.multipartRepresentationId;
+      if (title != null) {
+        // Also validates that every referenced part is still available.
+        await CatalogPlayback(
+          _database,
+        ).adjacentPart(title, item.id, forward: true);
+      }
+      final requestedPosition = widget.initialPositionSeconds;
+      if (requestedPosition != null &&
+          (!requestedPosition.isFinite || requestedPosition < 0))
+        throw const FormatException('Invalid playback position');
       if (item.unavailable) {
         throw StateError('This file is missing. Relink it from the library.');
       }
@@ -155,7 +180,17 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       }
       final subtitle = await _database.getSetting('subtitle.${item.id}');
       if (subtitle != null && await File(subtitle).exists()) {
-        await player.setSubtitleTrack(SubtitleTrack.uri(subtitle));
+        try {
+          await SubtitleSidecars.validate(
+            item.filePath.startsWith('remote:') ? item.filename : item.filePath,
+            subtitle,
+          );
+          await player.setSubtitleTrack(SubtitleTrack.uri(subtitle));
+        } on FormatException {
+          // A stale/mismatched companion must not prevent the title opening.
+        } on FileSystemException {
+          // A removed companion can be chosen again from the track picker.
+        }
       }
       if (resume > 0) {
         await player.seek(Duration(milliseconds: (resume * 1000).round()));
@@ -295,7 +330,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (message.contains('missing') ||
         message.contains('not be found') ||
         message.contains('no longer exists')) {
-      return 'The lesson file is missing or has moved. Relink it from the library to keep your saved progress.';
+      return 'The media file is missing or has moved. Relink it from the library to keep your saved progress.';
     }
     if (message.contains('unsupported') ||
         message.contains('codec') ||
@@ -303,20 +338,22 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       return 'This media format is not supported by the player on this device.';
     }
     if (message.contains('host') || message.contains('connect')) {
-      return 'Connect to this library’s desktop host in Settings, then reopen the lesson.';
+      return 'Connect to this library’s desktop host in Settings, then reopen the media.';
     }
-    return 'Tangerine could not start this lesson. Check that the file is accessible and try again.';
+    return 'Tangerine could not start this media. Check that the file is accessible and try again.';
   }
 
   Future<void> _completedNaturally({required bool autoAdvance}) async {
     final writer = _progressWriter;
     if (writer != null) await writer.flush(forceComplete: true);
-    if (autoAdvance || widget.fromQueue) {
+    if (autoAdvance && _experience.sequential ||
+        widget.fromQueue ||
+        widget.multipartRepresentationId != null) {
       await _navigate(forward: true, countdown: true);
     } else if (mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Lesson completed')));
+      ).showSnackBar(SnackBar(content: Text(_experience.completedLabel)));
     }
   }
 
@@ -329,6 +366,48 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (item == null) return;
     _navigating = true;
     await _progressWriter?.flush();
+    final title = widget.multipartRepresentationId;
+    if (title != null) {
+      try {
+        final next = await CatalogPlayback(
+          _database,
+        ).adjacentPart(title, item.id, forward: forward);
+        if (!mounted) return;
+        if (next == null) {
+          _navigating = false;
+          if (countdown) {
+            context.pushReplacement('/details/${Uri.encodeComponent(title)}');
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  forward ? 'End of this title' : 'First part of this title',
+                ),
+              ),
+            );
+          }
+          return;
+        }
+        context.pushReplacement(
+          CatalogPlayback.partRoute(
+            title,
+            next.id,
+            position: countdown ? 0 : null,
+          ),
+        );
+      } on Object {
+        _navigating = false;
+        if (mounted)
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'This title’s parts changed or a file is unavailable. Reopen its details.',
+              ),
+            ),
+          );
+      }
+      return;
+    }
     final queueRepository = ref.read(playerLibraryRepositoryProvider);
     final queue = await queueRepository.load();
     final queueActive = widget.fromQueue && queue.current?.itemId == item.id;
@@ -339,8 +418,17 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             automatic: countdown,
           )
         : null;
+    final television =
+        !queueActive &&
+        await MediaCatalogRepository(_database).libraryKind(item.libraryId) ==
+            LibraryKind.television;
+    final sequential = _experience.course;
     final next = queueActive
         ? (nextId == null ? null : await _database.getItemById(nextId))
+        : television
+        ? await CatalogPlayback(_database).nextEpisode(item, forward: forward)
+        : !sequential
+        ? null
         : forward
         ? await _database.getNextSequentialItem(item.id)
         : await _database.getPreviousSequentialItem(item.id);
@@ -372,6 +460,15 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       }
     }
     if (next == null) {
+      _navigating = false;
+      if (!countdown) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Choose another title or start a playback queue.'),
+          ),
+        );
+        return;
+      }
       context.go('/library/${item.libraryId}');
       return;
     }
@@ -429,7 +526,11 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(value ? 'Marked complete' : 'Marked incomplete'),
+          content: Text(
+            _experience
+                .completionLabel(!value)
+                .replaceFirst('Mark ', 'Marked '),
+          ),
         ),
       );
     }
@@ -438,11 +539,12 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   void _showStudyTools() {
     final item = _item;
     final player = _player;
-    if (item == null || player == null) return;
+    if (item == null || player == null || !_experience.notes) return;
     showLessonToolsSheet(
       context: context,
       database: _database,
       item: item,
+      title: _experience.course ? 'Study tools' : 'Notes & bookmarks',
       currentPositionSeconds: player.state.position.inMilliseconds / 1000,
       onJumpToPosition: (seconds) {
         player.seek(Duration(milliseconds: (seconds * 1000).round()));
@@ -456,28 +558,89 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     final picked = await FilePicker.platform.pickFiles(
       dialogTitle: 'Choose a subtitle file',
       type: FileType.custom,
-      allowedExtensions: const ['srt', 'vtt', 'ass', 'ssa'],
+      allowedExtensions: const ['srt', 'vtt', 'ass', 'ssa', 'idx'],
       allowMultiple: false,
       withData: false,
     );
     final path = picked?.files.single.path;
     if (path == null) return;
+    await _loadSubtitle(path);
+  }
+
+  Future<void> _loadSubtitle(String path) async {
+    final player = _player, item = _item;
+    if (player == null || item == null) return;
     try {
-      await player.setSubtitleTrack(
-        SubtitleTrack.uri(path, title: picked!.files.single.name),
+      await SubtitleSidecars.validate(
+        item.filePath.startsWith('remote:') ? item.filename : item.filePath,
+        path,
       );
-      await _database.setSetting('subtitle.${widget.itemId}', path);
-      if (mounted) {
+      if (!mounted || !identical(player, _player)) return;
+      await player.setSubtitleTrack(
+        SubtitleTrack.uri(path, title: File(path).uri.pathSegments.last),
+      );
+      await _database.setSetting('subtitle.${item.id}', path);
+      if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('External subtitles loaded')),
         );
-      }
     } catch (error) {
-      if (mounted) {
+      if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not load subtitles: $error')),
+          SnackBar(
+            content: Text(
+              error is FormatException
+                  ? error.message.toString()
+                  : 'The subtitle could not be loaded.',
+            ),
+          ),
         );
-      }
+    }
+  }
+
+  Future<void> _nearbySubtitles() async {
+    final item = _item;
+    if (item == null || item.filePath.startsWith('remote:')) return;
+    try {
+      final files = await SubtitleSidecars.discover(item.filePath);
+      if (!mounted || _item?.id != item.id) return;
+      final path = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('Subtitles for this file'),
+          children: [
+            if (files.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'No matching subtitles were found beside this file. Edition labels must match. You can also choose an external file.',
+                ),
+              ),
+            for (final file in files)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, file.path),
+                child: Text(file.uri.pathSegments.last),
+              ),
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      if (path != null && mounted && _item?.id == item.id)
+        await _loadSubtitle(path);
+    } catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              error is FormatException
+                  ? error.message.toString()
+                  : 'The subtitle folder could not be opened. Choose an external file.',
+            ),
+          ),
+        );
     }
   }
 
@@ -496,9 +659,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             final tracks = tracksSnapshot.data ?? const Tracks();
             final selected = selectedSnapshot.data ?? const Track();
             return StudyModalFrame(
-              title: 'Audio & subtitles',
-              description:
-                  'Choose an embedded track or add a subtitle file from this device.',
+              title: _experience.video ? 'Audio & subtitles' : 'Audio tracks',
+              description: _experience.video
+                  ? 'Choose an audio track or subtitle.'
+                  : 'Choose an available audio track.',
               icon: Icons.closed_caption_outlined,
               primaryAction: FilledButton(
                 onPressed: () => Navigator.pop(modalContext),
@@ -534,47 +698,58 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                           ],
                         ),
                       ),
-                    const Divider(height: AppSpace.xl),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Subtitles',
-                            style: Theme.of(context).textTheme.titleMedium,
+                    if (_experience.video) ...[
+                      const Divider(height: AppSpace.xl),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Subtitles',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
                           ),
-                        ),
+                          TextButton.icon(
+                            onPressed: () {
+                              Navigator.pop(modalContext);
+                              _pickExternalSubtitle();
+                            },
+                            icon: const Icon(Icons.add_rounded),
+                            label: const Text('External file'),
+                          ),
+                        ],
+                      ),
+                      if (_item?.filePath.startsWith('remote:') == false)
                         TextButton.icon(
                           onPressed: () {
                             Navigator.pop(modalContext);
-                            _pickExternalSubtitle();
+                            _nearbySubtitles();
                           },
-                          icon: const Icon(Icons.add_rounded),
-                          label: const Text('External file'),
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('Find subtitles beside this file'),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: AppSpace.xs),
-                    if (tracks.subtitle.isEmpty)
-                      const _TrackEmptyState(
-                        icon: Icons.subtitles_off_outlined,
-                        message: 'No embedded subtitles are available.',
-                      )
-                    else
-                      RadioGroup<SubtitleTrack>(
-                        groupValue: selected.subtitle,
-                        onChanged: (value) {
-                          if (value != null) player.setSubtitleTrack(value);
-                        },
-                        child: Column(
-                          children: [
-                            for (final track in tracks.subtitle)
-                              RadioListTile<SubtitleTrack>(
-                                value: track,
-                                title: Text(_trackTitle(track)),
-                              ),
-                          ],
+                      const SizedBox(height: AppSpace.xs),
+                      if (tracks.subtitle.isEmpty)
+                        const _TrackEmptyState(
+                          icon: Icons.subtitles_off_outlined,
+                          message: 'No embedded subtitles are available.',
+                        )
+                      else
+                        RadioGroup<SubtitleTrack>(
+                          groupValue: selected.subtitle,
+                          onChanged: (value) {
+                            if (value != null) player.setSubtitleTrack(value);
+                          },
+                          child: Column(
+                            children: [
+                              for (final track in tracks.subtitle)
+                                RadioListTile<SubtitleTrack>(
+                                  value: track,
+                                  title: Text(_trackTitle(track)),
+                                ),
+                            ],
+                          ),
                         ),
-                      ),
+                    ],
                   ],
                 ),
               ),
@@ -728,7 +903,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     return CallbackShortcuts(
       bindings: {
         for (final binding in _controls.local.entries)
-          ?PlayerControls.activator(binding.value): () => _performAction(binding.key),
+          ?PlayerControls.activator(binding.value): () =>
+              _performAction(binding.key),
       },
       child: Focus(
         autofocus: true,
@@ -750,26 +926,33 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                       engine: _player! as NativeVlcEngine,
                       database: _database,
                       itemId: widget.itemId,
+                      video: _experience.video,
                     ),
                   ),
                   icon: const Icon(Icons.tune),
                 ),
-              if (!compact)
+              if (!compact &&
+                  (_experience.sequential ||
+                      widget.fromQueue ||
+                      widget.multipartRepresentationId != null))
                 IconButton(
-                  tooltip: 'Previous lesson',
+                  tooltip: 'Previous',
                   onPressed: item == null
                       ? null
                       : () => _navigate(forward: false),
                   icon: const Icon(Icons.skip_previous),
                 ),
-              IconButton(
-                tooltip: 'Study tools',
-                onPressed: item == null ? null : _showStudyTools,
-                icon: const Icon(Icons.note_alt_outlined),
-              ),
+              if (_experience.notes)
+                IconButton(
+                  tooltip: _experience.notesLabel,
+                  onPressed: item == null ? null : _showStudyTools,
+                  icon: const Icon(Icons.note_alt_outlined),
+                ),
               if (!compact) ...[
                 IconButton(
-                  tooltip: 'Audio and subtitle tracks',
+                  tooltip: _experience.video
+                      ? 'Audio and subtitle tracks'
+                      : 'Audio tracks',
                   onPressed: item == null ? null : _showTracks,
                   icon: const Icon(Icons.closed_caption_outlined),
                 ),
@@ -794,7 +977,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                   ),
                 ),
                 PopupMenuButton<String>(
-                  tooltip: 'Lesson actions',
+                  tooltip: 'Playback actions',
                   onSelected: _playerAction,
                   itemBuilder: (_) => [
                     const PopupMenuItem(
@@ -816,18 +999,20 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                         ),
                       ),
 
-                    PopupMenuItem(
-                      value: 'complete',
-                      child: Text('Mark complete'),
-                    ),
-                    PopupMenuItem(
-                      value: 'incomplete',
-                      child: Text('Mark incomplete'),
-                    ),
+                    if (_experience.completion)
+                      PopupMenuItem(
+                        value: 'complete',
+                        child: Text(_experience.completionLabel(false)),
+                      ),
+                    if (_experience.completion)
+                      PopupMenuItem(
+                        value: 'incomplete',
+                        child: Text(_experience.completionLabel(true)),
+                      ),
                   ],
                 ),
                 IconButton(
-                  tooltip: 'Next lesson',
+                  tooltip: 'Next',
                   onPressed: item == null
                       ? null
                       : () => _navigate(forward: true),
@@ -868,16 +1053,17 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                       ),
                     const PopupMenuItem(
                       value: 'previous',
-                      child: Text('Previous lesson'),
+                      child: Text('Previous'),
                     ),
-                    const PopupMenuItem(
-                      value: 'next',
-                      child: Text('Next lesson'),
-                    ),
+                    const PopupMenuItem(value: 'next', child: Text('Next')),
                     const PopupMenuDivider(),
-                    const PopupMenuItem(
+                    PopupMenuItem(
                       value: 'tracks',
-                      child: Text('Audio and subtitles'),
+                      child: Text(
+                        _experience.video
+                            ? 'Audio and subtitles'
+                            : 'Audio tracks',
+                      ),
                     ),
                     for (final speed in playbackSpeeds)
                       PopupMenuItem(
@@ -889,14 +1075,16 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                         ),
                       ),
                     const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: 'complete',
-                      child: Text('Mark complete'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'incomplete',
-                      child: Text('Mark incomplete'),
-                    ),
+                    if (_experience.completion)
+                      PopupMenuItem(
+                        value: 'complete',
+                        child: Text(_experience.completionLabel(false)),
+                      ),
+                    if (_experience.completion)
+                      PopupMenuItem(
+                        value: 'incomplete',
+                        child: Text(_experience.completionLabel(true)),
+                      ),
                   ],
                 ),
             ],
@@ -985,7 +1173,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         maxWidth: 760,
         child: ContentState(
           icon: Icons.play_disabled_outlined,
-          title: 'This lesson cannot be played',
+          title: 'This media cannot be played',
           message: _error!,
           action: FilledButton.icon(
             onPressed: _back,
@@ -1014,9 +1202,19 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         item: item,
         speed: _speed,
         onSetSpeed: _setSpeed,
-        onPrevious: () => _navigate(forward: false),
-        onNext: () => _navigate(forward: true),
-        onStudy: _showStudyTools,
+        onPrevious:
+            _experience.sequential ||
+                widget.fromQueue ||
+                widget.multipartRepresentationId != null
+            ? () => _navigate(forward: false)
+            : null,
+        onNext:
+            _experience.sequential ||
+                widget.fromQueue ||
+                widget.multipartRepresentationId != null
+            ? () => _navigate(forward: true)
+            : null,
+        onStudy: _experience.notes ? _showStudyTools : null,
       );
     }
     return ColoredBox(
@@ -1032,7 +1230,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
               if (snapshot.data != true) return const SizedBox.shrink();
               return Semantics(
                 liveRegion: true,
-                label: 'Buffering lesson',
+                label: 'Buffering media',
                 child: Center(
                   child: Container(
                     padding: const EdgeInsets.symmetric(
@@ -1088,9 +1286,9 @@ class _AudioSurface extends StatelessWidget {
   final Item item;
   final double speed;
   final ValueChanged<double> onSetSpeed;
-  final VoidCallback onPrevious;
-  final VoidCallback onNext;
-  final VoidCallback onStudy;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
+  final VoidCallback? onStudy;
 
   @override
   Widget build(BuildContext context) {
@@ -1109,7 +1307,7 @@ class _AudioSurface extends StatelessWidget {
               ),
               decoration: BoxDecoration(
                 color: context.studyColors.playerRaised,
-                border: Border.all(color: const Color(0xFF34443D)),
+                border: Border.all(color: const Color(0xFF403C38)),
                 borderRadius: BorderRadius.circular(AppRadius.xl),
                 boxShadow: AppElevation.level2,
               ),
@@ -1124,7 +1322,7 @@ class _AudioSurface extends StatelessWidget {
                   ),
                   const SizedBox(height: AppSpace.lg),
                   StudyStatusBadge(
-                    label: 'Audio · ${player.backendName}',
+                    label: 'Now playing',
                     icon: Icons.graphic_eq_rounded,
                     tone: StudyStatusTone.primary,
                   ),
@@ -1145,7 +1343,7 @@ class _AudioSurface extends StatelessWidget {
                         : 'Local audio · Progress saves automatically',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: const Color(0xFFB8C6BF),
+                      color: const Color(0xFFB3ABA5),
                     ),
                   ),
                   const SizedBox(height: AppSpace.lg),
@@ -1237,7 +1435,7 @@ class _AudioSurface extends StatelessWidget {
                     runSpacing: AppSpace.xs,
                     children: [
                       IconButton(
-                        tooltip: 'Previous lesson',
+                        tooltip: 'Previous',
                         color: Colors.white,
                         onPressed: onPrevious,
                         icon: const Icon(Icons.skip_previous_rounded),
@@ -1278,7 +1476,7 @@ class _AudioSurface extends StatelessWidget {
                         icon: const Icon(Icons.forward_10_rounded),
                       ),
                       IconButton(
-                        tooltip: 'Next lesson',
+                        tooltip: 'Next',
                         color: Colors.white,
                         onPressed: onNext,
                         icon: const Icon(Icons.skip_next_rounded),
@@ -1327,14 +1525,15 @@ class _AudioSurface extends StatelessWidget {
                           ),
                         ),
                       ),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(AppRadius.sm),
-                        onTap: onStudy,
-                        child: const _PlayerPill(
-                          icon: Icons.note_alt_outlined,
-                          label: 'Study tools',
+                      if (onStudy != null)
+                        InkWell(
+                          borderRadius: BorderRadius.circular(AppRadius.sm),
+                          onTap: onStudy,
+                          child: const _PlayerPill(
+                            icon: Icons.note_alt_outlined,
+                            label: 'Study tools',
+                          ),
                         ),
-                      ),
                     ],
                   ),
                 ],
@@ -1369,13 +1568,13 @@ class _PlayerPill extends StatelessWidget {
       ),
       decoration: BoxDecoration(
         color: const Color(0xFF1D2924),
-        border: Border.all(color: const Color(0xFF34443D)),
+        border: Border.all(color: const Color(0xFF403C38)),
         borderRadius: BorderRadius.circular(AppRadius.sm),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: const Color(0xFF85D9C1), size: 20),
+          Icon(icon, color: const Color(0xFFE69A50), size: 20),
           const SizedBox(width: AppSpace.xs),
           Text(label, style: const TextStyle(color: Colors.white)),
         ],
@@ -1393,7 +1592,7 @@ class _PlayerLoadingState extends StatelessWidget {
       color: context.studyColors.player,
       child: Semantics(
         liveRegion: true,
-        label: 'Preparing lesson',
+        label: 'Preparing media',
         child: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1407,12 +1606,12 @@ class _PlayerLoadingState extends StatelessWidget {
                 ),
                 child: const Padding(
                   padding: EdgeInsets.all(AppSpace.lg),
-                  child: CircularProgressIndicator(color: Color(0xFF85D9C1)),
+                  child: CircularProgressIndicator(color: Color(0xFFE69A50)),
                 ),
               ),
               const SizedBox(height: AppSpace.lg),
               Text(
-                'Preparing your lesson',
+                'Preparing your media',
                 style: Theme.of(
                   context,
                 ).textTheme.titleLarge?.copyWith(color: Colors.white),
@@ -1420,7 +1619,7 @@ class _PlayerLoadingState extends StatelessWidget {
               const SizedBox(height: AppSpace.xs),
               const Text(
                 'Loading media and restoring your place…',
-                style: TextStyle(color: Color(0xFFB8C6BF)),
+                style: TextStyle(color: Color(0xFFB3ABA5)),
               ),
             ],
           ),

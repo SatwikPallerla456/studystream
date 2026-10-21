@@ -41,7 +41,7 @@ class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
           : showHome
           ? IconButton(
               icon: const Icon(Icons.home_outlined),
-              onPressed: onHome ?? () => context.go('/'),
+              onPressed: onHome ?? () => context.go('/?tab=home'),
               tooltip: 'Home',
             )
           : null,
@@ -51,7 +51,7 @@ class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
         if (showHome && showBack && !compact)
           IconButton(
             icon: const Icon(Icons.home_outlined),
-            onPressed: onHome ?? () => context.go('/'),
+            onPressed: onHome ?? () => context.go('/?tab=home'),
             tooltip: 'Home',
           ),
         ...?actions,

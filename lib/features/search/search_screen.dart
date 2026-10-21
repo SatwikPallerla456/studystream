@@ -99,6 +99,12 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
             ? null
             : {'position': entry.positionSeconds.toString()},
       ).toString(),
+      'epub' || 'cbz' => Uri(
+        path: '/book/${Uri.encodeComponent(item.id)}',
+        queryParameters: entry.pageNumber == null
+            ? null
+            : {'page': entry.pageNumber.toString()},
+      ).toString(),
       'pdf' => Uri(
         path: '/pdf/${item.id}',
         queryParameters: entry.pageNumber == null
@@ -145,23 +151,18 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const StudyPageHeader(
-                eyebrow: 'Across your learning',
-                title: 'Search',
-                description:
-                    'Find a lesson, a saved thought, or the exact page and moment you need.',
-              ),
+              const StudyPageHeader(title: 'Search'),
               const SizedBox(height: AppSpace.lg),
               Semantics(
                 textField: true,
-                label: 'Search lessons, notes, and bookmarks',
+                label: 'Search titles, notes, and bookmarks',
                 child: StudySearchField(
                   controller: _controller,
                   focusNode: _focusNode,
                   autofocus:
                       MediaQuery.sizeOf(context).width >=
                       AppBreakpoints.expanded,
-                  hintText: 'Search lessons, notes, and bookmarks',
+                  hintText: 'Search titles, notes, and bookmarks',
                   onChanged: _changed,
                   onSubmitted: _search,
                 ),
@@ -213,7 +214,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         icon: Icons.search_off_rounded,
         title: _filter == _SearchFilter.all
             ? 'No results for “${_controller.text.trim()}”'
-            : 'No matching ${_filter.name}s',
+            : 'No matching ${_filter == _SearchFilter.lesson ? 'titles' : '${_filter.name}s'}',
         message: _filter == _SearchFilter.all
             ? 'Try a shorter title, a filename, or a broader phrase.'
             : 'Choose All results or try a different search term.',
@@ -279,7 +280,7 @@ class _SearchControls extends StatelessWidget {
               children: [
                 _chip('All', _SearchFilter.all),
                 const SizedBox(width: AppSpace.xs),
-                _chip('Lessons', _SearchFilter.lesson),
+                _chip('Titles', _SearchFilter.lesson),
                 const SizedBox(width: AppSpace.xs),
                 _chip('Notes', _SearchFilter.note),
                 const SizedBox(width: AppSpace.xs),
@@ -352,13 +353,13 @@ class _SearchStartState extends StatelessWidget {
                 ),
                 const SizedBox(height: AppSpace.lg),
                 Text(
-                  'Everything is within reach',
+                  'Search your library',
                   style: Theme.of(context).textTheme.headlineSmall,
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: AppSpace.xs),
                 Text(
-                  'Search titles and filenames, the notes you wrote, and the bookmarks you saved.',
+                  'Find titles, filenames, notes, and saved locations.',
                   style: Theme.of(context).textTheme.bodyLarge,
                   textAlign: TextAlign.center,
                 ),
@@ -369,7 +370,7 @@ class _SearchStartState extends StatelessWidget {
                   runSpacing: AppSpace.xs,
                   children: const [
                     StudyStatusBadge(
-                      label: 'Lessons',
+                      label: 'Titles',
                       icon: Icons.play_circle_outline_rounded,
                     ),
                     StudyStatusBadge(label: 'Notes', icon: Icons.notes_rounded),
@@ -482,7 +483,7 @@ class _SearchResultRow extends StatelessWidget {
     'section' => 'Section',
     'note' => 'Note',
     'bookmark' => 'Bookmark',
-    _ => 'Lesson',
+    _ => 'Title',
   };
 
   static IconData _kindIcon(String kind) => switch (kind) {
