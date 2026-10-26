@@ -176,22 +176,34 @@ class StudyMediaPlayerApp extends ConsumerWidget {
     final themeMode = ref.watch(themeModeProvider);
     return MaterialApp.router(
       title: 'Tangerine',
-      builder: (context, child) => ListenableBuilder(
-        listenable: _router.routeInformationProvider,
-        builder: (context, _) => Column(
-          children: [
-            Expanded(child: child ?? const SizedBox.shrink()),
-            if (!_router.routeInformationProvider.value.uri.path.startsWith(
-              '/listen/',
-            ))
-              MusicDock(
-                onOpen: () {
-                  final item = ref.read(musicSessionProvider)?.track?.item;
-                  if (item != null)
-                    _router.push('/listen/${Uri.encodeComponent(item.id)}');
-                },
+      builder: (context, child) => _AppOverlay(
+        child: ListenableBuilder(
+          listenable: _router.routeInformationProvider,
+          builder: (context, _) => Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) => MediaQuery(
+                    data: MediaQuery.of(
+                      context,
+                    ).copyWith(size: constraints.biggest),
+                    child: child ?? const SizedBox.shrink(),
+                  ),
+                ),
               ),
-          ],
+              if (!_router.routeInformationProvider.value.uri.path.startsWith(
+                '/listen/',
+              ))
+                MusicDock(
+                  onOpen: () {
+                    final item = ref.read(musicSessionProvider)?.track?.item;
+                    if (item != null)
+                      _router.push('/listen/${Uri.encodeComponent(item.id)}');
+                  },
+                ),
+            ],
+          ),
         ),
       ),
       debugShowCheckedModeBanner: false,
@@ -201,4 +213,33 @@ class StudyMediaPlayerApp extends ConsumerWidget {
       routerConfig: _router,
     );
   }
+}
+
+/// Gives shell controls (outside the router) an overlay for tooltips and menus.
+class _AppOverlay extends StatefulWidget {
+  const _AppOverlay({required this.child});
+  final Widget child;
+
+  @override
+  State<_AppOverlay> createState() => _AppOverlayState();
+}
+
+class _AppOverlayState extends State<_AppOverlay> {
+  late final _entry = OverlayEntry(builder: (_) => widget.child);
+
+  @override
+  void didUpdateWidget(_AppOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _entry.markNeedsBuild();
+  }
+
+  @override
+  void dispose() {
+    _entry.remove();
+    _entry.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Overlay(initialEntries: [_entry]);
 }

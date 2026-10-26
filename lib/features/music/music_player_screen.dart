@@ -842,47 +842,95 @@ class MusicDock extends ConsumerWidget {
           color: Theme.of(context).colorScheme.surfaceContainerHigh,
           child: SafeArea(
             top: false,
-            child: ListTile(
-              leading: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: ItemArtwork(item: track.item, size: 44),
-              ),
-              title: Text(
-                track.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(track.artist, maxLines: 1),
-              onTap: onOpen,
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: session.player?.state.playing == true
-                        ? 'Pause'
-                        : 'Play',
-                    onPressed: () => unawaited(
-                      (session.player?.state.playing == true
-                              ? session.pause()
-                              : ref
-                                    .read(musicSessionProvider.notifier)
-                                    .resume())
-                          .catchError((Object _) {}),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final controls = Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: session.player?.state.playing == true
+                          ? 'Pause'
+                          : 'Play',
+                      onPressed: () => unawaited(
+                        (session.player?.state.playing == true
+                                ? session.pause()
+                                : ref
+                                      .read(musicSessionProvider.notifier)
+                                      .resume())
+                            .catchError((Object _) {}),
+                      ),
+                      icon: Icon(
+                        session.player?.state.playing == true
+                            ? Icons.pause
+                            : Icons.play_arrow,
+                      ),
                     ),
-                    icon: Icon(
-                      session.player?.state.playing == true
-                          ? Icons.pause
-                          : Icons.play_arrow,
+                    IconButton(
+                      tooltip: 'Stop music',
+                      icon: const Icon(Icons.close),
+                      onPressed: () =>
+                          ref.read(musicSessionProvider.notifier).stop(),
+                    ),
+                  ],
+                );
+                final title = InkWell(
+                  onTap: onOpen,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: ItemArtwork(item: track.item, size: 44),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                track.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                              Text(
+                                track.artist,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Stop music',
-                    icon: const Icon(Icons.close),
-                    onPressed: () =>
-                        ref.read(musicSessionProvider.notifier).stop(),
-                  ),
-                ],
-              ),
+                );
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: constraints.maxWidth < 300
+                      ? Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            title,
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: controls,
+                            ),
+                          ],
+                        )
+                      : Row(
+                          children: [
+                            Expanded(child: title),
+                            const SizedBox(width: 8),
+                            controls,
+                          ],
+                        ),
+                );
+              },
             ),
           ),
         );

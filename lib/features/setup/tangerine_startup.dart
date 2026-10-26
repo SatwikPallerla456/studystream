@@ -140,29 +140,35 @@ class _TangerineStartupState extends State<TangerineStartup>
   @override
   Widget build(BuildContext context) => Directionality(
     textDirection: TextDirection.ltr,
-    child: AnimatedSwitcher(
-      duration: _reduced ? Duration.zero : AppMotion.emphasized,
-      child: _ready
-          ? UncontrolledProviderScope(
-              key: const ValueKey('app'),
-              container: _container!,
-              child: const StudyMediaPlayerApp(),
-            )
-          : MaterialApp(
-              key: const ValueKey('opening'),
-              title: 'Tangerine',
-              navigatorKey: _navigator,
-              debugShowCheckedModeBanner: false,
-              theme: AppTheme.light(),
-              darkTheme: AppTheme.dark(),
-              home: TangerineSplashScreen(
-                intro: _reveal,
-                activity: _activity,
-                phase: _phase,
-                failed: _failed,
-                onRetry: _start,
+    child: SizedBox.expand(
+      child: AnimatedSwitcher(
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          fit: StackFit.expand,
+          children: [...previousChildren, ?currentChild],
+        ),
+        duration: _reduced ? Duration.zero : AppMotion.emphasized,
+        child: _ready
+            ? UncontrolledProviderScope(
+                key: const ValueKey('app'),
+                container: _container!,
+                child: const StudyMediaPlayerApp(),
+              )
+            : MaterialApp(
+                key: const ValueKey('opening'),
+                title: 'Tangerine',
+                navigatorKey: _navigator,
+                debugShowCheckedModeBanner: false,
+                theme: AppTheme.light(),
+                darkTheme: AppTheme.dark(),
+                home: TangerineSplashScreen(
+                  intro: _reveal,
+                  activity: _activity,
+                  phase: _phase,
+                  failed: _failed,
+                  onRetry: _start,
+                ),
               ),
-            ),
+      ),
     ),
   );
 }

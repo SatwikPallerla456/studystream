@@ -1846,6 +1846,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         skipSeconds: _controls.skipSeconds,
         onTogglePlay: _togglePlay,
         onSeekRelative: _seekRelative,
+        onSeek: _seekTo,
         showArtwork: _behavior['coverArt'] != 'false',
         saveHistory: _rememberPath(item.filePath),
         speed: _speed,
@@ -1963,6 +1964,7 @@ class _AudioSurface extends StatelessWidget {
     required this.skipSeconds,
     required this.onTogglePlay,
     required this.onSeekRelative,
+    required this.onSeek,
   });
 
   final PlaybackEngine player;
@@ -1980,6 +1982,7 @@ class _AudioSurface extends StatelessWidget {
   final int skipSeconds;
   final VoidCallback onTogglePlay;
   final ValueChanged<int> onSeekRelative;
+  final Future<void> Function(Duration) onSeek;
   final double speed;
   final ValueChanged<double> onSetSpeed;
   final VoidCallback? onPrevious;
@@ -2071,7 +2074,7 @@ class _AudioSurface extends StatelessWidget {
                                   max: max,
                                   onChanged: duration == Duration.zero
                                       ? null
-                                      : (value) => _seekTo(
+                                      : (value) => onSeek(
                                           Duration(milliseconds: value.round()),
                                         ),
                                 ),

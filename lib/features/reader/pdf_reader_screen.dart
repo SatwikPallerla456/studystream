@@ -292,7 +292,6 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       '$_layoutMode:$_rtl:$_totalPages:${sha256.convert(utf8.encode(jsonEncode([_readerOptions['coverSingle'], _readerOptions['singlePages'], _readerOptions['pairingStarts']])))}';
 
   Future<void> _restoreLocator(ReaderLocator locator) async {
-    if (intentional) _writer?.markPositionIntent();
     final number = locator.page.clamp(1, _totalPages);
     final rect = _controller.layout.pageLayouts[number - 1];
     final saved = ReaderViewportState.decode(locator.viewState);
