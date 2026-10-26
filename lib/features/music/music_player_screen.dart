@@ -559,7 +559,7 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                           ],
                         ),
                         Text(
-                          '${session.profile.name} · ${session.profile.normalization} normalization · ${session.crossfade > 0
+                          '${session.profile.name} · ${session.effectiveNormalization} normalization · ${session.crossfade > 0
                               ? '${session.crossfade}s crossfade'
                               : session.gapless
                               ? 'gapless'

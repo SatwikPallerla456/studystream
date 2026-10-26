@@ -50,7 +50,7 @@ class MusicSession extends ChangeNotifier {
   final LanSyncClient client;
   final PlayerLibraryRepository queue;
   MusicRepository get repository => MusicRepository(db);
-  _Deck? _deck, _nextDeck;
+  _Deck? _deck, _nextDeck, _filterRecoveryDeck;
   _Listening? _listen, _nextListen;
   MusicTrack? get track => _listen?.track;
   Player? get player => _deck?.player;
@@ -83,6 +83,11 @@ class MusicSession extends ChangeNotifier {
   double energy = 0, beat = 0, grit = 0;
   final List<double> envelope = [];
   String? error, meterMessage;
+  bool _filtersDisabled = false, _filterRecoveryPending = false;
+  String get effectiveNormalization =>
+      _filtersDisabled && profile.normalization == 'dynamic'
+      ? 'off'
+      : profile.normalization;
   Timer? _timer;
   final _clock = Stopwatch()..start();
   int _lastTick = 0, _lastPersist = 0, _lastBeat = 0;
@@ -219,16 +224,66 @@ class MusicSession extends ChangeNotifier {
   Future<_Deck> _make(List<MusicTrack> tracks) async {
     final p = Player();
     final deck = _Deck(p, tracks);
-    deck.errors = p.stream.error.listen(_report);
+    deck.errors = p.stream.error.listen((message) => _deckError(deck, message));
     try {
       await _configure(p);
       await p.setVolume(0);
       await p.open(Playlist(tracks.map((t) => t.media).toList()), play: false);
       return deck;
     } catch (_) {
+      await deck.errors?.cancel();
       await p.dispose();
       rethrow;
     }
+  }
+
+  void _disableFilters() {
+    _filtersDisabled = true;
+    energy = beat = grit = 0;
+    envelope.clear();
+    meterMessage = profile.normalization == 'dynamic'
+        ? 'Audio effects are unavailable. Playing without dynamic normalization or audio analysis.'
+        : 'Audio analysis is unavailable. Music plays with ambient artwork.';
+  }
+
+  void _deckError(_Deck deck, String message) {
+    if (_closed || identical(_filterRecoveryDeck, deck)) return;
+    final lower = message.toLowerCase();
+    final filterFailure =
+        lower.contains('audio filter') &&
+        (lower.contains('fail') || lower.contains('error'));
+    if (_filtersDisabled || _filterRecoveryPending || !filterFailure) {
+      _report(message);
+      return;
+    }
+    // Filter readback before file load only confirms syntax. The decoder may
+    // reject the chain later, after open() has already returned successfully.
+    _filterRecoveryPending = true;
+    _filterRecoveryDeck = deck;
+    unawaited(
+      _ordered(() async {
+        try {
+          if (!identical(_deck, deck) && !identical(_nextDeck, deck)) return;
+          _disableFilters();
+          error = null;
+          if (identical(_deck, deck)) {
+            final retained = _listen;
+            final reported = deck.player.state.position;
+            final position = retained != null && retained.position > reported
+                ? retained.position
+                : reported;
+            await _open(_ordinal, position: position, retained: retained);
+          } else {
+            await _cancelStandby();
+            await _prepare();
+          }
+          _notify();
+        } finally {
+          _filterRecoveryPending = false;
+          _filterRecoveryDeck = null;
+        }
+      }).catchError(_report),
+    );
   }
 
   Future<void> _property(Player p, String key, String value) async {
@@ -284,13 +339,16 @@ class MusicSession extends ChangeNotifier {
     ];
     if (profile.normalization == 'dynamic')
       filters.add('@tangerine-normalize:lavfi=[loudnorm=I=-16:TP=-1.5:LRA=11]');
-    try {
-      await _property(p, 'af', filters.join(','));
-    } catch (e) {
-      meterMessage =
-          'Audio analysis is unavailable in this backend. Ambient artwork stays still.';
-      if (profile.normalization == 'dynamic') rethrow;
+    if (_filtersDisabled) {
+      _disableFilters();
       await _property(p, 'af', '');
+    } else {
+      try {
+        await _property(p, 'af', filters.join(','));
+      } catch (_) {
+        _disableFilters();
+        await _property(p, 'af', '');
+      }
     }
     if (profile.device == 'auto') {
       await p.setAudioDevice(AudioDevice.auto());
@@ -450,7 +508,11 @@ class MusicSession extends ChangeNotifier {
     }
   }
 
-  Future<void> _open(int ordinal, {Duration position = Duration.zero}) async {
+  Future<void> _open(
+    int ordinal, {
+    Duration position = Duration.zero,
+    _Listening? retained,
+  }) async {
     _transition = true;
     final generation = ++_generation;
     try {
@@ -469,7 +531,8 @@ class MusicSession extends ChangeNotifier {
       }
       _deck = deck;
       await deck.player.setVolume(volume);
-      await _adopt(next);
+      await _adopt(next, retained: retained);
+      _listen?.position = position;
       _bind(deck);
       if (position > Duration.zero) await deck.player.seek(position);
       try {
@@ -708,7 +771,7 @@ class MusicSession extends ChangeNotifier {
   }
 
   Future<void> _meter() async {
-    if (_closed || player == null) return;
+    if (_closed || player == null || _filtersDisabled) return;
     _meterBusy = true;
     try {
       final p = player!, native = p.platform;
