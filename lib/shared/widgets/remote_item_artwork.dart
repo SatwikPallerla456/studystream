@@ -27,47 +27,45 @@ final _artworkJobs = ReaderJobScheduler(
   maxConcurrent: 2,
   maxInflightBytes: 8 * 1024 * 1024,
 );
-final _remoteArtwork = FutureProvider.autoDispose.family<Uint8List?, Item>((
-  ref,
-  item,
-) async {
-  final selection = await ref.watch(_remoteArtworkSelection(item).future);
-  if (!ref.mounted) return null;
-  final source = await ref.read(lanSyncClientProvider).artworkFor(item);
-  if (!ref.mounted) return null;
-  final lease = _artworkJobs.request<Uint8List?>(
-    key: '${source.uri}:${item.updatedAt}:${item.modifiedAt}:$selection',
-    priority: ReaderPriority.thumbnail,
-    estimatedBytes: 2 * 1024 * 1024,
-    run: (cancel) async {
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 8);
-      cancel.onCancel(() => client.close(force: true));
-      try {
-        final request = await client.getUrl(source.uri);
-        request.followRedirects = false;
-        source.headers.forEach(request.headers.set);
-        final response = await request.close().timeout(
-          const Duration(seconds: 12),
-        );
-        if (response.statusCode != 200) return null;
-        final bytes = BytesBuilder(copy: false);
-        await for (final chunk in response.timeout(
-          const Duration(seconds: 12),
-        )) {
-          cancel.check();
-          if (bytes.length + chunk.length > 2 * 1024 * 1024) return null;
-          bytes.add(chunk);
-        }
-        return bytes.takeBytes();
-      } finally {
-        client.close(force: true);
-      }
-    },
-  );
-  ref.onDispose(lease.release);
-  return lease.future;
-});
+final remoteArtworkBytesProvider = FutureProvider.autoDispose
+    .family<Uint8List?, Item>((ref, item) async {
+      final selection = await ref.watch(_remoteArtworkSelection(item).future);
+      if (!ref.mounted) return null;
+      final source = await ref.read(lanSyncClientProvider).artworkFor(item);
+      if (!ref.mounted) return null;
+      final lease = _artworkJobs.request<Uint8List?>(
+        key: '${source.uri}:${item.updatedAt}:${item.modifiedAt}:$selection',
+        priority: ReaderPriority.thumbnail,
+        estimatedBytes: 2 * 1024 * 1024,
+        run: (cancel) async {
+          final client = HttpClient()
+            ..connectionTimeout = const Duration(seconds: 8);
+          cancel.onCancel(() => client.close(force: true));
+          try {
+            final request = await client.getUrl(source.uri);
+            request.followRedirects = false;
+            source.headers.forEach(request.headers.set);
+            final response = await request.close().timeout(
+              const Duration(seconds: 12),
+            );
+            if (response.statusCode != 200) return null;
+            final bytes = BytesBuilder(copy: false);
+            await for (final chunk in response.timeout(
+              const Duration(seconds: 12),
+            )) {
+              cancel.check();
+              if (bytes.length + chunk.length > 2 * 1024 * 1024) return null;
+              bytes.add(chunk);
+            }
+            return bytes.takeBytes();
+          } finally {
+            client.close(force: true);
+          }
+        },
+      );
+      ref.onDispose(lease.release);
+      return lease.future;
+    });
 
 class RemoteItemArtwork extends ConsumerWidget {
   const RemoteItemArtwork({
@@ -81,7 +79,7 @@ class RemoteItemArtwork extends ConsumerWidget {
   final BoxFit fit;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final bytes = ref.watch(_remoteArtwork(item)).asData?.value;
+    final bytes = ref.watch(remoteArtworkBytesProvider(item)).asData?.value;
     return bytes == null
         ? placeholder
         : Image.memory(

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import '../../core/utils/id_utils.dart';
+import 'sync_intent.dart';
 
 class SyncConflictResolver {
   const SyncConflictResolver._();
@@ -8,7 +9,10 @@ class SyncConflictResolver {
     Map<String, dynamic> local,
     Map<String, dynamic> remote,
   ) {
-    final selected = _mergeProgress(local, remote);
+    final selected =
+        local['syncProgress'] != null || remote['syncProgress'] != null
+        ? SyncIntent.merge(local, remote)
+        : _mergeProgress(local, remote);
     final localActivity = (local['lastOpenedAt'] as num?)?.toInt() ?? 0;
     final remoteActivity = (remote['lastOpenedAt'] as num?)?.toInt() ?? 0;
     selected['lastOpenedAt'] = localActivity > remoteActivity

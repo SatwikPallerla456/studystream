@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:drift/drift.dart' show TableUpdateQuery;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,9 +49,8 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
     super.initState();
     final db = ref.read(appDatabaseProvider);
     _changes = db
-        .customSelect(
-          'SELECT COUNT(*) AS total FROM items',
-          readsFrom: {
+        .tableUpdates(
+          TableUpdateQuery.onAllTables([
             db.items,
             db.libraries,
             db.notes,
@@ -58,9 +58,8 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
             db.appSettings,
             db.playbackProgress,
             db.readingProgress,
-          },
+          ]),
         )
-        .watch()
         .listen((_) {
           _refresh?.cancel();
           _refresh = Timer(const Duration(milliseconds: 300), () {

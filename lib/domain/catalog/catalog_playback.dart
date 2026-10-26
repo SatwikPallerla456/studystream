@@ -382,6 +382,20 @@ class CatalogPlayback {
         }
       });
 
+  Future<void> resetTitleProgress(Item item) => db.transaction(() async {
+    final parts = (await files(item)).parts;
+    for (final asset in parts.isEmpty ? [item] : parts.map((p) => p.item)) {
+      await db.resetItemProgress(asset);
+    }
+  });
+  Future<void> useAutomaticTitleCompletion(Item item) =>
+      db.transaction(() async {
+        final parts = (await files(item)).parts;
+        for (final asset in parts.isEmpty ? [item] : parts.map((p) => p.item)) {
+          await db.useAutomaticCompletion(asset);
+        }
+      });
+
   Future<List<CatalogPart>> _playableParts(String representationId) async {
     final item = await db.getItemById(representationId);
     if (item == null)

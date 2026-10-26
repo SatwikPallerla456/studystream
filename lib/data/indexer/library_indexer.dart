@@ -259,24 +259,49 @@ class LibraryIndexer {
       (sum, folder) => sum + folder.files.length,
     );
 
-    final allExistingItems = await db.getItemsForLibrary(libraryId);
-    final existingItems = allExistingItems
-        .where((item) => belongs(item.relativePath))
-        .toList();
-    final existingByPath = <String, Item>{};
-    for (final item in existingItems) {
-      final current = existingByPath[item.relativePath];
-      if (current == null || (current.unavailable && !item.unavailable)) {
-        existingByPath[item.relativePath] = item;
+    Future<Item?> atPath(String path) =>
+        (db.select(db.items)
+              ..where(
+                (t) =>
+                    t.libraryId.equals(libraryId) & t.relativePath.equals(path),
+              )
+              ..orderBy([
+                (t) => drift.OrderingTerm.asc(t.unavailable),
+                (t) => drift.OrderingTerm.asc(t.id),
+              ])
+              ..limit(1))
+            .getSingleOrNull();
+    Future<List<Item>> moveCandidates(
+      String fingerprint,
+      Set<String> claimed,
+      Set<String> discovered,
+    ) async {
+      final matches = <Item>[];
+      var after = '';
+      while (true) {
+        final page =
+            await (db.select(db.items)
+                  ..where(
+                    (t) =>
+                        t.libraryId.equals(libraryId) &
+                        t.fingerprint.equals(fingerprint) &
+                        t.id.isBiggerThanValue(after),
+                  )
+                  ..orderBy([(t) => drift.OrderingTerm.asc(t.id)])
+                  ..limit(100))
+                .get();
+        for (final item in page) {
+          if (belongs(item.relativePath) &&
+              !claimed.contains(item.id) &&
+              !discovered.contains(item.relativePath))
+            matches.add(item);
+          if (matches.length > 1) return matches;
+        }
+        if (page.length < 100) return matches;
+        after = page.last.id;
       }
     }
-    final existingByFingerprint = <String, List<Item>>{};
-    for (final item in existingItems) {
-      final fingerprint = item.fingerprint;
-      if (fingerprint != null && fingerprint.isNotEmpty) {
-        existingByFingerprint.putIfAbsent(fingerprint, () => []).add(item);
-      }
-    }
+
     final discoveredPaths = {
       for (final folder in folders)
         for (final file in folder.files)
@@ -288,21 +313,20 @@ class LibraryIndexer {
       for (final file in folder.files) {
         token.throwIfCancelled();
         try {
-          final atPath =
-              existingByPath[sourcePath(
-                p.relative(file.path, from: rootDir.path),
-              )];
+          final previous = await atPath(
+            sourcePath(p.relative(file.path, from: rootDir.path)),
+          );
           final stat = await file.stat();
-          final cached = atPath?.fingerprint;
+          final cached = previous?.fingerprint;
           final fingerprint =
               cached != null &&
                   cached.startsWith('sha256:') &&
-                  atPath!.fileSize == stat.size &&
-                  atPath.modifiedAt == stat.modified.millisecondsSinceEpoch
+                  previous!.fileSize == stat.size &&
+                  previous.modifiedAt == stat.modified.millisecondsSinceEpoch
               ? cached
               : await fingerprintFile(file, cancellationToken: token);
           fingerprints[file.path] = fingerprint;
-          if (atPath?.fingerprint != fingerprint) {
+          if (previous?.fingerprint != fingerprint) {
             fingerprintCounts.update(
               fingerprint,
               (n) => n + 1,
@@ -377,7 +401,7 @@ class LibraryIndexer {
           final fingerprint =
               fingerprints[file.path] ??
               await fingerprintFile(file, cancellationToken: token);
-          var existing = existingByPath[relativePath];
+          var existing = await atPath(relativePath);
           if (existing?.fingerprint != null &&
               existing!.fingerprint != fingerprint) {
             final legacyMatches =
@@ -391,14 +415,12 @@ class LibraryIndexer {
             existing = null;
           }
           if (existing == null && fingerprintCounts[fingerprint] == 1) {
-            final candidates = existingByFingerprint[fingerprint]
-                ?.where(
-                  (candidate) =>
-                      !claimedIds.contains(candidate.id) &&
-                      !discoveredPaths.contains(candidate.relativePath),
-                )
-                .toList();
-            if (candidates?.length == 1) existing = candidates!.single;
+            final candidates = await moveCandidates(
+              fingerprint,
+              claimedIds,
+              discoveredPaths,
+            );
+            if (candidates.length == 1) existing = candidates.single;
           }
           final itemId =
               existing?.id ??
@@ -448,35 +470,36 @@ class LibraryIndexer {
     }
 
     token.throwIfCancelled();
-    for (final item in existingItems) {
-      final absolutePath = p.normalize(File(item.filePath).absolute.path);
-      final insideUnreadableDirectory = unreadableDirectories.any(
-        (directory) =>
-            absolutePath == directory ||
-            absolutePath.startsWith('$directory${Platform.pathSeparator}'),
-      );
-      if (insideUnreadableDirectory || unreadableFiles.contains(absolutePath)) {
-        seenItemIds.add(item.id);
+    await for (final page in db.itemPages(libraryId)) {
+      for (final item in page.where((i) => belongs(i.relativePath))) {
+        final absolutePath = p.normalize(File(item.filePath).absolute.path);
+        final insideUnreadableDirectory = unreadableDirectories.any(
+          (directory) =>
+              absolutePath == directory ||
+              absolutePath.startsWith('$directory${Platform.pathSeparator}'),
+        );
+        if (insideUnreadableDirectory ||
+            unreadableFiles.contains(absolutePath)) {
+          seenItemIds.add(item.id);
+        }
       }
     }
-    final allExistingSections = await db.getSectionsForLibrary(libraryId);
-    final existingSections = allExistingSections.where(
-      (section) => belongs(section.relativePath),
-    );
-    for (final section in existingSections) {
-      final absolutePath = p.normalize(
-        Directory(section.folderPath).absolute.path,
-      );
-      final insideUnreadableDirectory = unreadableDirectories.any(
-        (directory) =>
-            absolutePath == directory ||
-            absolutePath.startsWith('$directory${Platform.pathSeparator}') ||
-            directory.startsWith('$absolutePath${Platform.pathSeparator}'),
-      );
-      if (insideUnreadableDirectory) seenSectionIds.add(section.id);
+    await for (final page in db.sectionPages(libraryId)) {
+      for (final section in page.where((s) => belongs(s.relativePath))) {
+        final absolutePath = p.normalize(
+          Directory(section.folderPath).absolute.path,
+        );
+        final insideUnreadableDirectory = unreadableDirectories.any(
+          (directory) =>
+              absolutePath == directory ||
+              absolutePath.startsWith('$directory${Platform.pathSeparator}') ||
+              directory.startsWith('$absolutePath${Platform.pathSeparator}'),
+        );
+        if (insideUnreadableDirectory) seenSectionIds.add(section.id);
+      }
     }
-
     await LibrarySourceStore(db).stage(sessionId, itemRows);
+    var missingItems = 0;
     await db.transaction(() async {
       token.throwIfCancelled();
       await db.upsertLibrary(
@@ -498,22 +521,13 @@ class LibraryIndexer {
           ),
         ),
       );
-      await db.applyScan(
+      missingItems = await db.applyScan(
         libraryId: libraryId,
         scannedSections: sectionRows,
         scannedItems: itemRows,
-        seenSectionIds: {
-          ...seenSectionIds,
-          ...allExistingSections
-              .where((s) => !belongs(s.relativePath))
-              .map((s) => s.id),
-        },
-        seenItemIds: {
-          ...seenItemIds,
-          ...allExistingItems
-              .where((i) => !belongs(i.relativePath))
-              .map((i) => i.id),
-        },
+        seenSectionIds: seenSectionIds,
+        seenItemIds: seenItemIds,
+        belongsToScan: belongs,
       );
       await db.customStatement(
         'INSERT OR IGNORE INTO library_sources(id,library_id,root_path,namespace,updated_at) VALUES(?,?,?,?,?)',
@@ -543,9 +557,6 @@ class LibraryIndexer {
         'UPDATE library_sources SET root_path = ?, unavailable = 0 WHERE id = ?',
         [rootDir.path, 'legacy:$libraryId'],
       );
-    final missingItems = existingItems
-        .where((item) => !seenItemIds.contains(item.id))
-        .length;
     onProgress?.call(
       ScanProgress(
         phase: 'Complete',

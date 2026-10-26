@@ -261,6 +261,31 @@ class _CollectionEditorState extends ConsumerState<_CollectionEditor> {
     widget.record?.data['items'] as List? ??
         [if (widget.initial != null) widget.initial!.id],
   );
+  final _members = <String, Item>{};
+  late Future<void> _memberLoad = _loadMembers();
+  int _memberPage = 0, _memberGeneration = 0;
+  int _memberIndex(int index) => _memberPage * 64 + index;
+  Future<void> _loadMembers() async {
+    final generation = ++_memberGeneration;
+    final db = ref.read(appDatabaseProvider);
+    if (_memberPage * 64 >= _ids.length)
+      _memberPage = _ids.isEmpty ? 0 : (_ids.length - 1) ~/ 64;
+    final batch = _ids.skip(_memberPage * 64).take(64).toList();
+    if (batch.isEmpty) {
+      _members.clear();
+      return;
+    }
+    final rows =
+        await (db.select(db.items)..where(
+              (t) => t.libraryId.equals(widget.libraryId) & t.id.isIn(batch),
+            ))
+            .get();
+    if (!mounted || generation != _memberGeneration) return;
+    _members
+      ..clear()
+      ..addEntries(rows.map((i) => MapEntry(i.id, i)));
+  }
+
   late String _type = widget.record?.kind ?? 'collection';
   List<Item> _matches = [];
   String? _error;
@@ -397,7 +422,10 @@ class _CollectionEditorState extends ConsumerState<_CollectionEditor> {
               icon: Icon(_ids.contains(item.id) ? Icons.check : Icons.add),
               onPressed: _ids.contains(item.id) || _ids.length >= 1000
                   ? null
-                  : () => setState(() => _ids.add(item.id)),
+                  : () => setState(() {
+                      _ids.add(item.id);
+                      _members[item.id] = item;
+                    }),
             ),
           ),
         if (_history.isNotEmpty || _matchPage?.more == true)
@@ -425,31 +453,60 @@ class _CollectionEditorState extends ConsumerState<_CollectionEditor> {
             ],
           ),
         const Divider(),
-        Text('${_ids.length} members'),
+        Row(
+          children: [
+            Text('${_ids.length} members · page ${_memberPage + 1}'),
+            TextButton(
+              onPressed: _memberPage == 0
+                  ? null
+                  : () => setState(() {
+                      _memberPage--;
+                      _memberLoad = _loadMembers();
+                    }),
+              child: const Text('Previous'),
+            ),
+            TextButton(
+              onPressed: (_memberPage + 1) * 64 >= _ids.length
+                  ? null
+                  : () => setState(() {
+                      _memberPage++;
+                      _memberLoad = _loadMembers();
+                    }),
+              child: const Text('Next'),
+            ),
+          ],
+        ),
         ReorderableListView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          itemCount: _ids.length,
+          itemCount: (_ids.length - _memberPage * 64).clamp(0, 64),
           onReorder: (a, b) => setState(() {
+            a = _memberIndex(a);
+            b = _memberIndex(b);
             if (b > a) b--;
             _ids.insert(b, _ids.removeAt(a));
           }),
-          itemBuilder: (context, index) => FutureBuilder<Item?>(
-            key: ValueKey(_ids[index]),
-            future: ref.read(appDatabaseProvider).getItemById(_ids[index]),
+          itemBuilder: (context, index) => FutureBuilder<void>(
+            key: ValueKey(_ids[_memberIndex(index)]),
+            future: _memberLoad,
             builder: (context, snapshot) => ListTile(
               title: Text(
-                snapshot.data?.userTitle ??
-                    snapshot.data?.title ??
+                _members[_ids[_memberIndex(index)]]?.userTitle ??
+                    _members[_ids[_memberIndex(index)]]?.title ??
                     'Unavailable member',
               ),
-              onTap: snapshot.data == null
+              onTap: _members[_ids[_memberIndex(index)]] == null
                   ? null
-                  : () => context.push(MediaVisuals.route(snapshot.data!)),
+                  : () => context.push(
+                      MediaVisuals.route(_members[_ids[_memberIndex(index)]]!),
+                    ),
               trailing: IconButton(
                 tooltip: 'Remove member',
                 icon: const Icon(Icons.remove_circle_outline),
-                onPressed: () => setState(() => _ids.removeAt(index)),
+                onPressed: () => setState(() {
+                  _ids.removeAt(_memberIndex(index));
+                  _memberLoad = _loadMembers();
+                }),
               ),
             ),
           ),

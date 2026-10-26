@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:path/path.dart' as p;
+import 'package:drift/drift.dart' as d;
 import 'package:uuid/uuid.dart';
 
 import '../../data/db/app_database.dart';
@@ -429,37 +430,98 @@ class PlayerLibraryRepository {
     if (candidates.length > 10000) {
       throw const FormatException('Playlist has more than 10,000 entries.');
     }
-    final paths = <String, List<Item>>{};
-    for (final item in await database.select(database.items).get()) {
-      if (p.isAbsolute(item.filePath) &&
-          ['audio', 'video'].contains(item.itemType)) {
-        (paths[p.normalize(item.filePath)] ??= []).add(item);
+    await _indexPlaylistPaths();
+    final requested = <String, String?>{};
+    for (final candidate in candidates) {
+      final uri = p.isAbsolute(candidate) ? null : Uri.tryParse(candidate);
+      if (uri != null && uri.hasScheme && uri.scheme != 'file') {
+        requested[candidate] = null;
+        continue;
+      }
+      try {
+        requested[candidate] = p.normalize(
+          uri?.scheme == 'file'
+              ? uri!.toFilePath()
+              : p.absolute(p.join(p.dirname(file.path), candidate)),
+        );
+      } on ArgumentError {
+        requested[candidate] = null;
+      } on UnsupportedError {
+        requested[candidate] = null;
+      }
+    }
+    final unique = requested.values.whereType<String>().toSet().toList();
+    final paths = <String, String>{};
+    for (var offset = 0; offset < unique.length; offset += 200) {
+      final batch = unique.skip(offset).take(200).toList();
+      final rows = await database
+          .customSelect(
+            "SELECT path,MIN(item_id) AS id,COUNT(*) AS matches FROM playlist_path_index WHERE path IN (${batch.map((_) => '?').join(',')}) GROUP BY path",
+            variables: batch.map(d.Variable.new).toList(),
+          )
+          .get();
+      for (final row in rows) {
+        if (row.data['matches'] == 1)
+          paths[row.data['path'] as String] = row.data['id'] as String;
       }
     }
     final ids = <String>[], unmatched = <String>[];
     for (final candidate in candidates) {
-      final uri = p.isAbsolute(candidate) ? null : Uri.tryParse(candidate);
-      if (uri != null && uri.hasScheme && uri.scheme != 'file') {
+      final match = paths[requested[candidate]];
+      if (match != null)
+        ids.add(match);
+      else
         unmatched.add(candidate);
-        continue;
-      }
-      final path = p.normalize(
-        uri?.scheme == 'file'
-            ? uri!.toFilePath()
-            : p.absolute(p.join(p.dirname(file.path), candidate)),
-      );
-      final matches = paths[path];
-      if (matches?.length == 1) {
-        ids.add(matches!.single.id);
-      } else {
-        unmatched.add(candidate);
-      }
     }
     return PlaylistImportPreview(
       p.basenameWithoutExtension(file.path),
       ids,
       unmatched,
     );
+  }
+
+  /// Persist normalized aliases once; migration and invalidated paths are
+  /// processed in bounded keyset pages, including old noncanonical file paths.
+  Future<void> _indexPlaylistPaths() async {
+    await database.customStatement(
+      'CREATE TABLE IF NOT EXISTS playlist_path_index(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,path TEXT NOT NULL)',
+    );
+    await database.customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_playlist_path ON playlist_path_index(path,item_id)',
+    );
+    await database.customStatement(
+      """CREATE TRIGGER IF NOT EXISTS playlist_path_changed AFTER UPDATE OF file_path,item_type ON items
+      WHEN OLD.file_path <> NEW.file_path OR OLD.item_type <> NEW.item_type
+      BEGIN DELETE FROM playlist_path_index WHERE item_id=NEW.id; END""",
+    );
+    var after = '';
+    while (true) {
+      final rows = await database
+          .customSelect(
+            'SELECT i.id,i.file_path,i.item_type FROM items i LEFT JOIN playlist_path_index x ON x.item_id=i.id WHERE i.id>? AND x.item_id IS NULL ORDER BY i.id LIMIT 256',
+            variables: [d.Variable(after)],
+          )
+          .get();
+      if (rows.isEmpty) break;
+      await database.transaction(() async {
+        for (final row in rows) {
+          // Re-read inside the transaction so a concurrent scan cannot index an
+          // obsolete path after its invalidation trigger already ran.
+          final item = await database.getItemById(row.data['id'] as String);
+          if (item == null) continue;
+          final path =
+              p.isAbsolute(item.filePath) &&
+                  ['audio', 'video'].contains(item.itemType)
+              ? p.normalize(item.filePath)
+              : '';
+          await database.customStatement(
+            'INSERT OR REPLACE INTO playlist_path_index(item_id,path) VALUES(?,?)',
+            [item.id, path],
+          );
+        }
+      });
+      after = rows.last.data['id'] as String;
+    }
   }
 
   Future<String> exportPls(NamedMediaPlaylist playlist) async {

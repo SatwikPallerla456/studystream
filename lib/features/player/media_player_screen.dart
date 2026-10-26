@@ -1,3 +1,5 @@
+import '../music/music_provider.dart';
+import '../../data/sync/sync_state_store.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show AppExitResponse;
@@ -273,6 +275,11 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           'This file could not be found. Rescan or relink it from the library.',
         );
       }
+      final music = ref.read(musicSessionProvider);
+      if (music?.player?.state.playing == true) await music!.pause();
+      final savedContext = SyncStateStore(
+        _database,
+      ).context('playback', item.id);
       final saved = await _database.getPlaybackByItemId(item.id);
       final preferences = await ref
           .read(appPreferencesRepositoryProvider)
@@ -475,15 +482,18 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           MediaProgressWriter(
             database: _database,
             item: item,
+            initialContext: savedContext,
             saveHistory: _rememberPath(item.filePath),
             completionThreshold: preferences.completionThreshold,
             resumeRewindSeconds: preferences.resumeRewindSeconds,
             onError: (error) {
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
+                  SnackBar(
                     content: Text(
-                      'Progress could not be saved. Check available storage and try again.',
+                      error is ProgressContextChanged
+                          ? error.toString()
+                          : 'Progress could not be saved. Check available storage and try again.',
                     ),
                   ),
                 );
@@ -498,6 +508,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             ),
             speed: speed,
           );
+      if (widget.initialPositionSeconds != null) writer.markPositionIntent();
       _subscriptions
         ..add(
           player.stream.volume.listen((volume) {
@@ -574,6 +585,9 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       });
       if (DesktopPlaybackWindows.available)
         DesktopPlaybackWindows.prepareExit = _exitPreparation;
+      final remoteQueueNamespace = ref
+          .read(playerLibraryRepositoryProvider)
+          .queueNamespace;
       _remoteOwner = _remoteController.attach(
         status: () => {
           'active': mounted && _player != null,
@@ -584,17 +598,56 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           'duration': player.state.duration.inMilliseconds / 1000,
           'rate': player.state.rate,
           'volume': player.state.volume,
+          '_fromQueue': widget.fromQueue,
+          '_queueNamespace': remoteQueueNamespace,
+          'commands': [
+            'play',
+            'pause',
+            'stop',
+            'seek',
+            'rate',
+            'volume',
+            'mute',
+            'next',
+            'previous',
+            'shuffle',
+            'repeat',
+            if (player is NativeVlcEngine) ...[
+              if (player.supports('fullscreen')) 'fullscreen',
+              if (player.supports('mini')) 'mini',
+              if (player.supports('frame')) 'frame',
+              if (player.supports('chapters')) 'chapter',
+              if (player.supports('tracks')) ...['audioTrack', 'subtitleTrack'],
+            ],
+          ],
+          'audioTrack': int.tryParse(player.state.track.audio.id),
+          'subtitleTrack': int.tryParse(player.state.track.subtitle.id),
+          'audioTracks': [
+            for (final t in player.state.tracks.audio)
+              {'id': int.tryParse(t.id), 'title': t.title ?? 'Audio ${t.id}'},
+          ],
+          'subtitleTracks': [
+            {'id': -1, 'title': 'Off'},
+            for (final t in player.state.tracks.subtitle)
+              if (int.tryParse(t.id) != null && t.id != '-1')
+                {'id': int.parse(t.id), 'title': t.title ?? 'Subtitle ${t.id}'},
+          ],
+          if (player is NativeVlcEngine)
+            'chapter': player.diagnostics['chapter'],
+          if (player is NativeVlcEngine)
+            'chapters': player.diagnostics['chapters'],
         },
         perform: (action, value) async {
           if (!mounted) return;
           switch (action) {
             case 'play':
+              _stopped = false;
               await player.play();
             case 'pause':
               await player.pause();
               await _progressWriter?.flush();
             case 'seek':
-              await player.seek(
+              await _seekTo(
                 Duration(
                   milliseconds: (value! * 1000).round().clamp(
                     0,
@@ -612,6 +665,63 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
               await _navigate(forward: true);
             case 'previous':
               await _navigate(forward: false);
+            case 'stop':
+              _stopped = true;
+              await player.pause();
+              await _progressWriter?.flush();
+              await player.seek(Duration.zero);
+            case 'shuffle':
+              {
+                final repository = ref.read(playerLibraryRepositoryProvider),
+                    state = await ref
+                        .read(playerLibraryRepositoryProvider)
+                        .load();
+                await repository.setShuffle(!state.shuffle);
+              }
+            case 'repeat':
+              {
+                final repository = ref.read(playerLibraryRepositoryProvider),
+                    state = await ref
+                        .read(playerLibraryRepositoryProvider)
+                        .load();
+                await repository.setRepeat(
+                  QueueRepeat.values[(state.repeat.index + 1) %
+                      QueueRepeat.values.length],
+                );
+              }
+
+            case 'fullscreen':
+              if (player is NativeVlcEngine) await player.toggleFullscreen();
+            case 'mini':
+              if (player is NativeVlcEngine) await player.toggleMini();
+            case 'frame':
+              if (player is NativeVlcEngine) await player.nextFrame();
+            case 'chapter':
+              if (player is NativeVlcEngine) {
+                final count = (player.diagnostics['chapters'] as num? ?? 0)
+                    .toInt();
+                if (value! < 0 || value >= count)
+                  throw const FormatException('Chapter is unavailable');
+                await player.setChapter(value.toInt());
+              }
+            case 'audioTrack':
+              final tracks = player.state.tracks.audio.where(
+                (t) => t.id == '${value!.toInt()}',
+              );
+              if (tracks.isEmpty)
+                throw const FormatException('Audio track is unavailable');
+              await player.setAudioTrack(tracks.first);
+            case 'subtitleTrack':
+              if (value == -1) {
+                await player.setSubtitleTrack(SubtitleTrack.no());
+              } else {
+                final tracks = player.state.tracks.subtitle.where(
+                  (t) => t.id == '${value!.toInt()}',
+                );
+                if (tracks.isEmpty)
+                  throw const FormatException('Subtitle is unavailable');
+                await player.setSubtitleTrack(tracks.first);
+              }
           }
         },
       );
@@ -877,7 +987,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       title: _experience.course ? 'Study tools' : 'Notes & bookmarks',
       currentPositionSeconds: player.state.position.inMilliseconds / 1000,
       onJumpToPosition: (seconds) {
-        player.seek(Duration(milliseconds: (seconds * 1000).round()));
+        unawaited(_seekTo(Duration(milliseconds: (seconds * 1000).round())));
       },
     );
   }
@@ -1314,18 +1424,32 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     }
   }
 
+  Future<void> _seekTo(Duration target) async {
+    final player = _player;
+    if (player == null) return;
+    final end = player.state.duration;
+    final position = target < Duration.zero
+        ? Duration.zero
+        : end > Duration.zero && target > end
+        ? end
+        : target;
+    _progressWriter?.markPositionIntent();
+    await player.seek(position);
+    _progressWriter?.seed(position: position, duration: end, speed: _speed);
+    try {
+      await _progressWriter?.flush();
+    } on ProgressContextChanged catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
   void _seekRelative(int seconds) {
     final player = _player;
     if (player == null) return;
-    final target = player.state.position + Duration(seconds: seconds);
-    final end = player.state.duration;
-    player.seek(
-      target < Duration.zero
-          ? Duration.zero
-          : end > Duration.zero && target > end
-          ? end
-          : target,
-    );
+    unawaited(_seekTo(player.state.position + Duration(seconds: seconds)));
   }
 
   void _toggleMute() {
@@ -1668,6 +1792,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     player: _player!,
     database: _database,
     onTracks: _showTracks,
+    onSeek: _seekTo,
     onTogglePlay: _togglePlay,
     onSnapshot: _takeSnapshot,
     onQueue: _showQueue,
@@ -1946,7 +2071,7 @@ class _AudioSurface extends StatelessWidget {
                                   max: max,
                                   onChanged: duration == Duration.zero
                                       ? null
-                                      : (value) => player.seek(
+                                      : (value) => _seekTo(
                                           Duration(milliseconds: value.round()),
                                         ),
                                 ),

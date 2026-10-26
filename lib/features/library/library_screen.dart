@@ -75,25 +75,26 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   }
 
   Future<Item?> _findResumeItem(AppDatabase database, String libraryId) async {
-    final items = await database.getItemsForLibrary(libraryId);
-    Item? latest;
-    var latestOpenedAt = -1;
-    for (final item in items) {
-      final playback = await database.getPlaybackByItemId(item.id);
-      final reading = await database.getReadingByItemId(item.id);
-      final completed =
-          playback?.completed == true || reading?.completed == true;
-      final openedAt = playback?.lastOpenedAt ?? reading?.lastOpenedAt ?? -1;
-      if (!completed && openedAt > latestOpenedAt && !item.unavailable) {
-        latest = item;
-        latestOpenedAt = openedAt;
-      }
-    }
-    if (latest != null) return latest;
-    for (final item in items) {
-      if (!item.unavailable) return item;
-    }
-    return null;
+    final row = await database
+        .customSelect(
+          """SELECT i.* FROM items i
+      LEFT JOIN playback_progress p ON p.item_id=i.id
+      LEFT JOIN reading_progress r ON r.item_id=i.id
+      WHERE i.library_id=? AND i.unavailable=0
+      ORDER BY CASE WHEN COALESCE(p.completed,0)=0 AND COALESCE(r.completed,0)=0
+        THEN 0 ELSE 1 END,
+      CASE WHEN COALESCE(p.completed,0)=0 AND COALESCE(r.completed,0)=0
+        THEN COALESCE(p.last_opened_at,r.last_opened_at,-1) ELSE -1 END DESC,
+      i.order_index,i.id LIMIT 1""",
+          variables: [drift.Variable(libraryId)],
+          readsFrom: {
+            database.items,
+            database.playbackProgress,
+            database.readingProgress,
+          },
+        )
+        .getSingleOrNull();
+    return row == null ? null : database.items.map(row.data);
   }
 
   Future<void> _rescan() async {
@@ -1227,7 +1228,7 @@ class _LessonToolbar extends StatelessWidget {
   }
 }
 
-class _LessonList extends StatelessWidget {
+class _LessonList extends StatefulWidget {
   const _LessonList({
     required this.database,
     required this.section,
@@ -1247,11 +1248,41 @@ class _LessonList extends StatelessWidget {
   final ValueChanged<Item> onEditTitle;
 
   @override
+  State<_LessonList> createState() => _LessonListState();
+}
+
+class _LessonListState extends State<_LessonList> {
+  (int, String, String)? _after;
+  final _previous = <(int, String, String)?>[];
+  @override
+  void didUpdateWidget(covariant _LessonList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.section.id != widget.section.id ||
+        oldWidget.query != widget.query ||
+        oldWidget.filter != widget.filter) {
+      _after = null;
+      _previous.clear();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final database = widget.database,
+        section = widget.section,
+        query = widget.query,
+        filter = widget.filter;
+    final onOpen = widget.onOpen,
+        onCompletion = widget.onCompletion,
+        onEditTitle = widget.onEditTitle;
     return StudyPageTransition(
       selection: section.id,
       child: StreamBuilder<List<ItemProgressEntry>>(
-        stream: database.watchItemProgressForSection(section.id),
+        stream: database.watchItemProgressForSection(
+          section.id,
+          search: query,
+          filter: filter.name,
+          after: _after,
+        ),
         builder: (context, snapshot) {
           if (snapshot.hasError) {
             return const ContentState(
@@ -1268,62 +1299,76 @@ class _LessonList extends StatelessWidget {
           }
           final all = snapshot.data ?? const [];
           if (all.isEmpty) {
-            return const ContentState(
-              icon: Icons.inbox_outlined,
-              title: 'This section is empty',
-              message:
-                  'Add supported files to the folder and rescan the library.',
-              compact: true,
+            return Column(
+              children: [
+                const Expanded(
+                  child: ContentState(
+                    icon: Icons.filter_alt_off_rounded,
+                    title: 'No matching lessons',
+                    message: 'Try another search or progress filter.',
+                    compact: true,
+                  ),
+                ),
+                if (_previous.isNotEmpty)
+                  TextButton(
+                    onPressed: () => setState(() {
+                      _after = _previous.removeLast();
+                    }),
+                    child: const Text('Previous page'),
+                  ),
+              ],
             );
           }
-          final normalized = query.trim().toLowerCase();
-          final entries = all.where((entry) {
-            final item = entry.item;
-            final matchesQuery =
-                normalized.isEmpty ||
-                cleanDisplayTitle(
-                  item.userTitle ?? item.title,
-                ).toLowerCase().contains(normalized) ||
-                item.filename.toLowerCase().contains(normalized);
-            final matchesFilter = switch (filter) {
-              _LessonFilter.all => true,
-              _LessonFilter.inProgress =>
-                !entry.completed &&
-                    entry.progressPercent > 0 &&
-                    !item.unavailable,
-              _LessonFilter.completed => entry.completed,
-              _LessonFilter.missing => item.unavailable,
-            };
-            return matchesQuery && matchesFilter;
-          }).toList();
-          if (entries.isEmpty) {
-            return const ContentState(
-              icon: Icons.filter_alt_off_rounded,
-              title: 'No matching lessons',
-              message:
-                  'Try another search or choose a different progress filter.',
-              compact: true,
-            );
-          }
-          return StudySurface(
-            padding: EdgeInsets.zero,
-            child: ListView.separated(
-              padding: const EdgeInsets.all(AppSpace.xs),
-              itemCount: entries.length,
-              separatorBuilder: (_, _) =>
-                  const Divider(indent: 76, endIndent: AppSpace.sm),
-              itemBuilder: (context, index) {
-                final entry = entries[index];
-                return _LessonRow(
-                  index: index,
-                  entry: entry,
-                  onOpen: () => onOpen(entry.item),
-                  onCompletion: (completed) =>
-                      onCompletion(entry.item, completed),
-                  onEditTitle: () => onEditTitle(entry.item),
-                );
-              },
-            ),
+          final entries = all.take(64).toList();
+          return Column(
+            children: [
+              Expanded(
+                child: StudySurface(
+                  padding: EdgeInsets.zero,
+                  child: ListView.separated(
+                    padding: const EdgeInsets.all(AppSpace.xs),
+                    itemCount: entries.length,
+                    separatorBuilder: (_, _) =>
+                        const Divider(indent: 76, endIndent: AppSpace.sm),
+                    itemBuilder: (context, index) {
+                      final entry = entries[index];
+                      return _LessonRow(
+                        index: index,
+                        entry: entry,
+                        onOpen: () => onOpen(entry.item),
+                        onCompletion: (completed) =>
+                            onCompletion(entry.item, completed),
+                        onEditTitle: () => onEditTitle(entry.item),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text('Page ${_previous.length + 1}'),
+                  TextButton(
+                    onPressed: _previous.isEmpty
+                        ? null
+                        : () => setState(() {
+                            _after = _previous.removeLast();
+                          }),
+                    child: const Text('Previous'),
+                  ),
+                  TextButton(
+                    onPressed: all.length <= 64
+                        ? null
+                        : () => setState(() {
+                            final last = entries.last.item;
+                            _previous.add(_after);
+                            _after = (last.orderIndex, last.title, last.id);
+                          }),
+                    child: const Text('Next'),
+                  ),
+                ],
+              ),
+            ],
           );
         },
       ),

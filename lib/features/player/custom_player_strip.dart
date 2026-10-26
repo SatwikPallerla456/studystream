@@ -19,8 +19,10 @@ class CustomPlayerStrip extends StatefulWidget {
     this.onCustomize,
     this.onTogglePlay,
     this.onSnapshot,
+    this.onSeek,
   });
   final Future<void> Function()? onSnapshot;
+  final Future<void> Function(Duration)? onSeek;
   final PlaybackEngine player;
   final AppDatabase database;
   final VoidCallback? onTracks,
@@ -71,6 +73,9 @@ class _CustomPlayerStripState extends State<CustomPlayerStrip> {
         );
     }
   }
+
+  Future<void> seek(Duration position) =>
+      (widget.onSeek ?? widget.player.seek)(position);
 
   Widget button(String title, IconData icon, Future<void> Function()? action) =>
       IconButton(
@@ -130,8 +135,7 @@ class _CustomPlayerStripState extends State<CustomPlayerStrip> {
                 value: position,
                 max: duration > 0 ? duration : 1,
                 onChanged: duration > 0
-                    ? (v) =>
-                          _run(() => p.seek(Duration(milliseconds: v.round())))
+                    ? (v) => _run(() => seek(Duration(milliseconds: v.round())))
                     : null,
               ),
               Text(
@@ -180,12 +184,12 @@ class _CustomPlayerStripState extends State<CustomPlayerStrip> {
             button(
               'Back 10 seconds',
               Icons.replay_10,
-              () => p.seek(p.state.position - const Duration(seconds: 10)),
+              () => seek(p.state.position - const Duration(seconds: 10)),
             ),
             button(
               'Forward 10 seconds',
               Icons.forward_10,
-              () => p.seek(p.state.position + const Duration(seconds: 10)),
+              () => seek(p.state.position + const Duration(seconds: 10)),
             ),
           ],
         ),

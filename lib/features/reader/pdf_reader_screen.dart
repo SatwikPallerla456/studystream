@@ -1,3 +1,4 @@
+import '../../data/sync/sync_state_store.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
@@ -144,6 +145,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       _filePath = item.filePath;
       _writer =
           ReadingProgressWriter(
+              initialContext: _session!.progressContext,
               database: _database,
               item: item,
               completionThreshold: preferences.completionThreshold,
@@ -153,6 +155,8 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
             ..pagesVisited = (saved?.percentRead ?? 0) > 0 ? 2 : 1
             ..zoom = saved?.zoom ?? 1
             ..readingMode = saved?.readingMode ?? 'fitWidth';
+      if (widget.initialPage != null || widget.initialStudyAnchor != null)
+        _writer?.markPositionIntent();
       if (mounted) setState(() {});
     } catch (error) {
       if (!mounted) return;
@@ -250,6 +254,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     if (_presentation != null &&
         _presentation!.cellFor(page) == _presentation!.cellFor(_currentPage))
       return;
+    if (page < _currentPage) _writer?.markPositionIntent();
     setState(() => _currentPage = page);
     _visitedPages.add(page);
     _sampleBackground();
@@ -287,6 +292,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       '$_layoutMode:$_rtl:$_totalPages:${sha256.convert(utf8.encode(jsonEncode([_readerOptions['coverSingle'], _readerOptions['singlePages'], _readerOptions['pairingStarts']])))}';
 
   Future<void> _restoreLocator(ReaderLocator locator) async {
+    if (intentional) _writer?.markPositionIntent();
     final number = locator.page.clamp(1, _totalPages);
     final rect = _controller.layout.pageLayouts[number - 1];
     final saved = ReaderViewportState.decode(locator.viewState);
@@ -352,11 +358,22 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     final writer = _writer;
     if (writer == null || !_ready || _restoring || !_controller.isReady) return;
     writer
+      ..currentPage = _currentPage
+      ..pagesVisited = _visitedPages.length
       ..zoom = _controller.currentZoom
       ..scrollOffset = _controller.visibleRect.top;
     final locator = _captureLocator();
-    await writer.save();
-    if (locator != null) await _session?.write(locator: locator);
+    Map<String, dynamic>? accepted;
+    try {
+      await writer.save(onSaved: (context) => accepted = context);
+      if (locator != null)
+        await _session?.write(locator: locator, progressContext: accepted);
+    } on ProgressContextChanged catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
   }
 
   Future<void> _jumpToPage([int? requested]) async {
@@ -395,6 +412,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       page = value;
     }
     if (page == null || !_ready) return;
+    _writer?.markPositionIntent();
     _currentPage = page.clamp(1, _totalPages);
     await _controller.goToPage(pageNumber: _currentPage);
     _sampleBackground();
@@ -557,7 +575,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       try {
-        if (anchor != null) await _goToAnchor(anchor);
+        if (anchor != null) await _goToAnchor(anchor, intentional: false);
       } finally {
         _restoring = false;
         if (mounted) _sampleBackground();
@@ -676,7 +694,10 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     context.go(libraryId == null ? '/' : '/library/$libraryId');
   }
 
-  Future<void> _goToAnchor(ReaderLocator locator) async {
+  Future<void> _goToAnchor(
+    ReaderLocator locator, {
+    bool intentional = true,
+  }) async {
     if (!_ready || !locator.compatible(_item!.id, _revision)) {
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
@@ -688,6 +709,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
         );
       return;
     }
+    if (intentional) _writer?.markPositionIntent();
     final number = locator.page.clamp(1, _totalPages);
     _currentPage = number;
     await _restoreLocator(locator);
@@ -726,6 +748,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   }
 
   Future<void> _goToTextAnchor(ReaderTextAnchor anchor) async {
+    _writer?.markPositionIntent();
     if (!_ready ||
         !anchor.compatible(_item!.id, _revision) ||
         anchor.unit != 'pdfCharacter' ||
@@ -928,10 +951,16 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     }
     final locator = _ready && !_restoring ? _captureLocator() : null;
     unawaited(
-      Future.wait([
-        if (_writer != null) _writer!.dispose(),
-        if (locator != null) _session!.write(locator: locator),
-      ]),
+      () async {
+        await _writer?.dispose();
+        if (locator != null)
+          await _session?.write(
+            locator: locator,
+            progressContext: await _writer?.syncContext,
+          );
+      }().catchError((Object _) {
+        /* Preserve the newer synced position. */
+      }),
     );
     super.dispose();
   }
@@ -1173,7 +1202,8 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
                   WidgetsBinding.instance.addPostFrameCallback((_) async {
                     if (!mounted) return;
                     _controller.invalidate();
-                    if (anchor != null) await _goToAnchor(anchor);
+                    if (anchor != null)
+                      await _goToAnchor(anchor, intentional: false);
                   });
               }
               return Stack(

@@ -25,6 +25,10 @@ class EmbeddedAudioTags {
           'TIT2': 'title',
           'TPE1': 'artist',
           'TALB': 'album',
+          'TPE2': 'albumArtist',
+          'TCOM': 'composer',
+          'TEXT': 'lyricist',
+          'TPUB': 'label',
           'TYER': 'year',
           'TDRC': 'year',
           'TRCK': 'track',
@@ -50,6 +54,35 @@ class EmbeddedAudioTags {
             if (bytes.length != size) break;
             retained += size;
             _put(tags, field, _text(bytes));
+          }
+          if (id == 'USLT' &&
+              (flags & 0xff) == 0 &&
+              size >= 5 &&
+              size <= 65536 &&
+              retained + size <= maxBytes) {
+            final bytes = await handle.read(size);
+            retained += size;
+            if (bytes.length == size) {
+              final wide = bytes[0] == 1 || bytes[0] == 2;
+              var start = 4;
+              if (wide) {
+                while (start + 1 < bytes.length &&
+                    (bytes[start] != 0 || bytes[start + 1] != 0)) {
+                  start += 2;
+                }
+                start += 2;
+              } else {
+                while (start < bytes.length && bytes[start] != 0) {
+                  start++;
+                }
+                start++;
+              }
+              if (start < bytes.length)
+                tags['lyrics'] = _text([
+                  bytes[0],
+                  ...bytes.sublist(start),
+                ]).trim();
+            }
           }
           // Large picture/unknown frames are skipped without allocating their body.
           offset += 10 + size;
@@ -86,6 +119,12 @@ class EmbeddedAudioTags {
               'TITLE': 'title',
               'ARTIST': 'artist',
               'ALBUM': 'album',
+              'ALBUMARTIST': 'albumArtist',
+              'COMPOSER': 'composer',
+              'LYRICIST': 'lyricist',
+              'LYRICS': 'lyrics',
+              'UNSYNCEDLYRICS': 'lyrics',
+              'SYNCEDLYRICS': 'lrc',
               'DATE': 'year',
               'TRACKNUMBER': 'track',
               'DISCNUMBER': 'disc',

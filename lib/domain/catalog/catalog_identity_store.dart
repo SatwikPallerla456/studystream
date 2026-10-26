@@ -156,7 +156,7 @@ class CatalogIdentityStore {
       );
       await reindex(item);
     }
-    if (await db.getSetting('catalog.localHints.version') != '4') {
+    if (await db.getSetting('catalog.localHints.version') != '5') {
       var cursor = '';
       while (true) {
         final rows = await db
@@ -177,7 +177,7 @@ class CatalogIdentityStore {
         });
         cursor = rows.last.data['id'] as String;
       }
-      await db.setSetting('catalog.localHints.version', '4');
+      await db.setSetting('catalog.localHints.version', '5');
     }
     final unindexed = await db
         .customSelect(
@@ -636,7 +636,7 @@ class CatalogIdentityStore {
         item.id,
         item.libraryId,
         item.userTitle ?? metadata['title'] ?? item.title,
-        '${metadata['author'] ?? ''} ${metadata['artist'] ?? ''} ${metadata['credits'] ?? ''} ${metadata['album'] ?? ''} ${metadata['series'] ?? ''} ${metadata['show'] ?? ''}',
+        '${metadata['author'] ?? ''} ${metadata['artist'] ?? ''} ${metadata['albumArtist'] ?? ''} ${metadata['composer'] ?? ''} ${metadata['lyricist'] ?? ''} ${metadata['credits'] ?? ''} ${metadata['album'] ?? ''} ${metadata['series'] ?? ''} ${metadata['show'] ?? ''}',
         '$tags ${item.filename}',
       ],
     );
@@ -651,6 +651,10 @@ class CatalogIdentityStore {
       'category',
       'artist',
       'album',
+      'edition',
+      'year',
+      'albumArtist',
+      'genres',
       'author',
       'series',
       'volume',
@@ -732,6 +736,14 @@ class CatalogIdentityStore {
       'series',
       'volume',
       'chapter',
+      'albumArtist',
+      'composer',
+      'credits',
+      'lyrics',
+      'lrc',
+      'lyricist',
+      'label',
+      'genres',
     },
     'study_anchors': {'locator', 'kind', 'text', 'offset', 'textRange'},
     'catalog_works': {

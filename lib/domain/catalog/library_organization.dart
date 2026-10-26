@@ -15,7 +15,7 @@ import 'media_probe.dart';
 class LibraryOrganization {
   const LibraryOrganization(this.db);
   final AppDatabase db;
-  static const version = 1;
+  static const version = 2;
   Future<void> organize(Item item, {required bool Function() isCurrent}) async {
     final before = await File(item.filePath).stat();
     if (before.type != FileSystemEntityType.file ||

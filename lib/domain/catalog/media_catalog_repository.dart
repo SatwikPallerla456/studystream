@@ -7,6 +7,8 @@ import '../../core/utils/id_utils.dart';
 import '../../data/indexer/library_source_store.dart';
 import 'media_record_contract.dart';
 import 'catalog_identity_store.dart';
+import '../../data/sync/sync_state_store.dart';
+import '../services/sync_intent.dart';
 
 enum LibraryKind {
   mixed('Mixed'),
@@ -60,13 +62,20 @@ class MediaRecord {
 class MediaCatalogRepository {
   MediaCatalogRepository(this.db);
   final AppDatabase db;
-  Future<List<MediaRecord>> records(String libraryId, {String? kind}) async =>
+  Future<List<MediaRecord>> records(
+    String libraryId, {
+    String? kind,
+    String after = '',
+    int limit = 100,
+  }) async =>
       (await db
               .customSelect(
-                'SELECT * FROM media_records WHERE library_id = ? AND deleted = 0${kind == null ? '' : ' AND kind = ?'} ORDER BY updated_at DESC',
+                'SELECT * FROM media_records WHERE library_id = ? AND deleted = 0${kind == null ? '' : ' AND kind = ?'}  AND id > ? ORDER BY id LIMIT ?',
                 variables: [
                   Variable(libraryId),
                   if (kind != null) Variable(kind),
+                  Variable(after),
+                  Variable(limit.clamp(1, 200)),
                 ],
               )
               .get())
@@ -79,7 +88,29 @@ class MediaCatalogRepository {
           variables: [Variable(id)],
         )
         .getSingleOrNull();
-    return row == null ? null : MediaRecord(row.data);
+    if (row == null) return null;
+    if (row.data['kind'] == 'reader' && row.data['item_id'] is String) {
+      final decorated = await SyncStateStore(db).decorateFields(row.data);
+      final field = (decorated['fieldState'] as Map?)?['fields']?['locator'];
+      final ctx = await SyncStateStore(
+        db,
+      ).context('reading', row.data['item_id'] as String);
+      if (field == null
+          ? SyncIntent.fenced(ctx)
+          : field['removed'] == true ||
+                field['progress'] == null && SyncIntent.fenced(ctx) ||
+                field['progress'] != null &&
+                    !SyncIntent.samePositionContext(
+                      ctx,
+                      Map<String, dynamic>.from(field['progress'] as Map),
+                    )) {
+        final payload = Map<String, dynamic>.from(
+          jsonDecode(row.data['payload'] as String) as Map,
+        )..remove('locator');
+        return MediaRecord({...row.data, 'payload': jsonEncode(payload)});
+      }
+    }
+    return MediaRecord(row.data);
   }
 
   Future<LibraryKind> libraryKind(String libraryId) async {
@@ -97,6 +128,7 @@ class MediaCatalogRepository {
     Map<String, dynamic> data, {
     String? itemId,
     bool deleted = false,
+    Set<String>? changedFields,
   }) async {
     MediaRecordContract.validate(
       id: id,
@@ -121,20 +153,24 @@ class MediaCatalogRepository {
           .getSingleOrNull();
       final previous = existing?.data['updated_at'] as int? ?? 0;
       final now = DateTime.now().millisecondsSinceEpoch;
-      await db.importMediaRows({
-        'mediaRecords': [
-          {
-            'id': id,
-            'kind': kind,
-            'library_id': libraryId,
-            'item_id': itemId,
-            'payload': jsonEncode(data),
-            'updated_at': now > previous ? now : previous + 1,
-            'device_id': await db.getDeviceId(),
-            'deleted': deleted ? 1 : 0,
-          },
-        ],
-      });
+      await db.importMediaRows(
+        {
+          'mediaRecords': [
+            {
+              'id': id,
+              'kind': kind,
+              'library_id': libraryId,
+              'item_id': itemId,
+              'payload': jsonEncode(data),
+              'updated_at': now > previous ? now : previous + 1,
+              'device_id': await db.getDeviceId(),
+              'deleted': deleted ? 1 : 0,
+            },
+          ],
+        },
+        localWrite: true,
+        changedFields: changedFields,
+      );
       if (itemId != null && {'metadata', 'organization'}.contains(kind))
         await CatalogIdentityStore(db).reindex((await db.getItemById(itemId))!);
     });
@@ -142,10 +178,13 @@ class MediaCatalogRepository {
 
   Future<void> setLibraryKind(String libraryId, LibraryKind kind) async {
     final old = (await record('library:$libraryId'))?.data ?? {};
-    await save('library:$libraryId', 'library', libraryId, {
-      ...old,
-      'type': kind.name,
-    });
+    await save(
+      'library:$libraryId',
+      'library',
+      libraryId,
+      {...old, 'type': kind.name},
+      changedFields: {'type'},
+    );
     var cursor = '';
     while (true) {
       final rows = await db
@@ -294,10 +333,14 @@ class MediaCatalogRepository {
       });
   Future<void> setFavorite(Item item, bool value) => db.transaction(() async {
     final old = (await record('organization:${item.id}'))?.data ?? {};
-    await save('organization:${item.id}', 'organization', item.libraryId, {
-      ...old,
-      'favorite': value,
-    }, itemId: item.id);
+    await save(
+      'organization:${item.id}',
+      'organization',
+      item.libraryId,
+      {...old, 'favorite': value},
+      itemId: item.id,
+      changedFields: {'favorite'},
+    );
   });
 
   Future<void> setTags(Item item, List<String> tags) =>
@@ -312,10 +355,14 @@ class MediaCatalogRepository {
             'Use at most 100 tags of up to 200 characters.',
           );
         final old = (await record('organization:${item.id}'))?.data ?? {};
-        await save('organization:${item.id}', 'organization', item.libraryId, {
-          ...old,
-          'tags': unique.values.toList(),
-        }, itemId: item.id);
+        await save(
+          'organization:${item.id}',
+          'organization',
+          item.libraryId,
+          {...old, 'tags': unique.values.toList()},
+          itemId: item.id,
+          changedFields: {'tags'},
+        );
       });
 
   Future<void> saveCollection(

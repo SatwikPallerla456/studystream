@@ -13,6 +13,7 @@ class CategoryScope {
   const CategoryScope({
     required this.kind,
     this.libraryId,
+    this.libraryIds,
     this.filters = const {},
     this.query = '',
     this.status = ShelfStatus.all,
@@ -23,6 +24,7 @@ class CategoryScope {
   });
   final LibraryKind kind;
   final String? libraryId;
+  final Set<String>? libraryIds;
 
   /// Empty value selects the explicit missing-metadata bucket.
   final Map<String, String> filters;
@@ -97,6 +99,7 @@ class CategoryBrowseRepository {
     'season',
     'artist',
     'album',
+    'edition',
     'author',
     'series',
     'month',
@@ -124,6 +127,16 @@ class CategoryBrowseRepository {
       "EXISTS(SELECT 1 FROM catalog_facets c WHERE c.item_id=i.id AND c.field='category' AND c.value=?)",
     ];
     final values = <Variable>[Variable(scope.kind.name)];
+    if (scope.libraryIds != null) {
+      if (scope.libraryIds!.isEmpty) {
+        clauses.add('0');
+      } else {
+        clauses.add(
+          'i.library_id IN (${scope.libraryIds!.map((_) => '?').join(',')})',
+        );
+        values.addAll(scope.libraryIds!.map(Variable.new));
+      }
+    }
     if (scope.libraryId != null) {
       clauses.add('i.library_id=?');
       values.add(Variable(scope.libraryId!));

@@ -5,10 +5,16 @@ import '../../data/db/app_database.dart';
 import '../catalog/media_catalog_repository.dart';
 import '../catalog/media_record_contract.dart';
 import 'reader_contract.dart';
+import '../../data/sync/sync_state_store.dart';
 
 /// Serial writes capture immutable changes; resume never materializes defaults.
 class ReaderSessionStore {
-  ReaderSessionStore(this.db, this.item) : catalog = MediaCatalogRepository(db);
+  ReaderSessionStore(this.db, this.item)
+    : catalog = MediaCatalogRepository(db) {
+    _context = SyncStateStore(db).context('reading', item.id);
+  }
+  late Future<Map<String, dynamic>> _context;
+  Future<Map<String, dynamic>> get progressContext => _context;
   final AppDatabase db;
   final Item item;
   final MediaCatalogRepository catalog;
@@ -44,6 +50,7 @@ class ReaderSessionStore {
 
   Future<void> write({
     ReaderLocator? locator,
+    Map<String, dynamic>? progressContext,
     Map<String, dynamic> changes = const {},
     Set<String> reset = const {},
   }) {
@@ -52,6 +59,12 @@ class ReaderSessionStore {
     final encoded = locator?.encode();
     final write = _tail.then(
       (_) => db.transaction(() async {
+        if (encoded != null)
+          await SyncStateStore(db).requireContext(
+            'reading',
+            item.id,
+            progressContext ?? await _context,
+          );
         final old = (await catalog.record('reader:${item.id}'))?.data ?? {};
         final next = <String, dynamic>{...old, ...captured};
         for (final key in removals) {
@@ -64,6 +77,11 @@ class ReaderSessionStore {
           item.libraryId,
           next,
           itemId: item.id,
+          changedFields: {
+            ...captured.keys,
+            ...removals,
+            if (encoded != null) 'locator',
+          },
         );
       }),
     );
@@ -79,7 +97,7 @@ class ReaderSessionStore {
       ...old,
       for (final key in ReaderPreferencesStore.sharedKeys)
         if (resolved.containsKey(key)) key: resolved[key],
-    });
+    }, changedFields: ReaderPreferencesStore.sharedKeys);
   });
   Future<void> get flushed => _tail;
 }
@@ -204,7 +222,13 @@ class ReaderPreferencesStore {
       );
       await db.setSetting('reader_defaults', jsonEncode(project(next)));
     } else if (scope == ReaderPreferenceScope.library) {
-      await catalog.save('library:$libraryId', 'library', libraryId!, next);
+      await catalog.save(
+        'library:$libraryId',
+        'library',
+        libraryId!,
+        next,
+        changedFields: {...changes.keys, ...reset},
+      );
     } else {
       await catalog.save(
         'reader:${item!.id}',
@@ -212,6 +236,7 @@ class ReaderPreferencesStore {
         libraryId!,
         next,
         itemId: item!.id,
+        changedFields: {...changes.keys, ...reset},
       );
     }
   });

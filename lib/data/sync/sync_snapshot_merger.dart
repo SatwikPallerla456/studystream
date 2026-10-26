@@ -1,4 +1,6 @@
 import 'package:drift/drift.dart';
+import 'sync_state_store.dart';
+import '../../domain/services/sync_intent.dart';
 
 import '../../domain/services/sync_conflict_resolver.dart';
 import '../db/app_database.dart';
@@ -55,6 +57,9 @@ class SyncSnapshotMerger {
               lastScannedAt: Value(local.lastScannedAt),
               unavailable: local.unavailable,
             );
+        if (SyncIntent.canonical(local.toJson()) ==
+            SyncIntent.canonical(selected.toJson()))
+          continue;
         await database
             .into(database.libraries)
             .insertOnConflictUpdate(selected);
@@ -86,7 +91,11 @@ class SyncSnapshotMerger {
               completedCount: local.completedCount,
               unavailable: local.unavailable,
             );
-        await database.into(database.sections).insertOnConflictUpdate(selected);
+        if (SyncIntent.canonical(local.toJson()) !=
+            SyncIntent.canonical(selected.toJson()))
+          await database
+              .into(database.sections)
+              .insertOnConflictUpdate(selected);
       }
 
       for (final row in rows('items')) {
@@ -120,46 +129,18 @@ class SyncSnapshotMerger {
               unavailable: local.unavailable,
               createdAt: local.createdAt,
             );
-        await database.into(database.items).insertOnConflictUpdate(selected);
+        if (SyncIntent.canonical(local.toJson()) !=
+            SyncIntent.canonical(selected.toJson()))
+          await database.into(database.items).insertOnConflictUpdate(selected);
       }
 
-      for (final row in rows('playback')) {
-        final remote = PlaybackProgressData.fromJson(row);
-        final item = await database.getItemById(remote.itemId);
-        if (item == null || !allowed(item.libraryId)) continue;
-        affectedSections.add(item.sectionId);
-        final local = await database.getPlaybackByItemId(remote.itemId);
-        final selected = local == null
-            ? remote
-            : PlaybackProgressData.fromJson(
-                SyncConflictResolver.mergeProgress(
-                  local.toJson(),
-                  remote.toJson(),
-                ),
-              );
-        await database
-            .into(database.playbackProgress)
-            .insertOnConflictUpdate(selected);
-      }
-
-      for (final row in rows('reading')) {
-        final remote = ReadingProgressData.fromJson(row);
-        final item = await database.getItemById(remote.itemId);
-        if (item == null || !allowed(item.libraryId)) continue;
-        affectedSections.add(item.sectionId);
-        final local = await database.getReadingByItemId(remote.itemId);
-        final selected = local == null
-            ? remote
-            : ReadingProgressData.fromJson(
-                SyncConflictResolver.mergeProgress(
-                  local.toJson(),
-                  remote.toJson(),
-                ),
-              );
-        await database
-            .into(database.readingProgress)
-            .insertOnConflictUpdate(selected);
-      }
+      for (final kind in ['playback', 'reading'])
+        for (final row in rows(kind)) {
+          final item = await database.getItemById(row['itemId'] as String);
+          if (item == null || !allowed(item.libraryId)) continue;
+          affectedSections.add(item.sectionId);
+          await SyncStateStore(database).merge(kind, row);
+        }
 
       for (final row in rows('notes')) {
         final remote = Note.fromJson(row);
@@ -188,7 +169,13 @@ class SyncSnapshotMerger {
                 remote.toJson(),
               ).map(Note.fromJson);
         for (final note in selected) {
-          await database.into(database.notes).insertOnConflictUpdate(note);
+          final previous = await (database.select(
+            database.notes,
+          )..where((t) => t.id.equals(note.id))).getSingleOrNull();
+          if (previous == null ||
+              SyncIntent.canonical(previous.toJson()) !=
+                  SyncIntent.canonical(note.toJson()))
+            await database.into(database.notes).insertOnConflictUpdate(note);
         }
       }
 
@@ -217,9 +204,15 @@ class SyncSnapshotMerger {
                 remote.toJson(),
               ).map(Bookmark.fromJson);
         for (final bookmark in selected) {
-          await database
-              .into(database.bookmarks)
-              .insertOnConflictUpdate(bookmark);
+          final previous = await (database.select(
+            database.bookmarks,
+          )..where((t) => t.id.equals(bookmark.id))).getSingleOrNull();
+          if (previous == null ||
+              SyncIntent.canonical(previous.toJson()) !=
+                  SyncIntent.canonical(bookmark.toJson()))
+            await database
+                .into(database.bookmarks)
+                .insertOnConflictUpdate(bookmark);
         }
       }
       await database.importMediaRows(

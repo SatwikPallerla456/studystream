@@ -29,10 +29,60 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
   String? _libraryId;
   String? _sectionId;
   String? _itemId;
-  List<Section> _sections = const [];
-  List<Item> _items = const [];
   _StudyKind _kind = _StudyKind.all;
   _StudySort _sort = _StudySort.updated;
+  (double, String)? _pageCursor;
+  final List<(double, String)?> _previousPages = [];
+  void _filterChanged(VoidCallback change) => setState(() {
+    change();
+    _pageCursor = null;
+    _previousPages.clear();
+    _contextCache.clear();
+  });
+  Widget _paged(Widget child, bool more, (double, String)? next) => Column(
+    children: [
+      Expanded(child: child),
+      Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Text('Page ${_previousPages.length + 1}'),
+          TextButton(
+            onPressed: _previousPages.isEmpty
+                ? null
+                : () => setState(() {
+                    _pageCursor = _previousPages.removeLast();
+                    _contextCache.clear();
+                  }),
+            child: const Text('Previous'),
+          ),
+          TextButton(
+            onPressed: !more || next == null
+                ? null
+                : () => setState(() {
+                    _previousPages.add(_pageCursor);
+                    _pageCursor = next;
+                    _contextCache.clear();
+                  }),
+            child: const Text('Next'),
+          ),
+        ],
+      ),
+    ],
+  );
+  (double, String) _noteCursor(Note row) => (
+    _sort == _StudySort.location
+        ? _locationValue(row.positionSeconds, row.pageNumber)
+        : (_sort == _StudySort.created ? row.createdAt : row.updatedAt)
+              .toDouble(),
+    row.id,
+  );
+  (double, String) _bookmarkCursor(Bookmark row) => (
+    _sort == _StudySort.location
+        ? _locationValue(row.positionSeconds, row.pageNumber)
+        : (_sort == _StudySort.created ? row.createdAt : row.updatedAt)
+              .toDouble(),
+    row.id,
+  );
 
   @override
   void dispose() {
@@ -41,20 +91,10 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
   }
 
   Future<void> _selectLibrary(AppDatabase database, String? libraryId) async {
-    setState(() {
+    _filterChanged(() {
       _libraryId = libraryId;
       _sectionId = null;
       _itemId = null;
-      _sections = const [];
-      _items = const [];
-    });
-    if (libraryId == null) return;
-    final sections = await database.getSectionsForLibrary(libraryId);
-    final items = await database.getItemsForLibrary(libraryId);
-    if (!mounted || _libraryId != libraryId) return;
-    setState(() {
-      _sections = sections;
-      _items = items;
     });
   }
 
@@ -64,6 +104,8 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
     String? itemId,
   ) {
     final key = '$libraryId:${itemId ?? 'general'}';
+    if (_contextCache.length >= 128 && !_contextCache.containsKey(key))
+      _contextCache.remove(_contextCache.keys.first);
     return _contextCache.putIfAbsent(key, () async {
       final library = await database.getLibraryById(libraryId);
       if (itemId == null) {
@@ -83,14 +125,9 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
           item: null,
         );
       }
-      final sections = await database.getSectionsForLibrary(libraryId);
-      Section? section;
-      for (final candidate in sections) {
-        if (candidate.id == item.sectionId) {
-          section = candidate;
-          break;
-        }
-      }
+      final section = await (database.select(
+        database.sections,
+      )..where((t) => t.id.equals(item.sectionId))).getSingleOrNull();
       return _EntryContext(
         libraryTitle: library?.title ?? 'Unknown library',
         sectionTitle: section?.title ?? 'Unknown section',
@@ -337,14 +374,14 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                   ],
                   selected: {_tab},
                   onSelectionChanged: (value) =>
-                      setState(() => _tab = value.first),
+                      _filterChanged(() => _tab = value.first),
                 ),
               ),
               const SizedBox(height: AppSpace.md),
               StudySearchField(
                 controller: _searchController,
                 hintText: _tab == 0 ? 'Search notes' : 'Search bookmarks',
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) => _filterChanged(() {}),
               ),
               const SizedBox(height: AppSpace.sm),
               _StudyFilters(
@@ -353,29 +390,43 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                 libraryId: _libraryId,
                 sectionId: _sectionId,
                 itemId: _itemId,
-                sections: _sections,
-                items: _items,
                 kind: _kind,
                 sort: _sort,
                 onLibrary: (value) => _selectLibrary(database, value),
-                onSection: (value) => setState(() {
+                onSection: (value) => _filterChanged(() {
                   _sectionId = value;
                   _itemId = null;
                 }),
-                onItem: (value) => setState(() => _itemId = value),
-                onKind: (value) => setState(() => _kind = value),
-                onSort: (value) => setState(() => _sort = value),
+                onItem: (value) => _filterChanged(() => _itemId = value),
+                onKind: (value) => _filterChanged(() => _kind = value),
+                onSort: (value) => _filterChanged(() => _sort = value),
               ),
               const SizedBox(height: AppSpace.md),
               Expanded(
                 child: _tab == 0
                     ? StreamBuilder<List<Note>>(
-                        stream: database.watchNotes(),
+                        stream: database.watchNotes(
+                          libraryId: _libraryId,
+                          itemId: _itemId,
+                          sectionId: _sectionId,
+                          search: _searchController.text,
+                          kind: _kind.name,
+                          sort: _sort.name,
+                          after: _pageCursor,
+                        ),
                         builder: (context, snapshot) =>
                             _notes(database, snapshot, libraries: libraries),
                       )
                     : StreamBuilder<List<Bookmark>>(
-                        stream: database.watchBookmarks(),
+                        stream: database.watchBookmarks(
+                          libraryId: _libraryId,
+                          itemId: _itemId,
+                          sectionId: _sectionId,
+                          search: _searchController.text,
+                          kind: _kind.name,
+                          sort: _sort.name,
+                          after: _pageCursor,
+                        ),
                         builder: (context, snapshot) => _bookmarks(
                           database,
                           snapshot,
@@ -409,7 +460,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
       return const ContentLoadingState(label: 'Loading notes');
     }
     final notes = snapshot.data ?? const [];
-    final visible = _filterNotes(notes);
+    final visible = notes.take(64).toList();
     final emptyState = notes.isEmpty
         ? const ContentState(
             icon: Icons.note_add_outlined,
@@ -422,37 +473,41 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
             title: 'No matching notes',
             message: 'Try another search, location type, or library filter.',
           );
-    return StudyAnimatedList<Note>(
-      key: const ValueKey('study-notes'),
-      items: visible,
-      itemId: (note) => note.id,
-      emptyState: emptyState,
-      padding: const EdgeInsets.all(AppSpace.xs),
-      separatorBuilder: (_, _) =>
-          const Divider(indent: 76, endIndent: AppSpace.sm),
-      listBuilder: (_, child) =>
-          StudySurface(padding: EdgeInsets.zero, child: child),
-      itemBuilder: (context, note) {
-        return _StudyEntryRow(
-          icon: Icons.notes_rounded,
-          tone: StudyStatusTone.info,
-          typeLabel: 'Note',
-          title: note.content,
-          location: _location(note.positionSeconds, note.pageNumber),
-          updatedAt: note.updatedAt,
-          contextFuture: _entryContext(database, note.libraryId, note.itemId),
-          onOpen: note.itemId == null
-              ? null
-              : () => _openItem(
-                  database,
-                  note.itemId!,
-                  positionSeconds: note.positionSeconds,
-                  pageNumber: note.pageNumber,
-                ),
-          onEdit: () => _editNote(database, note),
-          onDelete: () => _deleteNote(database, note),
-        );
-      },
+    return _paged(
+      StudyAnimatedList<Note>(
+        key: const ValueKey('study-notes'),
+        items: visible,
+        itemId: (note) => note.id,
+        emptyState: emptyState,
+        padding: const EdgeInsets.all(AppSpace.xs),
+        separatorBuilder: (_, _) =>
+            const Divider(indent: 76, endIndent: AppSpace.sm),
+        listBuilder: (_, child) =>
+            StudySurface(padding: EdgeInsets.zero, child: child),
+        itemBuilder: (context, note) {
+          return _StudyEntryRow(
+            icon: Icons.notes_rounded,
+            tone: StudyStatusTone.info,
+            typeLabel: 'Note',
+            title: note.content,
+            location: _location(note.positionSeconds, note.pageNumber),
+            updatedAt: note.updatedAt,
+            contextFuture: _entryContext(database, note.libraryId, note.itemId),
+            onOpen: note.itemId == null
+                ? null
+                : () => _openItem(
+                    database,
+                    note.itemId!,
+                    positionSeconds: note.positionSeconds,
+                    pageNumber: note.pageNumber,
+                  ),
+            onEdit: () => _editNote(database, note),
+            onDelete: () => _deleteNote(database, note),
+          );
+        },
+      ),
+      notes.length > 64,
+      visible.isEmpty ? null : _noteCursor(visible.last),
     );
   }
 
@@ -475,7 +530,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
       return const ContentLoadingState(label: 'Loading bookmarks');
     }
     final bookmarks = snapshot.data ?? const [];
-    final visible = _filterBookmarks(bookmarks);
+    final visible = bookmarks.take(64).toList();
     final emptyState = bookmarks.isEmpty
         ? const ContentState(
             icon: Icons.bookmark_add_outlined,
@@ -488,107 +543,46 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
             title: 'No matching bookmarks',
             message: 'Try another search, location type, or library filter.',
           );
-    return StudyAnimatedList<Bookmark>(
-      key: const ValueKey('study-bookmarks'),
-      items: visible,
-      itemId: (bookmark) => bookmark.id,
-      emptyState: emptyState,
-      padding: const EdgeInsets.all(AppSpace.xs),
-      separatorBuilder: (_, _) =>
-          const Divider(indent: 76, endIndent: AppSpace.sm),
-      listBuilder: (_, child) =>
-          StudySurface(padding: EdgeInsets.zero, child: child),
-      itemBuilder: (context, bookmark) {
-        return _StudyEntryRow(
-          icon: Icons.bookmark_rounded,
-          tone: StudyStatusTone.warning,
-          typeLabel: 'Bookmark',
-          title: bookmark.title,
-          description: bookmark.description,
-          location: _location(bookmark.positionSeconds, bookmark.pageNumber),
-          updatedAt: bookmark.updatedAt,
-          contextFuture: _entryContext(
-            database,
-            bookmark.libraryId,
-            bookmark.itemId,
-          ),
-          onOpen: () => _openItem(
-            database,
-            bookmark.itemId,
-            positionSeconds: bookmark.positionSeconds,
-            pageNumber: bookmark.pageNumber,
-          ),
-          onEdit: () => _editBookmark(database, bookmark),
-          onDelete: () => _deleteBookmark(database, bookmark),
-        );
-      },
+    return _paged(
+      StudyAnimatedList<Bookmark>(
+        key: const ValueKey('study-bookmarks'),
+        items: visible,
+        itemId: (bookmark) => bookmark.id,
+        emptyState: emptyState,
+        padding: const EdgeInsets.all(AppSpace.xs),
+        separatorBuilder: (_, _) =>
+            const Divider(indent: 76, endIndent: AppSpace.sm),
+        listBuilder: (_, child) =>
+            StudySurface(padding: EdgeInsets.zero, child: child),
+        itemBuilder: (context, bookmark) {
+          return _StudyEntryRow(
+            icon: Icons.bookmark_rounded,
+            tone: StudyStatusTone.warning,
+            typeLabel: 'Bookmark',
+            title: bookmark.title,
+            description: bookmark.description,
+            location: _location(bookmark.positionSeconds, bookmark.pageNumber),
+            updatedAt: bookmark.updatedAt,
+            contextFuture: _entryContext(
+              database,
+              bookmark.libraryId,
+              bookmark.itemId,
+            ),
+            onOpen: () => _openItem(
+              database,
+              bookmark.itemId,
+              positionSeconds: bookmark.positionSeconds,
+              pageNumber: bookmark.pageNumber,
+            ),
+            onEdit: () => _editBookmark(database, bookmark),
+            onDelete: () => _deleteBookmark(database, bookmark),
+          );
+        },
+      ),
+      bookmarks.length > 64,
+      visible.isEmpty ? null : _bookmarkCursor(visible.last),
     );
   }
-
-  List<Note> _filterNotes(List<Note> notes) {
-    final query = _searchController.text.trim().toLowerCase();
-    final visible = notes.where((note) {
-      return (_libraryId == null || note.libraryId == _libraryId) &&
-          _matchesItem(note.itemId) &&
-          _matchesKind(note.positionSeconds, note.pageNumber) &&
-          (query.isEmpty || note.content.toLowerCase().contains(query));
-    }).toList();
-    switch (_sort) {
-      case _StudySort.updated:
-        visible.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-      case _StudySort.created:
-        visible.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      case _StudySort.location:
-        visible.sort(
-          (a, b) => _locationValue(
-            a.positionSeconds,
-            a.pageNumber,
-          ).compareTo(_locationValue(b.positionSeconds, b.pageNumber)),
-        );
-    }
-    return visible;
-  }
-
-  List<Bookmark> _filterBookmarks(List<Bookmark> bookmarks) {
-    final query = _searchController.text.trim().toLowerCase();
-    final visible = bookmarks.where((bookmark) {
-      return (_libraryId == null || bookmark.libraryId == _libraryId) &&
-          _matchesItem(bookmark.itemId) &&
-          _matchesKind(bookmark.positionSeconds, bookmark.pageNumber) &&
-          (query.isEmpty ||
-              bookmark.title.toLowerCase().contains(query) ||
-              (bookmark.description ?? '').toLowerCase().contains(query));
-    }).toList();
-    switch (_sort) {
-      case _StudySort.updated:
-        visible.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-      case _StudySort.created:
-        visible.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      case _StudySort.location:
-        visible.sort(
-          (a, b) => _locationValue(
-            a.positionSeconds,
-            a.pageNumber,
-          ).compareTo(_locationValue(b.positionSeconds, b.pageNumber)),
-        );
-    }
-    return visible;
-  }
-
-  bool _matchesItem(String? itemId) {
-    if (_itemId != null) return itemId == _itemId;
-    if (_sectionId == null) return true;
-    return _items.any(
-      (item) => item.id == itemId && item.sectionId == _sectionId,
-    );
-  }
-
-  bool _matchesKind(double? position, int? page) => switch (_kind) {
-    _StudyKind.all => true,
-    _StudyKind.timed => position != null,
-    _StudyKind.pages => page != null,
-    _StudyKind.general => position == null && page == null,
-  };
 
   static double _locationValue(double? position, int? page) =>
       page?.toDouble() ?? position ?? -1;
@@ -620,8 +614,6 @@ class _StudyFilters extends StatelessWidget {
     required this.libraryId,
     required this.sectionId,
     required this.itemId,
-    required this.sections,
-    required this.items,
     required this.kind,
     required this.sort,
     required this.onLibrary,
@@ -636,8 +628,6 @@ class _StudyFilters extends StatelessWidget {
   final String? libraryId;
   final String? sectionId;
   final String? itemId;
-  final List<Section> sections;
-  final List<Item> items;
   final _StudyKind kind;
   final _StudySort sort;
   final ValueChanged<String?> onLibrary;
@@ -652,9 +642,6 @@ class _StudyFilters extends StatelessWidget {
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 760;
         final width = compact ? constraints.maxWidth : 210.0;
-        final sectionItems = sectionId == null
-            ? items
-            : items.where((item) => item.sectionId == sectionId).toList();
         return SingleChildScrollView(
           scrollDirection: compact ? Axis.horizontal : Axis.vertical,
           child: Wrap(
@@ -687,52 +674,45 @@ class _StudyFilters extends StatelessWidget {
               ),
               SizedBox(
                 width: width,
-                child: DropdownButtonFormField<String>(
-                  initialValue: sectionId ?? '__all__',
-                  isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'Section'),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '__all__',
-                      child: Text('All sections'),
-                    ),
-                    for (final section in sections)
-                      DropdownMenuItem(
-                        value: section.id,
-                        child: Text(
-                          cleanDisplayTitle(section.title),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: libraryId == null
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.folder_outlined),
+                  label: Text(
+                    sectionId == null ? 'All sections' : 'Selected section',
+                  ),
+                  onPressed: libraryId == null
                       ? null
-                      : (value) => onSection(value == '__all__' ? null : value),
+                      : () async {
+                          final pick = await showDialog<String>(
+                            context: context,
+                            builder: (_) => _StudyScopePicker(
+                              database: database,
+                              libraryId: libraryId!,
+                              sections: true,
+                            ),
+                          );
+                          if (pick != null)
+                            onSection(pick.isEmpty ? null : pick);
+                        },
                 ),
               ),
               SizedBox(
                 width: width,
-                child: DropdownButtonFormField<String>(
-                  initialValue: itemId ?? '__all__',
-                  isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'Title'),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '__all__',
-                      child: Text('All titles'),
-                    ),
-                    for (final item in sectionItems)
-                      DropdownMenuItem(
-                        value: item.id,
-                        child: Text(
-                          cleanDisplayTitle(item.userTitle ?? item.title),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: libraryId == null
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.search),
+                  label: Text(itemId == null ? 'All titles' : 'Selected title'),
+                  onPressed: libraryId == null
                       ? null
-                      : (value) => onItem(value == '__all__' ? null : value),
+                      : () async {
+                          final pick = await showDialog<String>(
+                            context: context,
+                            builder: (_) => _StudyScopePicker(
+                              database: database,
+                              libraryId: libraryId!,
+                              sectionId: sectionId,
+                            ),
+                          );
+                          if (pick != null) onItem(pick.isEmpty ? null : pick);
+                        },
                 ),
               ),
               SizedBox(
@@ -960,4 +940,142 @@ class _EntryContext {
   final String sectionTitle;
   final String itemTitle;
   final Item? item;
+}
+
+class _StudyScopePicker extends StatefulWidget {
+  const _StudyScopePicker({
+    required this.database,
+    required this.libraryId,
+    this.sectionId,
+    this.sections = false,
+  });
+  final AppDatabase database;
+  final String libraryId;
+  final String? sectionId;
+  final bool sections;
+  @override
+  State<_StudyScopePicker> createState() => _StudyScopePickerState();
+}
+
+class _StudyScopePickerState extends State<_StudyScopePicker> {
+  final _search = TextEditingController();
+  String _after = '';
+  final _previous = <String>[];
+  late Future<List<drift.QueryRow>> _rows;
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  void _load() {
+    final table = widget.sections ? 'sections' : 'items';
+    _rows = widget.database
+        .customSelect(
+          'SELECT id,title FROM $table WHERE library_id=? AND id>? AND instr(lower(title),lower(?))>0 ${!widget.sections && widget.sectionId != null ? 'AND section_id=?' : ''} ORDER BY id LIMIT 49',
+          variables: [
+            drift.Variable(widget.libraryId),
+            drift.Variable(_after),
+            drift.Variable(_search.text),
+            if (!widget.sections && widget.sectionId != null)
+              drift.Variable(widget.sectionId!),
+          ],
+        )
+        .get();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.sections ? 'Choose section' : 'Choose title'),
+    content: SizedBox(
+      width: 500,
+      height: 440,
+      child: Column(
+        children: [
+          TextField(
+            controller: _search,
+            decoration: const InputDecoration(labelText: 'Search'),
+            onChanged: (_) => setState(() {
+              _after = '';
+              _previous.clear();
+              _load();
+            }),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, ''),
+            child: const Text('All'),
+          ),
+          Expanded(
+            child: FutureBuilder<List<drift.QueryRow>>(
+              future: _rows,
+              builder: (context, snapshot) {
+                if (snapshot.hasError)
+                  return const Text(
+                    'Could not load titles. Change search to retry.',
+                  );
+                if (!snapshot.hasData)
+                  return const Center(child: CircularProgressIndicator());
+                final rows = snapshot.data!;
+                return Column(
+                  children: [
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: rows.length.clamp(0, 48),
+                        itemBuilder: (context, index) => ListTile(
+                          title: Text(
+                            cleanDisplayTitle(
+                              rows[index].data['title'] as String,
+                            ),
+                          ),
+                          onTap: () => Navigator.pop(
+                            context,
+                            rows[index].data['id'] as String,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: _previous.isEmpty
+                              ? null
+                              : () => setState(() {
+                                  _after = _previous.removeLast();
+                                  _load();
+                                }),
+                          child: const Text('Previous'),
+                        ),
+                        TextButton(
+                          onPressed: rows.length <= 48
+                              ? null
+                              : () => setState(() {
+                                  _previous.add(_after);
+                                  _after = rows[47].data['id'] as String;
+                                  _load();
+                                }),
+                          child: const Text('Next'),
+                        ),
+                      ],
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+    ],
+  );
 }

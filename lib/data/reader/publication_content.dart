@@ -18,18 +18,23 @@ XmlDocument publicationDocument(String markup) {
       'embed',
       'base',
       'form',
-      'foreignObject',
-    }.contains(node.name.local)) {
+      'foreignobject',
+    }.contains(node.name.local.toLowerCase())) {
       node.parent?.children.remove(node);
       continue;
     }
     node.attributes.removeWhere(
       (a) =>
           a.name.local.toLowerCase().startsWith('on') ||
-          a.name.local == 'srcdoc',
+          a.name.local.toLowerCase() == 'srcdoc',
     );
     for (final attr in node.attributes.toList()) {
-      if (!{'src', 'href', 'poster', 'action'}.contains(attr.name.local))
+      if (!{
+        'src',
+        'href',
+        'poster',
+        'action',
+      }.contains(attr.name.local.toLowerCase()))
         continue;
       final value = attr.value.trim();
       if (value.startsWith('#')) continue;
@@ -46,14 +51,15 @@ Future<String> publicationText(String markup) => Isolate.run(() {
   final root =
       xml.descendants
           .whereType<XmlElement>()
-          .where((e) => e.name.local == 'body')
+          .where((e) => e.name.local.toLowerCase() == 'body')
           .firstOrNull ??
       xml.rootElement;
   final text = StringBuffer();
   var nodes = 0;
   for (final node in root.descendants.whereType<XmlText>()) {
     if (node.ancestors.whereType<XmlElement>().any(
-      (e) => {'script', 'style', 'noscript'}.contains(e.name.local),
+      (e) =>
+          {'script', 'style', 'noscript'}.contains(e.name.local.toLowerCase()),
     ))
       continue;
     if (++nodes > 250000 || text.length + node.value.length > 8000000) {

@@ -199,6 +199,7 @@ class MyVlcImportService {
             lastEventAt: Value(eventAt),
             deviceId: device,
           ),
+          legacy: true,
         );
       }
       final subtitle = _path(row['subtitleURL'], subtitle: true);

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'sync_state_store.dart';
 import 'package:drift/drift.dart';
 import '../../domain/catalog/media_record_contract.dart';
 import '../db/app_database.dart';
@@ -107,11 +108,17 @@ class SyncChangeJournal {
         'thumbnailPath': null,
         'fingerprint': null,
       },
-      'playback_progress' => db.playbackProgress.map(row.data).toJson(),
-      'reading_progress' => db.readingProgress.map(row.data).toJson(),
+      'playback_progress' => await SyncStateStore(
+        db,
+      ).decorate('playback', db.playbackProgress.map(row.data).toJson()),
+      'reading_progress' => await SyncStateStore(
+        db,
+      ).decorate('reading', db.readingProgress.map(row.data).toJson()),
       'notes' => db.notes.map(row.data).toJson(),
       'bookmarks' => db.bookmarks.map(row.data).toJson(),
-      'media_records' => MediaRecordContract.forTransport(row.data),
+      'media_records' => MediaRecordContract.forTransport(
+        await SyncStateStore(db).decorateFields(row.data),
+      ),
       _ => CatalogIdentityStore.transportRow(kind, row.data),
     };
   }

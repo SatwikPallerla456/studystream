@@ -7,6 +7,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../db/app_database.dart';
 import 'sync_snapshot_merger.dart';
+import 'sync_change_journal.dart';
+import 'music_sync_projection.dart';
 import '../../domain/services/sync_conflict_resolver.dart';
 import '../../domain/catalog/catalog_identity_store.dart';
 
@@ -57,6 +59,7 @@ class LanSyncClient {
   LanSyncClient(this.database, {CredentialStore? credentials})
     : credentials = credentials ?? const SecureCredentialStore();
   final AppDatabase database;
+  bool _musicPeer = false;
   final CredentialStore credentials;
   final _states = StreamController<SyncClientState>.broadcast();
   SyncClientState _state = const SyncClientState();
@@ -171,6 +174,9 @@ class LanSyncClient {
     _emit(_attempt > 0 ? ConnectionPhase.retrying : ConnectionPhase.connecting);
     try {
       final health = await _request(address, '/v1/health', authenticate: false);
+      _musicPeer = (health['capabilities'] as List? ?? []).contains(
+        MusicSyncProjection.capability,
+      );
       final modern = (health['capabilities'] as List? ?? []).contains(
         'catalog-bootstrap-v2',
       );
@@ -178,12 +184,7 @@ class LanSyncClient {
         await _uploadChanges(address);
         await _pullModern(address, generation);
       } else {
-        final legacy =
-            Map<String, Object?>.from(await database.exportSyncData())
-              ..remove('catalogRows')
-              ..remove('capabilities');
-        legacy['protocolVersion'] = 1;
-        await _request(address, '/v1/snapshot', body: legacy);
+        await _uploadChanges(address, legacy: true);
         final snapshot = await _request(address, '/v1/snapshot');
         if (_disposed || generation != _generation) return;
         await database.transaction(() async {
@@ -229,74 +230,102 @@ class LanSyncClient {
           .map((library) => library.id)
           .toSet();
 
-  Future<void> _uploadChanges(Uri address) async {
-    final since =
-        int.tryParse(
-          await database.getSetting('${_cursorKey(address)}.uploadedAt') ?? '0',
-        ) ??
-        0;
-    final started = DateTime.now().millisecondsSinceEpoch;
-    final snapshot = await database.exportSyncData();
-    final entries =
-        <({String kind, Map<String, dynamic> record, bool typed})>[];
-    for (final key in [
-      'libraries',
-      'sections',
-      'items',
-      'playback',
-      'reading',
-      'notes',
-      'bookmarks',
-      'mediaRecords',
-    ]) {
-      for (final row in (snapshot[key] as List).cast<Map<String, dynamic>>()) {
-        final updated =
-            row['lastEventAt'] ?? row['updatedAt'] ?? row['updated_at'] ?? 0;
-        if (updated is num && updated > since)
-          entries.add((kind: key, record: row, typed: false));
-      }
-    }
-    final typed = snapshot['catalogRows'] as Map;
-    for (final table in CatalogIdentityStore.tables) {
-      for (final row
-          in (typed[table] as List? ?? []).cast<Map<String, dynamic>>()) {
-        if ((row['updated_at'] as int) > since)
-          entries.add((kind: table, record: row, typed: true));
-      }
-    }
-    var batch = <({String kind, Map<String, dynamic> record, bool typed})>[],
-        bytes = 0;
-    Future<void> flush() async {
-      if (batch.isEmpty) return;
-      final body = <String, dynamic>{
+  Future<void> _uploadChanges(Uri address, {bool legacy = false}) async {
+    final journal = SyncChangeJournal(database),
+        libraries = await _remoteLibraryIds();
+    if (libraries.isEmpty) return;
+    final ids = libraries.toList()..sort();
+    final scope = jsonEncode({'libraries': ids, 'music': _musicPeer}),
+        key = '${_cursorKey(address)}.uploadJournal${legacy ? '.legacy' : ''}';
+    var cursor = await database.getSetting('$key.scope') == scope
+        ? int.tryParse(await database.getSetting('$key.cursor') ?? '')
+        : null;
+    // Only bounded pages are resident. Acknowledgement precedes cursor advance;
+    // failure replays the same semantic revisions without inventing new edits.
+    Future<void> send(List events) async {
+      var body = <String, dynamic>{
         'schemaVersion': 3,
-        'protocolVersion': 2,
+        'protocolVersion': legacy ? 1 : 2,
         'catalogRows': <String, List<Map<String, dynamic>>>{},
       };
-      for (final entry in batch) {
-        if (entry.typed) {
-          ((body['catalogRows']
-                      as Map<String, List<Map<String, dynamic>>>)[entry
-                      .kind] ??=
-                  [])
-              .add(entry.record);
-        } else {
-          (body[entry.kind] ??= <Map<String, dynamic>>[]).add(entry.record);
-        }
+      var bytes = 0, count = 0;
+      Future<void> flush() async {
+        if (count == 0) return;
+        await _request(address, '/v1/snapshot', body: body);
+        body = {
+          'schemaVersion': 3,
+          'protocolVersion': legacy ? 1 : 2,
+          'catalogRows': <String, List<Map<String, dynamic>>>{},
+        };
+        bytes = 0;
+        count = 0;
       }
-      await _request(address, '/v1/snapshot', body: body);
-      batch = [];
-      bytes = 0;
+
+      const names = {
+        'playback_progress': 'playback',
+        'reading_progress': 'reading',
+        'media_records': 'mediaRecords',
+      };
+      for (final raw in events) {
+        var record = raw['record'];
+        // Hard deletion of host-owned files is not a client mutation. User-data
+        // deletions travel as retained soft-deleted rows in this same journal.
+        if (record is! Map<String, dynamic>) continue;
+        final kind = raw['entity_kind'] as String;
+        if (legacy && CatalogIdentityStore.tables.contains(kind)) continue;
+        if (!_musicPeer) {
+          record = MusicSyncProjection.record(kind, record);
+          if (record == null) continue;
+        }
+        final length = utf8.encode(jsonEncode(record)).length;
+        if (length > 4 * 1024 * 1024)
+          throw const FormatException(
+            'A sync record exceeds the transfer limit',
+          );
+        if (count >= 100 || bytes + length > 512 * 1024) await flush();
+        if (CatalogIdentityStore.tables.contains(kind)) {
+          ((body['catalogRows']
+                      as Map<String, List<Map<String, dynamic>>>)[kind] ??=
+                  [])
+              .add(record);
+        } else {
+          (body[names[kind] ?? kind] ??= <Map<String, dynamic>>[]).add(record);
+        }
+        bytes += length;
+        count++;
+      }
+      await flush();
     }
 
-    for (final entry in entries) {
-      final length = utf8.encode(jsonEncode(entry.record)).length;
-      if (batch.length >= 100 || bytes + length > 512 * 1024) await flush();
-      batch.add(entry);
-      bytes += length;
+    if (cursor != null) {
+      final page = await journal.page(cursor, libraries);
+      if (page['resetRequired'] == true) cursor = null;
     }
-    await flush();
-    await database.setSetting('${_cursorKey(address)}.uploadedAt', '$started');
+    if (cursor == null) {
+      final start = await journal.head();
+      String? next;
+      do {
+        final page = await journal.bootstrap(libraries, cursor: next);
+        await send(page['events'] as List);
+        next = page['next'] as String?;
+      } while (next != null);
+      cursor = start;
+      await database.setSetting('$key.scope', scope);
+      await database.setSetting('$key.cursor', '$cursor');
+    }
+    while (true) {
+      final page = await journal.page(cursor!, libraries);
+      if (page['resetRequired'] == true) {
+        await database.setSetting('$key.scope', '');
+        throw const FormatException(
+          'Sync history changed. Retry to refresh the scoped upload.',
+        );
+      }
+      await send(page['events'] as List);
+      cursor = page['cursor'] as int;
+      await database.setSetting('$key.cursor', '$cursor');
+      if (page['hasMore'] != true) break;
+    }
   }
 
   Future<void> _applyEvents(List<dynamic> events) async {
@@ -434,7 +463,10 @@ class LanSyncClient {
         if (_disposed || generation != _generation) return;
         if (page['resetRequired'] == true) {
           cursor = null;
-          await database.setSetting('${_cursorKey(address)}.uploadedAt', '0');
+          await database.setSetting(
+            '${_cursorKey(address)}.uploadJournal.scope',
+            '',
+          );
           await _uploadChanges(address);
           break;
         }
@@ -589,6 +621,10 @@ class LanSyncClient {
     final request = await client
         .openUrl(body == null ? 'GET' : 'POST', address.resolve(path))
         .timeout(const Duration(seconds: 10));
+    request.headers.set(
+      'X-Tangerine-Capabilities',
+      'progress-intent-v1,field-preferences-v1,music-metadata-v1',
+    );
     request.followRedirects =
         false; // Never forward pairing credentials to redirects.
     if (authenticate) {

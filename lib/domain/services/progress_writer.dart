@@ -5,19 +5,35 @@ import 'package:drift/drift.dart' as drift;
 
 import '../../data/db/app_database.dart';
 import 'resume_service.dart';
+import '../../data/sync/sync_state_store.dart';
 
 /// Serializes immutable snapshots so an older asynchronous save cannot win.
 class MediaProgressWriter {
   MediaProgressWriter({
     required this.database,
     required this.item,
+    Future<Map<String, dynamic>>? initialContext,
     this.deviceId,
     this.saveInterval = const Duration(seconds: 5),
     this.completionThreshold = .90,
     this.resumeRewindSeconds = 10,
     this.onError,
     this.saveHistory = true,
-  });
+  }) {
+    _context =
+        initialContext ?? SyncStateStore(database).context('playback', item.id);
+  }
+
+  late Future<Map<String, dynamic>> _context;
+  bool _positionIntent = false;
+  void markPositionIntent() {
+    _positionIntent = true;
+  }
+
+  Future<void> refreshContext() async {
+    _context = SyncStateStore(database).context('playback', item.id);
+    await _context;
+  }
 
   final bool saveHistory;
   final AppDatabase database;
@@ -79,11 +95,14 @@ class MediaProgressWriter {
     _timer = null;
     if (_disposed) return _queue;
     final revision = _revision;
+    final positionIntent = _positionIntent;
+    _positionIntent = false;
     final position = math.max(0.0, _position.inMilliseconds / 1000);
     final duration = math.max(0.0, _duration.inMilliseconds / 1000);
     final speed = _speed;
     final write = _queue.then((_) async {
-      if (revision <= _savedRevision && !forceComplete) return;
+      if (revision <= _savedRevision && !forceComplete && !positionIntent)
+        return;
       if (revision == 0) return;
       await database.transaction(() async {
         await database.customStatement(
@@ -135,6 +154,11 @@ class MediaProgressWriter {
             deviceId: drift.Value(deviceId ?? await database.getDeviceId()),
             version: drift.Value((old?.version ?? 0) + 1),
           ),
+          syncContext: await _context,
+          intent: positionIntent ? 'position' : null,
+        );
+        _context = Future.value(
+          await SyncStateStore(database).context('playback', item.id),
         );
       });
       _savedRevision = revision;
@@ -158,9 +182,25 @@ class ReadingProgressWriter {
   ReadingProgressWriter({
     required this.database,
     required this.item,
+    Future<Map<String, dynamic>>? initialContext,
     this.deviceId,
     this.completionThreshold = .90,
-  });
+  }) {
+    _context =
+        initialContext ?? SyncStateStore(database).context('reading', item.id);
+  }
+  late Future<Map<String, dynamic>> _context;
+  bool _positionIntent = false;
+  void markPositionIntent() {
+    _positionIntent = true;
+  }
+
+  Future<void> refreshContext() async {
+    _context = SyncStateStore(database).context('reading', item.id);
+    await _context;
+  }
+
+  Future<Map<String, dynamic>> get syncContext => _context;
   final AppDatabase database;
   final Item item;
   final String? deviceId;
@@ -176,8 +216,13 @@ class ReadingProgressWriter {
   Future<void>? _disposal;
   Object? _lastSaved;
 
-  Future<void> save({bool forceComplete = false}) {
+  Future<void> save({
+    bool forceComplete = false,
+    void Function(Map<String, dynamic>)? onSaved,
+  }) {
     if (_disposed || (totalPages <= 0 && !forceComplete)) return _queue;
+    final positionIntent = _positionIntent;
+    _positionIntent = false;
     final snapshot = (
       currentPage,
       totalPages,
@@ -187,7 +232,14 @@ class ReadingProgressWriter {
       readingMode,
     );
     final write = _queue.then((_) async {
-      if (_lastSaved == snapshot && !forceComplete) return;
+      if (!positionIntent)
+        await SyncStateStore(
+          database,
+        ).requireContext('reading', item.id, await _context);
+      if (_lastSaved == snapshot && !forceComplete && !positionIntent) {
+        onSaved?.call(await _context);
+        return;
+      }
       await database.transaction(() async {
         final old = await database.getReadingByItemId(item.id);
         final completed =
@@ -228,8 +280,14 @@ class ReadingProgressWriter {
             deviceId: drift.Value(deviceId ?? await database.getDeviceId()),
             version: drift.Value((old?.version ?? 0) + 1),
           ),
+          syncContext: await _context,
+          intent: positionIntent ? 'position' : null,
+        );
+        _context = Future.value(
+          await SyncStateStore(database).context('reading', item.id),
         );
       });
+      onSaved?.call(await _context);
       _lastSaved = snapshot;
     });
     _queue = write.catchError((Object _) {});

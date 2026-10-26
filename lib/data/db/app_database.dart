@@ -1,3 +1,4 @@
+import '../sync/sync_state_store.dart';
 import '../../domain/catalog/library_processing.dart';
 import 'dart:convert';
 import 'dart:io';
@@ -324,6 +325,7 @@ class AppDatabase extends _$AppDatabase {
     onCreate: (m) async {
       await m.createAll();
       await _createMediaTables();
+      await SyncStateStore(this).createTables();
     },
     onUpgrade: (m, from, to) async {
       if (from < 2) {
@@ -362,6 +364,7 @@ class AppDatabase extends _$AppDatabase {
       await customStatement('PRAGMA busy_timeout=5000');
       await customStatement('PRAGMA journal_mode=WAL');
       await _createMediaTables();
+      await SyncStateStore(this).createTables();
       await _backfillSources();
       await LibrarySourceStore(this).createTables();
       await LibrarySourceStore(this).backfill();
@@ -398,17 +401,22 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<List<Map<String, dynamic>>> exportMediaRows(String table) async {
-    if (table != 'media_records' && table != 'library_sources') {
+    if (table != 'media_records' && table != 'library_sources')
       throw ArgumentError('Invalid media table');
-    }
-    return (await customSelect(
-      'SELECT * FROM $table',
-    ).get()).map((row) => row.data).toList();
+    final rows = await customSelect('SELECT * FROM $table').get();
+    return [
+      for (final row in rows)
+        table == 'media_records'
+            ? await SyncStateStore(this).decorateFields(row.data)
+            : row.data,
+    ];
   }
 
   Future<void> importMediaRows(
     Map<String, dynamic> snapshot, {
     bool includeSources = false,
+    bool localWrite = false,
+    Set<String>? changedFields,
     Set<String>? allowedLibraryIds,
   }) => transaction(() async {
     var discoveryChanged = false;
@@ -426,7 +434,7 @@ class AppDatabase extends _$AppDatabase {
         if (value is! Map<String, dynamic>) {
           throw const FormatException('Invalid media record');
         }
-        final row = Map<String, dynamic>.of(value);
+        var row = Map<String, dynamic>.of(value);
         final id = row['id'], libraryId = row['library_id'];
         if (id is! String || libraryId is! String) {
           throw const FormatException('Invalid media identity');
@@ -489,12 +497,20 @@ class AppDatabase extends _$AppDatabase {
             }
           }
           if (['collection', 'playlist', 'album'].contains(kind)) {
-            for (final member in (decoded['items'] as List).cast<String>()) {
-              if ((await getItemById(member))?.libraryId != libraryId) {
+            final members = (decoded['items'] as List)
+                .cast<String>()
+                .toSet()
+                .toList();
+            for (var offset = 0; offset < members.length; offset += 200) {
+              final batch = members.skip(offset).take(200).toList();
+              final count = await customSelect(
+                'SELECT COUNT(*) AS total FROM items WHERE library_id=? AND id IN (${batch.map((_) => '?').join(',')})',
+                variables: [Variable(libraryId), ...batch.map(Variable.new)],
+              ).getSingle();
+              if (count.data['total'] != batch.length)
                 throw const FormatException(
                   'Collection item is outside this library',
                 );
-              }
             }
           }
         } else {
@@ -518,6 +534,30 @@ class AppDatabase extends _$AppDatabase {
             throw const FormatException('Source namespace cannot change');
           }
         }
+        final fielded =
+            table == 'media_records' &&
+            SyncStateStore(this).fielded(row['kind'] as String);
+        if (fielded) {
+          row = localWrite
+              ? await SyncStateStore(
+                  this,
+                ).localFields(row, existing?.data, changed: changedFields)
+              : await SyncStateStore(this).mergeFields(row, existing?.data);
+        }
+        if (fielded &&
+            utf8.encode(row['payload'] as String).length >
+                MediaRecordContract.maxPayloadBytes)
+          throw const FormatException('Merged preferences are too large');
+        if (fielded)
+          MediaRecordContract.validate(
+            id: row['id'] as String,
+            kind: row['kind'] as String,
+            libraryId: row['library_id'] as String,
+            itemId: row['item_id'] as String?,
+            data: Map<String, dynamic>.from(
+              jsonDecode(row['payload'] as String) as Map,
+            ),
+          );
         final columns = table == 'media_records'
             ? [
                 'id',
@@ -540,9 +580,10 @@ class AppDatabase extends _$AppDatabase {
         await customStatement(
           'INSERT INTO $table (${columns.join(',')}) VALUES (${columns.map((_) => '?').join(',')}) '
           'ON CONFLICT(id) DO UPDATE SET ${columns.skip(1).map((c) => '$c = excluded.$c').join(',')} '
-          'WHERE excluded.updated_at > $table.updated_at',
+          '${fielded ? "WHERE excluded.updated_at >= $table.updated_at AND (excluded.payload <> $table.payload OR excluded.deleted <> $table.deleted OR excluded.updated_at <> $table.updated_at)" : "WHERE excluded.updated_at > $table.updated_at"}',
           columns.map((c) => row[c]).toList(),
         );
+        if (fielded) await SyncStateStore(this).publishFields(row);
       }
     }
     if (discoveryChanged) notifyUpdates({TableUpdate.onTable(appSettings)});
@@ -552,6 +593,11 @@ class AppDatabase extends _$AppDatabase {
     const statements = [
       'CREATE INDEX IF NOT EXISTS idx_sections_library_order ON sections (library_id, order_index)',
       'CREATE INDEX IF NOT EXISTS idx_items_library ON items (library_id)',
+      'CREATE INDEX IF NOT EXISTS idx_items_library_id ON items (library_id,id)',
+      'CREATE INDEX IF NOT EXISTS idx_sections_library_id ON sections (library_id,id)',
+      'CREATE INDEX IF NOT EXISTS idx_media_library_id ON media_records(library_id,id)',
+      'CREATE INDEX IF NOT EXISTS idx_notes_recent ON notes(deleted,updated_at DESC,id DESC)',
+      'CREATE INDEX IF NOT EXISTS idx_bookmarks_recent ON bookmarks(deleted,updated_at DESC,id DESC)',
       'CREATE INDEX IF NOT EXISTS idx_items_section_order ON items (section_id, order_index)',
       'CREATE INDEX IF NOT EXISTS idx_items_relative_path ON items (library_id, relative_path)',
       'CREATE INDEX IF NOT EXISTS idx_items_fingerprint ON items (library_id, fingerprint)',
@@ -600,14 +646,53 @@ class AppDatabase extends _$AppDatabase {
     await refreshSectionCounts(data.sectionId.value);
   }
 
-  Future<void> applyScan({
+  Stream<List<Item>> itemPages(String libraryId) async* {
+    var after = '';
+    while (true) {
+      final page =
+          await (select(items)
+                ..where(
+                  (t) =>
+                      t.libraryId.equals(libraryId) &
+                      t.id.isBiggerThanValue(after),
+                )
+                ..orderBy([(t) => OrderingTerm.asc(t.id)])
+                ..limit(256))
+              .get();
+      if (page.isEmpty) return;
+      yield page;
+      after = page.last.id;
+    }
+  }
+
+  Stream<List<Section>> sectionPages(String libraryId) async* {
+    var after = '';
+    while (true) {
+      final page =
+          await (select(sections)
+                ..where(
+                  (t) =>
+                      t.libraryId.equals(libraryId) &
+                      t.id.isBiggerThanValue(after),
+                )
+                ..orderBy([(t) => OrderingTerm.asc(t.id)])
+                ..limit(256))
+              .get();
+      if (page.isEmpty) return;
+      yield page;
+      after = page.last.id;
+    }
+  }
+
+  Future<int> applyScan({
     required String libraryId,
     required List<SectionsCompanion> scannedSections,
     required List<ItemsCompanion> scannedItems,
     required Set<String> seenSectionIds,
     required Set<String> seenItemIds,
+    bool Function(String)? belongsToScan,
   }) async {
-    await transaction(() async {
+    return transaction(() async {
       for (final section in scannedSections) {
         await into(sections).insertOnConflictUpdate(section);
       }
@@ -615,37 +700,40 @@ class AppDatabase extends _$AppDatabase {
         await into(items).insertOnConflictUpdate(item);
       }
 
-      final existingItems = await getItemsForLibrary(libraryId);
-      for (final item in existingItems) {
-        if (!seenItemIds.contains(item.id) && !item.unavailable) {
-          await (update(items)..where((t) => t.id.equals(item.id))).write(
-            ItemsCompanion(
-              unavailable: const Value(true),
-              updatedAt: Value(DateTime.now().millisecondsSinceEpoch),
-            ),
-          );
+      var missing = 0;
+      await for (final page in itemPages(libraryId)) {
+        for (final item in page) {
+          if (!(belongsToScan?.call(item.relativePath) ?? true) ||
+              seenItemIds.contains(item.id))
+            continue;
+          missing++;
+          if (!item.unavailable)
+            await (update(items)..where((t) => t.id.equals(item.id))).write(
+              ItemsCompanion(
+                unavailable: const Value(true),
+                updatedAt: Value(DateTime.now().millisecondsSinceEpoch),
+              ),
+            );
         }
       }
-
-      final existingSections = await getSectionsForLibrary(libraryId);
-      for (final section in existingSections) {
-        if (!seenSectionIds.contains(section.id) && !section.unavailable) {
-          await (update(sections)..where((t) => t.id.equals(section.id))).write(
-            const SectionsCompanion(unavailable: Value(true)),
-          );
+      await for (final page in sectionPages(libraryId)) {
+        for (final section in page) {
+          if ((belongsToScan?.call(section.relativePath) ?? true) &&
+              !seenSectionIds.contains(section.id) &&
+              !section.unavailable) {
+            await (update(sections)..where((t) => t.id.equals(section.id)))
+                .write(const SectionsCompanion(unavailable: Value(true)));
+          }
+          await refreshSectionCounts(section.id);
         }
       }
-
-      for (final section in await getSectionsForLibrary(libraryId)) {
-        await refreshSectionCounts(section.id);
-      }
-
       await (update(libraries)..where((t) => t.id.equals(libraryId))).write(
         LibrariesCompanion(
           lastScannedAt: Value(DateTime.now().millisecondsSinceEpoch),
           unavailable: const Value(false),
         ),
       );
+      return missing;
     });
   }
 
@@ -654,17 +742,172 @@ class AppDatabase extends _$AppDatabase {
         LibrariesCompanion(unavailable: Value(value)),
       );
 
-  Future<void> upsertPlayback(PlaybackProgressCompanion data) async {
-    await into(playbackProgress).insertOnConflictUpdate(data);
+  Future<void> upsertPlayback(
+    PlaybackProgressCompanion data, {
+    Map<String, dynamic>? syncContext,
+    String? intent,
+    bool? completion,
+    bool clearCompletion = false,
+    bool legacy = false,
+  }) => transaction(() async {
+    final old = await getPlaybackByItemId(data.itemId.value);
+    final base =
+        old ??
+        PlaybackProgressData.fromJson({
+          'itemId': data.itemId.value,
+          'lastPositionSeconds': 0.0,
+          'resumePositionSeconds': 0.0,
+          'durationSeconds': 0.0,
+          'percentWatched': 0.0,
+          'completed': false,
+          'manualCompletion': null,
+          'playbackSpeed': 1.0,
+          'lastOpenedAt': 0,
+          'lastEventAt': 0,
+          'deviceId': await getDeviceId(),
+          'version': 0,
+        });
+    final row = base.copyWithCompanion(data).toJson(),
+        store = SyncStateStore(this);
+    if (legacy) {
+      await store.merge('playback', row);
+    } else {
+      await store.local(
+        'playback',
+        row,
+        expected: syncContext,
+        intent: intent,
+        completion: completion,
+        clearCompletion: clearCompletion,
+      );
+    }
     final sectionId = await _sectionIdForItem(data.itemId.value);
     if (sectionId != null) await refreshSectionCounts(sectionId);
-  }
-
-  Future<void> upsertReading(ReadingProgressCompanion data) async {
-    await into(readingProgress).insertOnConflictUpdate(data);
+  });
+  Future<void> upsertReading(
+    ReadingProgressCompanion data, {
+    Map<String, dynamic>? syncContext,
+    String? intent,
+    bool? completion,
+    bool clearCompletion = false,
+  }) => transaction(() async {
+    final old = await getReadingByItemId(data.itemId.value);
+    final base =
+        old ??
+        ReadingProgressData.fromJson({
+          'itemId': data.itemId.value,
+          'lastPage': 1,
+          'lastScrollOffset': 0.0,
+          'resumePage': 1,
+          'resumeScrollOffset': 0.0,
+          'percentRead': 0.0,
+          'completed': false,
+          'manualCompletion': null,
+          'zoom': 1.0,
+          'readingMode': 'fitWidth',
+          'lastOpenedAt': 0,
+          'lastEventAt': 0,
+          'deviceId': await getDeviceId(),
+          'version': 0,
+        });
+    await SyncStateStore(this).local(
+      'reading',
+      base.copyWithCompanion(data).toJson(),
+      expected: syncContext,
+      intent: intent,
+      completion: completion,
+      clearCompletion: clearCompletion,
+    );
     final sectionId = await _sectionIdForItem(data.itemId.value);
     if (sectionId != null) await refreshSectionCounts(sectionId);
-  }
+  });
+  Future<void> resetItemProgress(Item item) => transaction(() async {
+    final device = await getDeviceId(),
+        now = DateTime.now().millisecondsSinceEpoch;
+    if (item.itemType == 'audio' || item.itemType == 'video') {
+      await upsertPlayback(
+        PlaybackProgressCompanion(
+          itemId: Value(item.id),
+          lastPositionSeconds: const Value(0),
+          resumePositionSeconds: const Value(0),
+          percentWatched: const Value(0),
+          completed: const Value(false),
+          manualCompletion: const Value(null),
+          lastEventAt: Value(now),
+          deviceId: Value(device),
+        ),
+        intent: 'reset',
+      );
+    } else {
+      await upsertReading(
+        ReadingProgressCompanion(
+          itemId: Value(item.id),
+          lastPage: const Value(1),
+          resumePage: const Value(1),
+          lastScrollOffset: const Value(0),
+          resumeScrollOffset: const Value(0),
+          percentRead: const Value(0),
+          completed: const Value(false),
+          manualCompletion: const Value(null),
+          lastEventAt: Value(now),
+          deviceId: Value(device),
+        ),
+        intent: 'reset',
+      );
+      final record = await customSelect(
+        'SELECT * FROM media_records WHERE id=?',
+        variables: [Variable('reader:${item.id}')],
+      ).getSingleOrNull();
+      if (record != null) {
+        final data = Map<String, dynamic>.from(
+          jsonDecode(record.data['payload'] as String) as Map,
+        )..remove('locator');
+        await importMediaRows(
+          {
+            'mediaRecords': [
+              {
+                ...record.data,
+                'payload': jsonEncode(data),
+                'updated_at': now > (record.data['updated_at'] as int)
+                    ? now
+                    : (record.data['updated_at'] as int) + 1,
+                'device_id': device,
+              },
+            ],
+          },
+          localWrite: true,
+          changedFields: {'locator'},
+        );
+      }
+    }
+  });
+  Future<void> useAutomaticCompletion(Item item) => transaction(() async {
+    final now = DateTime.now().millisecondsSinceEpoch,
+        device = await getDeviceId();
+    if (item.itemType == 'audio' || item.itemType == 'video') {
+      await upsertPlayback(
+        PlaybackProgressCompanion(
+          itemId: Value(item.id),
+          manualCompletion: const Value(null),
+          completed: const Value(false),
+          lastEventAt: Value(now),
+          deviceId: Value(device),
+        ),
+        clearCompletion: true,
+      );
+    } else {
+      await upsertReading(
+        ReadingProgressCompanion(
+          itemId: Value(item.id),
+          manualCompletion: const Value(null),
+          completed: const Value(false),
+          lastEventAt: Value(now),
+          deviceId: Value(device),
+        ),
+        clearCompletion: true,
+      );
+    }
+  });
 
   Future<Library?> getLibraryById(String libraryId) => (select(
     libraries,
@@ -673,11 +916,33 @@ class AppDatabase extends _$AppDatabase {
   Future<Item?> getItemById(String itemId) =>
       (select(items)..where((t) => t.id.equals(itemId))).getSingleOrNull();
 
-  Future<List<Item>> getItemsForLibrary(String libraryId) =>
-      (select(items)..where((t) => t.libraryId.equals(libraryId))).get();
+  Future<List<Item>> getItemsForLibrary(
+    String libraryId, {
+    String after = '',
+    int limit = 200,
+  }) =>
+      (select(items)
+            ..where(
+              (t) =>
+                  t.libraryId.equals(libraryId) & t.id.isBiggerThanValue(after),
+            )
+            ..orderBy([(t) => OrderingTerm.asc(t.id)])
+            ..limit(limit.clamp(1, 256)))
+          .get();
 
-  Future<List<Section>> getSectionsForLibrary(String libraryId) =>
-      (select(sections)..where((t) => t.libraryId.equals(libraryId))).get();
+  Future<List<Section>> getSectionsForLibrary(
+    String libraryId, {
+    String after = '',
+    int limit = 200,
+  }) =>
+      (select(sections)
+            ..where(
+              (t) =>
+                  t.libraryId.equals(libraryId) & t.id.isBiggerThanValue(after),
+            )
+            ..orderBy([(t) => OrderingTerm.asc(t.id)])
+            ..limit(limit.clamp(1, 256)))
+          .get();
 
   Future<void> relinkItem({
     required String itemId,
@@ -751,8 +1016,12 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Stream<List<ItemProgressEntry>> watchItemProgressForSection(
-    String sectionId,
-  ) {
+    String sectionId, {
+    String search = '',
+    String filter = 'all',
+    (int, String, String)? after,
+    int limit = 65,
+  }) {
     final query =
         select(items).join([
             leftOuterJoin(
@@ -768,7 +1037,39 @@ class AppDatabase extends _$AppDatabase {
           ..orderBy([
             OrderingTerm.asc(items.orderIndex),
             OrderingTerm.asc(items.title),
+            OrderingTerm.asc(items.id),
           ]);
+    final text = search.trim().toLowerCase();
+    if (text.isNotEmpty)
+      query.where(
+        items.title.lower().contains(text) |
+            items.userTitle.lower().contains(text) |
+            items.filename.lower().contains(text),
+      );
+    if (filter == 'missing') query.where(items.unavailable);
+    if (filter == 'completed')
+      query.where(
+        const CustomExpression<bool>(
+          'COALESCE(playback_progress.completed,reading_progress.completed,0)=1',
+        ),
+      );
+    if (filter == 'inProgress')
+      query.where(
+        items.unavailable.not() &
+            const CustomExpression<bool>(
+              'COALESCE(playback_progress.completed,reading_progress.completed,0)=0 AND COALESCE(playback_progress.percent_watched,reading_progress.percent_read,0)>0',
+            ),
+      );
+    if (after != null)
+      query.where(
+        items.orderIndex.isBiggerThanValue(after.$1) |
+            (items.orderIndex.equals(after.$1) &
+                items.title.isBiggerThanValue(after.$2)) |
+            (items.orderIndex.equals(after.$1) &
+                items.title.equals(after.$2) &
+                items.id.isBiggerThanValue(after.$3)),
+      );
+    query.limit(limit.clamp(1, 101));
     return query.watch().map(
       (rows) => rows.map((row) {
         final item = row.readTable(items);
@@ -895,43 +1196,21 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<LibraryStats> getLibraryStats(String libraryId) async {
-    final rows =
-        await (select(items).join([
-              leftOuterJoin(
-                playbackProgress,
-                playbackProgress.itemId.equalsExp(items.id),
-              ),
-              leftOuterJoin(
-                readingProgress,
-                readingProgress.itemId.equalsExp(items.id),
-              ),
-            ])..where(
-              items.libraryId.equals(libraryId) & items.unavailable.not(),
-            ))
-            .get();
-    var completed = 0;
-    var inProgress = 0;
-    int? lastActivity;
-    for (final row in rows) {
-      final playback = row.readTableOrNull(playbackProgress);
-      final reading = row.readTableOrNull(readingProgress);
-      final isCompleted = playback?.completed ?? reading?.completed ?? false;
-      final percent = playback?.percentWatched ?? reading?.percentRead ?? 0;
-      if (isCompleted) {
-        completed++;
-      } else if (percent > 0) {
-        inProgress++;
-      }
-      final opened = playback?.lastOpenedAt ?? reading?.lastOpenedAt;
-      if (opened != null && (lastActivity == null || opened > lastActivity)) {
-        lastActivity = opened;
-      }
-    }
+    final row = await customSelect(
+      """SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN COALESCE(p.completed,r.completed,0)=1 THEN 1 ELSE 0 END),0) AS completed,
+      COALESCE(SUM(CASE WHEN COALESCE(p.completed,r.completed,0)=0 AND COALESCE(p.percent_watched,r.percent_read,0)>0 THEN 1 ELSE 0 END),0) AS active,
+      MAX(COALESCE(p.last_opened_at,r.last_opened_at)) AS activity
+      FROM items i LEFT JOIN playback_progress p ON p.item_id=i.id
+      LEFT JOIN reading_progress r ON r.item_id=i.id
+      WHERE i.library_id=? AND i.unavailable=0""",
+      variables: [Variable(libraryId)],
+    ).getSingle();
     return LibraryStats(
-      totalItems: rows.length,
-      completedItems: completed,
-      inProgressItems: inProgress,
-      lastActivityAt: lastActivity,
+      totalItems: row.data['total'] as int,
+      completedItems: row.data['completed'] as int,
+      inProgressItems: row.data['active'] as int,
+      lastActivityAt: row.data['activity'] as int?,
     );
   }
 
@@ -1173,6 +1452,7 @@ class AppDatabase extends _$AppDatabase {
             deviceId: Value(deviceId),
             version: Value((old?.version ?? 0) + 1),
           ),
+          completion: completed,
         );
       } else {
         final old = await getReadingByItemId(item.id);
@@ -1193,38 +1473,116 @@ class AppDatabase extends _$AppDatabase {
             deviceId: Value(deviceId),
             version: Value((old?.version ?? 0) + 1),
           ),
+          completion: completed,
         );
       }
     });
   }
 
-  Stream<List<Note>> watchNotes({String? itemId, String? libraryId}) {
-    final query = select(notes)
-      ..where((t) {
-        var expression = t.deleted.not();
-        if (itemId != null) expression = expression & t.itemId.equals(itemId);
-        if (libraryId != null) {
-          expression = expression & t.libraryId.equals(libraryId);
-        }
-        return expression;
-      })
-      ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)]);
-    return query.watch();
+  /// SQLite filters, orders and seeks before decoding at most one Study page.
+  Stream<List<QueryRow>> _watchStudyPage(
+    String table, {
+    String? itemId,
+    String? libraryId,
+    String? sectionId,
+    String search = '',
+    String kind = 'all',
+    String sort = 'updated',
+    (double, String)? after,
+    int limit = 65,
+  }) {
+    final where = <String>['s.deleted=0'];
+    final variables = <Variable>[];
+    if (libraryId != null) {
+      where.add('s.library_id=?');
+      variables.add(Variable(libraryId));
+    }
+    if (itemId != null) {
+      where.add('s.item_id=?');
+      variables.add(Variable(itemId));
+    }
+    if (sectionId != null) {
+      where.add(
+        'EXISTS(SELECT 1 FROM items i WHERE i.id=s.item_id AND i.section_id=?)',
+      );
+      variables.add(Variable(sectionId));
+    }
+    if (search.trim().isNotEmpty) {
+      where.add(
+        table == 'notes'
+            ? 'instr(lower(s.content),lower(?))>0'
+            : "instr(lower(s.title || ' ' || COALESCE(s.description,'')),lower(?))>0",
+      );
+      variables.add(Variable(search.trim()));
+    }
+    if (kind == 'timed') where.add('s.position_seconds IS NOT NULL');
+    if (kind == 'pages') where.add('s.page_number IS NOT NULL');
+    if (kind == 'general')
+      where.add('s.position_seconds IS NULL AND s.page_number IS NULL');
+    final key = sort == 'created'
+        ? 's.created_at'
+        : sort == 'location'
+        ? 'COALESCE(s.page_number,s.position_seconds,-1)'
+        : 's.updated_at';
+    final direction = sort == 'location' ? 'ASC' : 'DESC',
+        op = sort == 'location' ? '>' : '<';
+    if (after != null) {
+      where.add('($key $op ? OR ($key=? AND s.id $op ?))');
+      variables.addAll([
+        Variable(after.$1),
+        Variable(after.$1),
+        Variable(after.$2),
+      ]);
+    }
+    variables.add(Variable(limit.clamp(1, 101)));
+    return customSelect(
+      'SELECT s.* FROM $table s WHERE ${where.join(' AND ')} ORDER BY $key $direction,s.id $direction LIMIT ?',
+      variables: variables,
+      readsFrom: {items, table == 'notes' ? notes : bookmarks},
+    ).watch();
   }
 
-  Stream<List<Bookmark>> watchBookmarks({String? itemId, String? libraryId}) {
-    final query = select(bookmarks)
-      ..where((t) {
-        var expression = t.deleted.not();
-        if (itemId != null) expression = expression & t.itemId.equals(itemId);
-        if (libraryId != null) {
-          expression = expression & t.libraryId.equals(libraryId);
-        }
-        return expression;
-      })
-      ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)]);
-    return query.watch();
-  }
+  Stream<List<Note>> watchNotes({
+    String? itemId,
+    String? libraryId,
+    String? sectionId,
+    String search = '',
+    String kind = 'all',
+    String sort = 'updated',
+    (double, String)? after,
+    int limit = 65,
+  }) => _watchStudyPage(
+    'notes',
+    itemId: itemId,
+    libraryId: libraryId,
+    sectionId: sectionId,
+    search: search,
+    kind: kind,
+    sort: sort,
+    after: after,
+    limit: limit,
+  ).map((rows) => rows.map((r) => notes.map(r.data)).toList());
+
+  Stream<List<Bookmark>> watchBookmarks({
+    String? itemId,
+    String? libraryId,
+    String? sectionId,
+    String search = '',
+    String kind = 'all',
+    String sort = 'updated',
+    (double, String)? after,
+    int limit = 65,
+  }) => _watchStudyPage(
+    'bookmarks',
+    itemId: itemId,
+    libraryId: libraryId,
+    sectionId: sectionId,
+    search: search,
+    kind: kind,
+    sort: sort,
+    after: after,
+    limit: limit,
+  ).map((rows) => rows.map((r) => bookmarks.map(r.data)).toList());
 
   Future<void> upsertNote(NotesCompanion data) =>
       into(notes).insertOnConflictUpdate(data);
@@ -1307,12 +1665,14 @@ class AppDatabase extends _$AppDatabase {
         sections,
       ).get()).map((e) => e.toJson()).toList(),
       'items': (await select(items).get()).map((e) => e.toJson()).toList(),
-      'playback': (await select(
-        playbackProgress,
-      ).get()).map((e) => e.toJson()).toList(),
-      'reading': (await select(
-        readingProgress,
-      ).get()).map((e) => e.toJson()).toList(),
+      'playback': [
+        for (final e in await select(playbackProgress).get())
+          await SyncStateStore(this).decorate('playback', e.toJson()),
+      ],
+      'reading': [
+        for (final e in await select(readingProgress).get())
+          await SyncStateStore(this).decorate('reading', e.toJson()),
+      ],
       'notes': (await select(notes).get()).map((e) => e.toJson()).toList(),
       'bookmarks': (await select(
         bookmarks,
@@ -1372,6 +1732,9 @@ class AppDatabase extends _$AppDatabase {
         'catalog-v2',
         'reader-locator-v1',
         'field-overrides-v1',
+        'progress-intent-v1',
+        'field-preferences-v1',
+        'music-metadata-v1',
         'library-grants-v1',
       ],
       'catalogRows': await CatalogIdentityStore(this).transportRows(),
@@ -1451,20 +1814,10 @@ class AppDatabase extends _$AppDatabase {
             );
           }
         }
-        for (final row in rows('playback')) {
-          final remote = PlaybackProgressData.fromJson(row);
-          final local = await getPlaybackByItemId(remote.itemId);
-          if (local == null || remote.lastEventAt > local.lastEventAt) {
-            await into(playbackProgress).insertOnConflictUpdate(remote);
-          }
-        }
-        for (final row in rows('reading')) {
-          final remote = ReadingProgressData.fromJson(row);
-          final local = await getReadingByItemId(remote.itemId);
-          if (local == null || remote.lastEventAt > local.lastEventAt) {
-            await into(readingProgress).insertOnConflictUpdate(remote);
-          }
-        }
+        for (final row in rows('playback'))
+          await SyncStateStore(this).merge('playback', row);
+        for (final row in rows('reading'))
+          await SyncStateStore(this).merge('reading', row);
         for (final row in rows('notes')) {
           final remote = Note.fromJson(row);
           final local = await (select(
@@ -1542,14 +1895,18 @@ class AppDatabase extends _$AppDatabase {
       await customStatement('DELETE FROM media_records WHERE library_id = ?', [
         libraryId,
       ]);
-      final itemRows = await getItemsForLibrary(libraryId);
-      final ids = itemRows.map((e) => e.id).toList();
-      await (delete(notes)..where((t) => t.libraryId.equals(libraryId))).go();
-      if (ids.isNotEmpty) {
-        await (delete(notes)..where((t) => t.itemId.isIn(ids))).go();
-        await (delete(bookmarks)..where((t) => t.itemId.isIn(ids))).go();
-        await (delete(playbackProgress)..where((t) => t.itemId.isIn(ids))).go();
-        await (delete(readingProgress)..where((t) => t.itemId.isIn(ids))).go();
+      // Subqueries avoid a parameter/heap limit when deleting a large library.
+      for (final table in ['notes', 'bookmarks']) {
+        await customStatement(
+          'DELETE FROM $table WHERE library_id=? OR item_id IN (SELECT id FROM items WHERE library_id=?)',
+          [libraryId, libraryId],
+        );
+      }
+      for (final table in ['playback_progress', 'reading_progress']) {
+        await customStatement(
+          'DELETE FROM $table WHERE item_id IN (SELECT id FROM items WHERE library_id=?)',
+          [libraryId],
+        );
       }
       await (delete(items)..where((t) => t.libraryId.equals(libraryId))).go();
       await (delete(
@@ -1560,29 +1917,17 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> refreshSectionCounts(String sectionId) async {
-    final rows =
-        await (select(items).join([
-              leftOuterJoin(
-                playbackProgress,
-                playbackProgress.itemId.equalsExp(items.id),
-              ),
-              leftOuterJoin(
-                readingProgress,
-                readingProgress.itemId.equalsExp(items.id),
-              ),
-            ])..where(
-              items.sectionId.equals(sectionId) & items.unavailable.not(),
-            ))
-            .get();
-    final completed = rows.where((row) {
-      final playback = row.readTableOrNull(playbackProgress);
-      final reading = row.readTableOrNull(readingProgress);
-      return playback?.completed ?? reading?.completed ?? false;
-    }).length;
+    final counts = await customSelect(
+      """SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN COALESCE(p.completed,r.completed,0)=1 THEN 1 ELSE 0 END),0) AS completed
+      FROM items i LEFT JOIN playback_progress p ON p.item_id=i.id
+      LEFT JOIN reading_progress r ON r.item_id=i.id WHERE i.section_id=? AND i.unavailable=0""",
+      variables: [Variable(sectionId)],
+    ).getSingle();
     await (update(sections)..where((t) => t.id.equals(sectionId))).write(
       SectionsCompanion(
-        itemCount: Value(rows.length),
-        completedCount: Value(completed),
+        itemCount: Value(counts.data['total'] as int),
+        completedCount: Value(counts.data['completed'] as int),
       ),
     );
   }

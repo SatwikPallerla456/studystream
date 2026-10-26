@@ -24,6 +24,9 @@ import 'features/resource/resource_screen.dart';
 import 'features/playlists/playlists_screen.dart';
 import 'features/settings/player_controls_screen.dart';
 import 'features/player/advanced_player_screen.dart';
+import 'features/music/music_library_screen.dart';
+import 'features/music/music_player_screen.dart';
+import 'features/music/music_provider.dart';
 
 final _router = GoRouter(
   initialLocation: '/',
@@ -34,6 +37,22 @@ final _router = GoRouter(
           state.uri.queryParameters['tab'] == 'notes' ? '/study' : null,
       builder: (context, state) =>
           DeviceHome(tab: state.uri.queryParameters['tab']),
+    ),
+    GoRoute(
+      path: '/music',
+      builder: (_, state) => MusicLibraryScreen(
+        initialTab: state.uri.queryParameters['artist'] == null ? 0 : 2,
+        artist: state.uri.queryParameters['artist'],
+      ),
+    ),
+    GoRoute(
+      path: '/listen/:itemId',
+      builder: (_, state) => MusicPlayerScreen(
+        key: ValueKey(state.uri.toString()),
+        itemId: state.pathParameters['itemId']!,
+        fromQueue: state.uri.queryParameters['queue'] == '1',
+        radio: state.uri.queryParameters['radio'] == '1',
+      ),
     ),
     GoRoute(path: '/study', builder: (_, _) => const StudyScreen()),
     GoRoute(
@@ -94,6 +113,22 @@ final _router = GoRouter(
     ),
     GoRoute(
       path: '/player/:itemId',
+      redirect: (context, state) async {
+        if (state.uri.queryParameters['native'] == '1') return null;
+        final db = ProviderScope.containerOf(context).read(appDatabaseProvider),
+            item = await ProviderScope.containerOf(context)
+                .read(appDatabaseProvider)
+                .getItemById(state.pathParameters['itemId']!);
+        if (item != null &&
+            item.itemType == 'audio' &&
+            await MediaCatalogRepository(db).libraryKind(item.libraryId) ==
+                LibraryKind.music)
+          return Uri(
+            path: '/listen/${item.id}',
+            queryParameters: state.uri.queryParameters,
+          ).toString();
+        return null;
+      },
       builder: (context, state) => MediaPlayerScreen(
         key: ValueKey(state.uri.toString()),
         multipartRepresentationId: state.uri.queryParameters['title'],
@@ -141,6 +176,24 @@ class StudyMediaPlayerApp extends ConsumerWidget {
     final themeMode = ref.watch(themeModeProvider);
     return MaterialApp.router(
       title: 'Tangerine',
+      builder: (context, child) => ListenableBuilder(
+        listenable: _router.routeInformationProvider,
+        builder: (context, _) => Column(
+          children: [
+            Expanded(child: child ?? const SizedBox.shrink()),
+            if (!_router.routeInformationProvider.value.uri.path.startsWith(
+              '/listen/',
+            ))
+              MusicDock(
+                onOpen: () {
+                  final item = ref.read(musicSessionProvider)?.track?.item;
+                  if (item != null)
+                    _router.push('/listen/${Uri.encodeComponent(item.id)}');
+                },
+              ),
+          ],
+        ),
+      ),
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),

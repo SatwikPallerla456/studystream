@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../music/music_models.dart';
 import '../reader/reader_contract.dart';
 import 'catalog_online_policy.dart';
 
@@ -46,6 +47,10 @@ abstract final class MediaRecordContract {
     'show',
     'artist',
     'album',
+    'albumArtist',
+    'composer',
+    'lyricist',
+    'label',
     'author',
     'series',
     'volume',
@@ -79,6 +84,7 @@ abstract final class MediaRecordContract {
     'reader' => _readerFields,
     'metadata' => _metadataFields,
     'organization' => {'favorite', 'tags'},
+    'music' => {'lyrics', 'lrc', 'cue'},
     'collection' || 'playlist' || 'album' => {'title', 'items'},
     _ => null,
   };
@@ -134,7 +140,7 @@ abstract final class MediaRecordContract {
           jsonValue(entry, depth + 1);
         }
       } else if (value is String) {
-        if (value.length > 16000) {
+        if (value.length > (kind == 'music' ? 65536 : 16000)) {
           throw const FormatException('Metadata text is too long');
         }
       } else if (value != null &&
@@ -152,7 +158,12 @@ abstract final class MediaRecordContract {
       }
       throw const FormatException('Unsupported media record kind');
     }
-    final itemKind = {'reader', 'metadata', 'organization'}.contains(kind);
+    final itemKind = {
+      'reader',
+      'metadata',
+      'organization',
+      'music',
+    }.contains(kind);
     if (itemKind != (itemId != null) ||
         kind == 'library' && id != 'library:$libraryId' ||
         itemKind && id != '$kind:$itemId') {
@@ -280,6 +291,12 @@ abstract final class MediaRecordContract {
       if (data['extra'] != null && data['extra'] is! bool)
         throw const FormatException('Invalid extra flag');
       choice('matchState', {'unmatched', 'matched', 'cleared'});
+    } else if (kind == 'music') {
+      string('lyrics', limit: 65536);
+      string('lrc', limit: 65536);
+      string('cue', limit: 65536);
+      if (data['lrc'] is String) LyricLine.parse(data['lrc'] as String);
+      if (data['cue'] is String) CueTrack.decode(data['cue'] as String);
     } else if (kind == 'organization') {
       if (data['favorite'] != null && data['favorite'] is! bool) {
         throw const FormatException('Invalid favorite flag');

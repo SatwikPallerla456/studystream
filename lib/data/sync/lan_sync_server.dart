@@ -17,13 +17,18 @@ import 'approved_media_source.dart';
 import 'lan_discovery.dart';
 import 'library_access_store.dart';
 import 'sync_change_journal.dart';
+import 'music_sync_projection.dart';
 import '../../domain/catalog/catalog_identity_store.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../domain/catalog/media_record_contract.dart';
+import '../../domain/services/player_library_repository.dart';
 import '../../domain/services/thumbnail_cache.dart';
 import '../../domain/services/catalog_artwork_cache.dart';
 import '../reader/book_page_source.dart';
 import 'web_player.dart';
+import 'web_browser_script.dart';
+import 'web_reader_script.dart';
+import 'browser_experience_api.dart';
 import '../../domain/study/study_catalog_repository.dart';
 
 class LanSyncState {
@@ -58,6 +63,7 @@ class LanSyncServer {
   String? _pairingCode;
   final _artwork = ThumbnailCache();
   int _pageJobs = 0;
+  late final _browser = BrowserExperienceApi(database);
   String _name = 'Tangerine server';
   Future<void>? _starting;
 
@@ -176,7 +182,8 @@ class LanSyncServer {
     try {
       request.response.headers
         ..set('X-Content-Type-Options', 'nosniff')
-        ..set('Cache-Control', 'no-store');
+        ..set('Cache-Control', 'no-store')
+        ..set('Referrer-Policy', 'no-referrer');
       final path = request.uri.pathSegments;
       if ((request.method == 'GET' || request.method == 'HEAD') &&
           request.uri.path == '/') {
@@ -184,10 +191,24 @@ class LanSyncServer {
           ..contentType = ContentType.html
           ..set(
             'Content-Security-Policy',
-            "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
           )
           ..set('Referrer-Policy', 'no-referrer');
         if (request.method == 'GET') request.response.write(webPlayerHtml);
+        await request.response.close();
+        return;
+      }
+      if (request.method == 'GET' &&
+          {'/browser.js', '/reader.js'}.contains(request.uri.path)) {
+        request.response.headers.set(
+          'Content-Type',
+          'text/javascript; charset=utf-8',
+        );
+        request.response.write(
+          request.uri.path == '/browser.js'
+              ? webBrowserScript
+              : webReaderScript,
+        );
         await request.response.close();
         return;
       }
@@ -206,9 +227,15 @@ class LanSyncServer {
             'study-pages-v1',
             'catalog-v2',
             'catalog-bootstrap-v2',
+            'progress-intent-v1',
+            'field-preferences-v1',
+            MusicSyncProjection.capability,
             'change-feed-v2',
             'library-grants-v1',
             'reader-locator-v1',
+            'browser-categories-v1',
+            'browser-reader-v1',
+            'host-controls-v2',
             'field-overrides-v1',
           ],
         });
@@ -221,7 +248,12 @@ class LanSyncServer {
       if (request.method == 'GET' && request.uri.path == '/v1/session') {
         return await _json(request, HttpStatus.ok, {
           'deviceId': device.id,
-          'capabilities': ['study-pages-v1'],
+          'capabilities': [
+            'study-pages-v1',
+            'browser-categories-v1',
+            'browser-reader-v1',
+            'host-controls-v2',
+          ],
           'name': _name,
           'protocolVersion': 2,
           'libraries': [
@@ -230,7 +262,13 @@ class LanSyncServer {
               if ((await LibraryAccessStore(
                 database,
               ).allowed(device.id, 'browse')).contains(library.id))
-                {'id': library.id, 'title': library.title},
+                {
+                  'id': library.id,
+                  'title': library.title,
+                  'kind': (await MediaCatalogRepository(
+                    database,
+                  ).libraryKind(library.id)).name,
+                },
           ],
         });
       }
@@ -266,6 +304,8 @@ class LanSyncServer {
       final browse = await access.allowed(device.id, 'browse');
       final mutate = await access.allowed(device.id, 'mutate');
       final stream = await access.allowed(device.id, 'stream');
+      if (await _browser.handle(request, device, browse, stream, mutate))
+        return;
       final scopeIds = browse.toList()..sort();
       final scope = stableId(scopeIds.join('::'));
       if (request.method == 'GET' && request.uri.path == '/v2/bootstrap') {
@@ -373,7 +413,10 @@ class LanSyncServer {
       if (request.method == 'GET' && request.uri.path == '/v2/catalog')
         return await _catalogPage(request, browse);
       if (request.uri.path == '/v1/playback') {
-        final active = playbackController?.status['itemId'];
+        final activeStatus = Map<String, Object?>.from(
+          playbackController?.status ?? {'active': false},
+        );
+        final active = activeStatus['itemId'];
         final activeItem = active is String
             ? await database.getItemById(active)
             : null;
@@ -395,7 +438,10 @@ class LanSyncServer {
         if (request.method == 'GET') {
           return await _json(request, HttpStatus.ok, {
             'enabled': enabled,
-            if (enabled) ...?playbackController?.status,
+            'canControl': mutate.contains(activeItem.libraryId),
+            if (enabled)
+              for (final entry in activeStatus.entries)
+                if (!entry.key.startsWith('_')) entry.key: entry.value,
           });
         }
         if (request.method == 'POST') {
@@ -413,15 +459,40 @@ class LanSyncServer {
           if (action is! String || value != null && value is! num) {
             throw const FormatException('Invalid player command.');
           }
-          if ({'next', 'previous'}.contains(action) &&
+          if ({'next', 'previous', 'shuffle', 'repeat'}.contains(action) &&
               !(await _hostedLibraryIds()).every(mutate.contains))
             return await _json(request, HttpStatus.forbidden, {
               'error':
                   'Queue navigation requires access to all hosted libraries',
             });
+          if ({'next', 'previous', 'shuffle', 'repeat'}.contains(action) &&
+              activeStatus['_fromQueue'] == true) {
+            final queue = await PlayerLibraryRepository(
+              database,
+              queueNamespace: activeStatus['_queueNamespace'] as String?,
+            ).load();
+            final ids = queue.queue.map((entry) => entry.itemId).toList();
+            final rows = await database
+                .customSelect(
+                  'SELECT DISTINCT library_id FROM items WHERE id IN (SELECT value FROM json_each(?))',
+                  variables: [drift.Variable(jsonEncode(ids))],
+                )
+                .get();
+            if (rows.any((row) => !mutate.contains(row.data['library_id'])))
+              return _json(request, 403, {
+                'error':
+                    'This queue includes a library that is not approved for control',
+              });
+          }
+          if (body.containsKey('itemId') && body['itemId'] != active) {
+            return _json(request, 409, {
+              'error': 'The host title changed. Refresh the remote.',
+            });
+          }
           await playbackController!.execute(
             action,
             (value as num?)?.toDouble(),
+            expectedItemId: active as String?,
           );
           return await _json(request, HttpStatus.ok, {'status': 'applied'});
         }
@@ -827,24 +898,9 @@ class LanSyncServer {
         )
         .get();
     final page = rows.take(limit).toList();
-    final catalog = MediaCatalogRepository(database);
     final items = <Map<String, dynamic>>[];
     for (final row in page) {
-      final item = database.items.map(row.data);
-      final metadata = await catalog.metadata(item);
-      items.add({
-        ...item.toJson(),
-        'filePath': '',
-        'thumbnailPath': null,
-        'fingerprint': null,
-        'libraryKind': (await catalog.libraryKind(item.libraryId)).name,
-        'metadata': {
-          for (final key in MediaRecordContract.fields('metadata')!)
-            if (metadata.containsKey(key)) key: metadata[key],
-        },
-        'playback': (await database.getPlaybackByItemId(item.id))?.toJson(),
-        'reading': (await database.getReadingByItemId(item.id))?.toJson(),
-      });
+      items.add(await _browser.itemJson(database.items.map(row.data)));
     }
     final next = rows.length > limit
         ? base64UrlEncode(
@@ -995,6 +1051,11 @@ class LanSyncServer {
   }
 
   Future<void> _json(HttpRequest request, int status, Object body) async {
+    final music = (request.headers.value('X-Tangerine-Capabilities') ?? '')
+        .split(',')
+        .contains(MusicSyncProjection.capability);
+    if (!music && body is Map<String, dynamic>)
+      body = MusicSyncProjection.snapshot(body);
     request.response
       ..statusCode = status
       ..headers.contentType = ContentType.json

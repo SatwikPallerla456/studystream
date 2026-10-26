@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'photo_slideshow_screen.dart';
+import '../music/music_library_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -47,6 +48,7 @@ String _fieldLabel(String? field, LibraryKind kind) => switch (field) {
   'season' => 'Seasons',
   'artist' => 'Artists',
   'album' => 'Albums',
+  'edition' => 'Album editions',
   'author' => 'Authors',
   'series' =>
     kind == LibraryKind.audiobooks
@@ -90,6 +92,7 @@ String _groupLabel(String field, String value, LibraryKind kind) {
     'season' => 'Season not identified',
     'artist' => 'Unknown artist',
     'album' => 'Unknown album',
+    'edition' => 'Original edition',
     'author' => 'Unknown author',
     'month' => 'Date unavailable',
     'folder' => 'Library root',
@@ -234,6 +237,20 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
   }
 
   Future<void> _openGroup(CategoryGroup group) async {
+    if (widget.kind == LibraryKind.music && _group == 'artist') {
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => MusicArtistScreen(
+            artist: group.value,
+            libraryId: widget.libraryId ?? _library,
+          ),
+        ),
+      );
+      if (mounted) _reload(reset: false);
+      return;
+    }
+
     final filters = {...widget.filters};
     var library = widget.libraryId ?? _library;
     var title = _groupLabel(_group!, group.label ?? group.value, widget.kind);
@@ -255,6 +272,7 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     final next = switch (_group) {
       'show' => 'season',
       'artist' => widget.kind == LibraryKind.musicVideos ? null : 'album',
+      'album' when widget.kind == LibraryKind.music => 'edition',
       'author' => 'series',
       _ => null,
     };
@@ -316,7 +334,7 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
       });
       if (mounted)
         await context.push(
-          '/player/${Uri.encodeComponent(ids[selected])}?queue=1',
+          '/${widget.kind == LibraryKind.music ? 'listen' : 'player'}/${Uri.encodeComponent(ids[selected])}?queue=1',
         );
     } catch (error) {
       if (mounted)
@@ -437,6 +455,31 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       if (!widget.nested) ...[_roots(), const SizedBox(height: 16)],
+      if (widget.kind == LibraryKind.music)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Wrap(
+            spacing: 12,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => context.push('/music'),
+                icon: const Icon(Icons.library_music),
+                label: const Text(
+                  'Smart playlists · history · radio · outputs',
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const MusicLibraryScreen(initialTab: 4),
+                  ),
+                ),
+                child: const Text('Edit library tags'),
+              ),
+            ],
+          ),
+        ),
       Wrap(
         spacing: 16,
         runSpacing: 12,
@@ -952,6 +995,7 @@ class _CategoryDrillScreen extends StatelessWidget {
           group: switch (key) {
             'show' => 'season',
             'artist' => kind == LibraryKind.musicVideos ? null : 'album',
+            'album' when kind == LibraryKind.music => 'edition',
             'author' => 'series',
             _ => null,
           },

@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 import '../../data/db/app_database.dart';
 import 'media_catalog_repository.dart';
+import 'browse_options.dart';
 
 class CollectionMember {
   const CollectionMember(
@@ -69,15 +70,24 @@ class CollectionBrowseRepository {
     );
   }
 
-  Future<CollectionMembersPage> page(String id, {(int, String)? after}) async {
+  Future<CollectionMembersPage> page(
+    String id, {
+    (int, String)? after,
+    String query = '',
+  }) async {
+    if (query.length > 512)
+      throw const FormatException('Collection search is too long');
+    final terms = query.trim().isEmpty ? '' : catalogTerms(query);
     final rows = await db
         .customSelect(
           '''SELECT i.*,COALESCE(s.title,i.user_title,i.title) AS display_title,
       m.position AS member_position,COALESCE(p.percent_watched,r.percent_read,0) AS progress,
       COALESCE(p.completed,r.completed,0) AS done $_join WHERE m.collection_id=? AND m.deleted=0
+      ${terms.isEmpty ? '' : "AND i.id IN (SELECT item_id FROM catalog_search WHERE catalog_search MATCH ?)"}
       ${after == null ? '' : 'AND (m.position,i.id)>(?,?)'} ORDER BY m.position,i.id LIMIT 49''',
           variables: [
             Variable(id),
+            if (terms.isNotEmpty) Variable(terms),
             if (after != null) ...[Variable(after.$1), Variable(after.$2)],
           ],
         )

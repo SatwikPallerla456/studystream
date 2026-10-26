@@ -270,12 +270,19 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       _source = source;
       _pendingSource = null;
       _visited.add(_page);
-      _writer = ReadingProgressWriter(database: _db, item: item)
-        ..currentPage = _page
-        ..totalPages = source.pageCount
-        ..pagesVisited = 1
-        ..zoom = _zoom
-        ..readingMode = _mode;
+      _writer =
+          ReadingProgressWriter(
+              database: _db,
+              item: item,
+              initialContext: _session!.progressContext,
+            )
+            ..currentPage = _page
+            ..totalPages = source.pageCount
+            ..pagesVisited = 1
+            ..zoom = _zoom
+            ..readingMode = _mode;
+      if (widget.initialPage != null || widget.initialStudyAnchor != null)
+        _writer?.markPositionIntent();
       if (mounted) setState(() {});
     } catch (error) {
       if (mounted && error is! ReaderCancelled)
@@ -308,9 +315,11 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       ..readingMode = _mode;
     if (_scroll.hasClients) writer.scrollOffset = _scroll.offset;
     // Capture both before waiting; writes from rapid input cannot overtake.
-    final progress = writer.save();
-    final location = _session!.write(locator: locator);
-    final write = Future.wait([progress, location]).then<void>((_) {});
+    Map<String, dynamic>? accepted;
+    final progress = writer.save(onSaved: (context) => accepted = context);
+    final write = progress.then(
+      (_) => _session!.write(locator: locator, progressContext: accepted),
+    );
     _saveTail = write.catchError((Object error) {
       if (mounted)
         setState(() => _error = 'Reading state could not be saved: $error');
@@ -323,7 +332,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     _settle?.cancel();
     _settle = Timer(
       const Duration(milliseconds: 700),
-      () => unawaited(_save()),
+      () => unawaited(_save().catchError((Object _) {})),
     );
   }
 
@@ -336,6 +345,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       await _save();
       if (!mounted) return;
       setState(() {
+        _writer?.markPositionIntent();
         _page = next;
         _selectedText = null;
         _selectedRange = null;
@@ -939,6 +949,8 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
         content = NotificationListener<ScrollNotification>(
           onNotification: (notification) {
             if (notification is ScrollUpdateNotification && !_restoring) {
+              if ((notification.scrollDelta ?? 0) < 0)
+                _writer?.markPositionIntent();
               final page = _continuous!.pageAt(notification.metrics.pixels);
               final start = _continuous!.offsets[page - 1],
                   height = _continuous!.offsets[page] - start;

@@ -173,7 +173,11 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
         if (mounted) setState(() => _details = _load());
         return;
       }
-      var route = MediaVisuals.route(item);
+      var route =
+          item.itemType == 'audio' &&
+              details.experience.kind == LibraryKind.music
+          ? '/listen/${Uri.encodeComponent(item.id)}'
+          : MediaVisuals.route(item);
       if (details.multipart) {
         final target = await CatalogPlayback(
           ref.read(appDatabaseProvider),
@@ -414,6 +418,29 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                                   : 'Edit tags (${details.tags.length})',
                             ),
                           ),
+                          if (details.experience.completion) ...[
+                            TextButton.icon(
+                              onPressed: _saving
+                                  ? null
+                                  : () => _change(
+                                      () => CatalogPlayback(
+                                        ref.read(appDatabaseProvider),
+                                      ).resetTitleProgress(item),
+                                    ),
+                              icon: const Icon(Icons.restart_alt),
+                              label: const Text('Restart progress'),
+                            ),
+                            TextButton(
+                              onPressed: _saving
+                                  ? null
+                                  : () => _change(
+                                      () => CatalogPlayback(
+                                        ref.read(appDatabaseProvider),
+                                      ).useAutomaticTitleCompletion(item),
+                                    ),
+                              child: const Text('Use automatic completion'),
+                            ),
+                          ],
                           if (details.experience.completion)
                             TextButton.icon(
                               onPressed: _saving
