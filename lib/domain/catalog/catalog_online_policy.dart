@@ -5,6 +5,7 @@ abstract final class CatalogOnlinePolicy {
     if (!_https(uri)) return false;
     return {
           'image.tmdb.org',
+          'artworks.thetvdb.com',
           'static.tvmaze.com',
           'covers.openlibrary.org',
           'coverartarchive.org',
@@ -18,6 +19,8 @@ abstract final class CatalogOnlinePolicy {
     return _https(uri) &&
         {
           'www.themoviedb.org',
+          'thetvdb.com',
+          'www.thetvdb.com',
           'www.tvmaze.com',
           'openlibrary.org',
           'musicbrainz.org',

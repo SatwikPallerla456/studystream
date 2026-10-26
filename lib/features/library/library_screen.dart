@@ -1,3 +1,4 @@
+import 'library_processing_screen.dart';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -450,6 +451,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         showHome: true,
         onBack: () => context.go('/'),
         actions: [
+          LibraryProcessingButton(libraryId: library.id),
           IconButton(
             tooltip: 'Collections and albums',
             icon: const Icon(Icons.collections_bookmark_outlined),

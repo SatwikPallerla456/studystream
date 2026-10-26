@@ -3,6 +3,7 @@ import AVFoundation
 import FlutterMacOS
 import Vision
 import ImageIO
+import desktop_multi_window
 
 class MainFlutterWindow: NSWindow {
   private var accessedFolders: [URL] = []
@@ -15,6 +16,13 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    FlutterMultiWindowPlugin.setOnWindowCreatedCallback { controller in
+      let notificationDelegate=NSUserNotificationCenter.default.delegate
+      RegisterGeneratedPlugins(registry: controller)
+      NSUserNotificationCenter.default.delegate=notificationDelegate
+      MyVLCBridge.register(with: controller.registrar(forPlugin: "MyVLCBridge"))
+      TangerinePlaybackFolderAccess.register(with: controller.registrar(forPlugin: "TangerinePlaybackFolderAccess"))
+    }
     readerAnalysisChannel = ReaderRasterAnalysis.register(with: flutterViewController.engine.binaryMessenger)
     MyVLCBridge.register(with: flutterViewController.registrar(forPlugin: "MyVLCBridge"))
 
@@ -147,5 +155,38 @@ private enum ReaderRasterAnalysis {
       }
     }
     return channel
+  }
+}
+
+/// Secondary engines retain their own scope interests so closing the main window
+/// cannot revoke a still-playing child's approved library access.
+private final class TangerinePlaybackFolderAccess: NSObject, FlutterPlugin {
+  private var scopes: [String: URL] = [:]
+  static func register(with registrar: FlutterPluginRegistrar) {
+    let service = TangerinePlaybackFolderAccess()
+    let channel = FlutterMethodChannel(name: "studystream/folder_access", binaryMessenger: registrar.messenger)
+    registrar.addMethodCallDelegate(service, channel: channel)
+  }
+  deinit { scopes.values.forEach { $0.stopAccessingSecurityScopedResource() } }
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    do {
+      let args = call.arguments as? [String: Any] ?? [:]
+      if call.method == "restore" {
+        let bookmarks = UserDefaults.standard.dictionary(forKey: "StudyStream.folderBookmarks") as? [String: Data] ?? [:]
+        for (path, data) in bookmarks where scopes[path] == nil {
+          var stale = false
+          if let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale), url.startAccessingSecurityScopedResource() { scopes[path] = url }
+        }
+        result(nil)
+      } else if call.method == "retain", let path = args["path"] as? String {
+        let url = URL(fileURLWithPath: path)
+        let data = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+        var bookmarks = UserDefaults.standard.dictionary(forKey: "StudyStream.folderBookmarks") as? [String: Data] ?? [:]
+        bookmarks[path] = data; UserDefaults.standard.set(bookmarks, forKey: "StudyStream.folderBookmarks")
+        if scopes[path] == nil, url.startAccessingSecurityScopedResource() { scopes[path] = url }; result(nil)
+      } else if call.method == "allocatedSizes" { result([String: Int]()) }
+      else if call.method == "thumbnail" { result(nil) }
+      else { result(FlutterMethodNotImplemented) }
+    } catch { result(FlutterError(code: "FOLDER_ACCESS", message: error.localizedDescription, details: nil)) }
   }
 }

@@ -16,8 +16,10 @@ class MediaProgressWriter {
     this.completionThreshold = .90,
     this.resumeRewindSeconds = 10,
     this.onError,
+    this.saveHistory = true,
   });
 
+  final bool saveHistory;
   final AppDatabase database;
   final Item item;
   final String? deviceId;
@@ -72,6 +74,7 @@ class MediaProgressWriter {
   }
 
   Future<void> flush({bool forceComplete = false}) {
+    if (!saveHistory) return Future.value();
     _timer?.cancel();
     _timer = null;
     if (_disposed) return _queue;
@@ -83,6 +86,10 @@ class MediaProgressWriter {
       if (revision <= _savedRevision && !forceComplete) return;
       if (revision == 0) return;
       await database.transaction(() async {
+        await database.customStatement(
+          'UPDATE app_settings SET value = value WHERE key = ?',
+          ['player.library.v1'],
+        );
         final old = await database.getPlaybackByItemId(item.id);
         final completed =
             old?.manualCompletion ??

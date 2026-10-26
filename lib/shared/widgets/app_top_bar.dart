@@ -35,7 +35,15 @@ class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
       leading: showBack
           ? IconButton(
               icon: const Icon(Icons.arrow_back_rounded),
-              onPressed: onBack ?? () => context.pop(),
+              onPressed:
+                  onBack ??
+                  () {
+                    if (context.canPop()) {
+                      context.pop();
+                    } else {
+                      context.go('/?tab=home');
+                    }
+                  },
               tooltip: 'Back',
             )
           : showHome

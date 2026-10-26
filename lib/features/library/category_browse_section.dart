@@ -1,13 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'package:drift/drift.dart' as drift;
+import 'photo_slideshow_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/category_browse_repository.dart';
+import '../../domain/catalog/browse_options.dart';
+import '../../shared/widgets/catalog_browse_controls.dart';
 import '../../domain/catalog/catalog_hints.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../domain/services/player_library_repository.dart';
@@ -22,11 +24,22 @@ bool hasCategoryHierarchy(LibraryKind kind) => {
   LibraryKind.music,
   LibraryKind.books,
   LibraryKind.comics,
+  LibraryKind.audiobooks,
+  LibraryKind.podcasts,
+  LibraryKind.photos,
+  LibraryKind.homeVideos,
+  LibraryKind.musicVideos,
+  LibraryKind.documents,
 }.contains(kind);
 String? _firstGroup(LibraryKind kind) => switch (kind) {
   LibraryKind.television => 'show',
   LibraryKind.music => 'artist',
-  LibraryKind.comics => 'series',
+  LibraryKind.comics ||
+  LibraryKind.audiobooks ||
+  LibraryKind.podcasts => 'series',
+  LibraryKind.photos || LibraryKind.homeVideos => 'month',
+  LibraryKind.musicVideos => 'artist',
+  LibraryKind.documents => 'format',
   _ => null,
 };
 String _fieldLabel(String? field, LibraryKind kind) => switch (field) {
@@ -35,9 +48,27 @@ String _fieldLabel(String? field, LibraryKind kind) => switch (field) {
   'artist' => 'Artists',
   'album' => 'Albums',
   'author' => 'Authors',
-  'series' => 'Series',
+  'series' =>
+    kind == LibraryKind.audiobooks
+        ? 'Books'
+        : kind == LibraryKind.podcasts
+        ? 'Shows'
+        : 'Series',
+  'month' => 'File month',
+  'folder' => 'Folders',
+  'format' => 'Formats',
   _ =>
-    kind == LibraryKind.television
+    kind == LibraryKind.audiobooks
+        ? 'Files & chapters'
+        : kind == LibraryKind.podcasts
+        ? 'Episodes'
+        : kind == LibraryKind.photos
+        ? 'Photos'
+        : {LibraryKind.homeVideos, LibraryKind.musicVideos}.contains(kind)
+        ? 'Videos'
+        : kind == LibraryKind.documents
+        ? 'Documents'
+        : kind == LibraryKind.television
         ? 'Episodes'
         : kind == LibraryKind.music
         ? 'Tracks'
@@ -51,6 +82,8 @@ String _groupLabel(String field, String value, LibraryKind kind) {
         ? value == '0'
               ? 'Specials'
               : 'Season $value'
+        : field == 'folder' && value.startsWith('@sources/')
+        ? value.replaceFirst(RegExp(r'^@sources/[^/]+/?'), 'Source / ')
         : value;
   return switch (field) {
     'show' => 'Unidentified shows',
@@ -58,6 +91,11 @@ String _groupLabel(String field, String value, LibraryKind kind) {
     'artist' => 'Unknown artist',
     'album' => 'Unknown album',
     'author' => 'Unknown author',
+    'month' => 'Date unavailable',
+    'folder' => 'Library root',
+    'format' => 'Unknown format',
+    'series' when kind == LibraryKind.audiobooks => 'Book not identified',
+    'series' when kind == LibraryKind.podcasts => 'Show not identified',
     _ =>
       kind == LibraryKind.comics ? 'Series not identified' : 'Standalone books',
   };
@@ -74,6 +112,13 @@ class CategoryBrowseSection extends ConsumerStatefulWidget {
     this.nested = false,
     this.emptyAction,
     this.rootRoute,
+    this.initialSort = BrowseSort.natural,
+    this.initialGrid,
+    this.initialFavorites = false,
+    this.initialTag,
+    this.initialQuery = '',
+    this.initialStatus = ShelfStatus.all,
+    this.initialUnits = ReadingUnits.all,
   });
   final LibraryKind kind;
   final String? libraryId;
@@ -82,16 +127,28 @@ class CategoryBrowseSection extends ConsumerStatefulWidget {
   final bool nested;
   final Widget? emptyAction;
   final Route<dynamic>? rootRoute;
+  final BrowseSort initialSort;
+  final bool? initialGrid;
+  final bool initialFavorites;
+  final String? initialTag;
+  final String initialQuery;
+  final ShelfStatus initialStatus;
+  final ReadingUnits initialUnits;
   @override
   ConsumerState<CategoryBrowseSection> createState() => _CategoryBrowseState();
 }
 
 class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
-  final _search = TextEditingController();
+  late final _search = TextEditingController(text: widget.initialQuery);
+  late BrowseSort _sort = widget.initialSort;
+  late bool _gridView =
+      widget.initialGrid ?? (_reading || _visual || _group != null);
+  late bool _favorites = widget.initialFavorites;
+  late String? _tag = widget.initialTag;
   late String? _group = widget.nested ? widget.group : _firstGroup(widget.kind);
   String? _library;
-  ShelfStatus _status = ShelfStatus.all;
-  ReadingUnits _units = ReadingUnits.all;
+  late ShelfStatus _status = widget.initialStatus;
+  late ReadingUnits _units = widget.initialUnits;
   (String, String)? _after;
   final _history = <(String, String)?>[];
   Timer? _searchTimer, _refreshTimer;
@@ -99,8 +156,21 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
   bool _busy = false;
   String? _message;
   late Future<CategoryPage> _page;
-  bool get _reading =>
-      {LibraryKind.books, LibraryKind.comics}.contains(widget.kind);
+  bool get _reading => {
+    LibraryKind.books,
+    LibraryKind.comics,
+    LibraryKind.documents,
+  }.contains(widget.kind);
+  bool get _listening => {
+    LibraryKind.music,
+    LibraryKind.audiobooks,
+    LibraryKind.podcasts,
+  }.contains(widget.kind);
+  bool get _visual => {
+    LibraryKind.photos,
+    LibraryKind.homeVideos,
+    LibraryKind.musicVideos,
+  }.contains(widget.kind);
   CategoryScope get _scope => CategoryScope(
     kind: widget.kind,
     libraryId: widget.libraryId ?? _library,
@@ -108,6 +178,9 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     query: _search.text,
     status: _status,
     units: _units,
+    sort: _sort,
+    favorites: _favorites,
+    tag: _tag,
   );
   CategoryBrowseRepository get _repo =>
       CategoryBrowseRepository(ref.read(appDatabaseProvider));
@@ -124,6 +197,7 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
             db.libraries,
             db.playbackProgress,
             db.readingProgress,
+            db.appSettings,
           },
         )
         .watch()
@@ -161,8 +235,18 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
 
   Future<void> _openGroup(CategoryGroup group) async {
     final filters = {...widget.filters};
+    var library = widget.libraryId ?? _library;
     var title = _groupLabel(_group!, group.label ?? group.value, widget.kind);
-    if (_group == 'album' && !filters.containsKey('artist')) {
+    if (_group == 'folder' && library == null) {
+      final pair = (jsonDecode(group.value) as List).cast<String>();
+      library = pair[0];
+      filters['folder'] = pair[1];
+    } else if (_group == 'series' &&
+        widget.kind == LibraryKind.audiobooks &&
+        !filters.containsKey('author')) {
+      final pair = (jsonDecode(group.value) as List).cast<String>();
+      filters.addAll({'author': pair[0], 'series': pair[1]});
+    } else if (_group == 'album' && !filters.containsKey('artist')) {
       final pair = (jsonDecode(group.value) as List).cast<String>();
       filters.addAll({'artist': pair[0], 'album': pair[1]});
     } else {
@@ -170,7 +254,7 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     }
     final next = switch (_group) {
       'show' => 'season',
-      'artist' => 'album',
+      'artist' => widget.kind == LibraryKind.musicVideos ? null : 'album',
       'author' => 'series',
       _ => null,
     };
@@ -178,10 +262,17 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
       MaterialPageRoute<void>(
         builder: (_) => _CategoryDrillScreen(
           kind: widget.kind,
-          libraryId: widget.libraryId ?? _library,
+          libraryId: library,
           filters: filters,
           group: next,
           title: title,
+          sort: _sort,
+          grid: _gridView,
+          favorites: _favorites,
+          tag: _tag,
+          query: _search.text,
+          status: _status,
+          units: _units,
           rootRoute: widget.rootRoute ?? ModalRoute.of(context),
         ),
       ),
@@ -249,6 +340,16 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
         ? 'episode file'
         : widget.kind == LibraryKind.comics
         ? 'comic'
+        : widget.kind == LibraryKind.audiobooks
+        ? 'audio file'
+        : widget.kind == LibraryKind.podcasts
+        ? 'episode'
+        : widget.kind == LibraryKind.photos
+        ? 'photo'
+        : widget.kind == LibraryKind.documents
+        ? 'document'
+        : _visual
+        ? 'video'
         : 'book';
     final unit = group.count == 1 ? singular : '${singular}s';
     return '${group.count} $unit${group.inProgress > 0 ? ' · ${group.inProgress} in progress' : ''}${group.completed > 0 ? ' · ${group.completed} completed' : ''}${group.unavailable > 0 ? ' · ${group.unavailable} offline' : ''}';
@@ -261,6 +362,12 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
       for (final group in switch (widget.kind) {
         LibraryKind.television => <String?>['show', null],
         LibraryKind.music => <String?>['artist', 'album', null],
+        LibraryKind.audiobooks => <String?>['series', 'author', null],
+        LibraryKind.podcasts => <String?>['series', null],
+        LibraryKind.musicVideos => <String?>['artist', null],
+        LibraryKind.photos ||
+        LibraryKind.homeVideos => <String?>['month', 'folder', null],
+        LibraryKind.documents => <String?>['format', 'folder', null],
         _ => <String?>[null, 'series', 'author'],
       })
         ChoiceChip(
@@ -276,7 +383,11 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
       key: ValueKey(_status),
       initialValue: _status,
       decoration: InputDecoration(
-        labelText: _reading ? 'Reading status' : 'Watch status',
+        labelText: _reading
+            ? 'Reading status'
+            : _listening
+            ? 'Listening status'
+            : 'Watch status',
       ),
       items: [
         for (final status in ShelfStatus.values)
@@ -284,9 +395,24 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
             value: status,
             child: Text(switch (status) {
               ShelfStatus.all => 'All',
-              ShelfStatus.inProgress => _reading ? 'Reading' : 'In progress',
-              ShelfStatus.unread => _reading ? 'Unread' : 'Unwatched',
-              ShelfStatus.completed => _reading ? 'Read' : 'Watched',
+              ShelfStatus.inProgress =>
+                _reading
+                    ? 'Reading'
+                    : _listening
+                    ? 'Listening'
+                    : 'In progress',
+              ShelfStatus.unread =>
+                _reading
+                    ? 'Unread'
+                    : _listening
+                    ? 'Unplayed'
+                    : 'Unwatched',
+              ShelfStatus.completed =>
+                _reading
+                    ? 'Read'
+                    : _listening
+                    ? 'Played'
+                    : 'Watched',
             }),
           ),
       ],
@@ -298,73 +424,13 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
       },
     ),
   );
-  Widget _libraryFilter() {
-    final db = ref.read(appDatabaseProvider);
-    return StreamBuilder<List<Library>>(
-      stream: db
-          .customSelect(
-            '''SELECT l.* FROM libraries l WHERE
-        EXISTS(SELECT 1 FROM items i JOIN catalog_facets f ON f.item_id=i.id
-          WHERE i.library_id=l.id AND f.field='category' AND f.value=?)
-        OR EXISTS(SELECT 1 FROM media_records m WHERE m.id='library:'||l.id
-          AND m.deleted=0 AND json_extract(m.payload,'\$.type')=?)
-        ORDER BY l.title,l.id LIMIT 200''',
-            variables: [
-              drift.Variable(widget.kind.name),
-              drift.Variable(widget.kind.name),
-            ],
-            readsFrom: {db.items, db.libraries},
-          )
-          .watch()
-          .map(
-            (rows) => rows.map((row) => db.libraries.map(row.data)).toList(),
-          ),
-      builder: (context, snapshot) {
-        final libraries = snapshot.data ?? [];
-        final selected = libraries.any((l) => l.id == _library)
-            ? _library
-            : null;
-        if (snapshot.hasData && _library != null && selected == null) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && _library != null) {
-              _library = null;
-              _reload();
-            }
-          });
-        }
-        if (snapshot.hasData && libraries.length < 2)
-          return const SizedBox.shrink();
-        return SizedBox(
-          width: 280,
-          child: DropdownButtonFormField<String>(
-            key: ValueKey(selected),
-            initialValue: selected ?? '',
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Source library'),
-            items: [
-              const DropdownMenuItem(
-                value: '',
-                child: Text('All source libraries'),
-              ),
-              for (final library in libraries)
-                DropdownMenuItem(
-                  value: library.id,
-                  child: Text(
-                    library.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-            ],
-            onChanged: (value) {
-              _library = value == '' ? null : value;
-              _reload();
-            },
-          ),
-        );
-      },
-    );
-  }
+  Widget _libraryFilter() => CatalogLibraryFilter(
+    value: _library,
+    onChanged: (value) {
+      _library = value;
+      _reload();
+    },
+  );
 
   @override
   Widget build(BuildContext context) => Column(
@@ -383,7 +449,11 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
               decoration: InputDecoration(
                 prefixIcon: const Icon(Icons.search),
                 labelText: 'Search ${widget.kind.label.toLowerCase()}',
-                hintText: widget.kind == LibraryKind.music
+                hintText: _visual
+                    ? 'Title or filename'
+                    : widget.kind == LibraryKind.documents
+                    ? 'Document title or author'
+                    : widget.kind == LibraryKind.music
                     ? 'Title, artist or album'
                     : widget.kind == LibraryKind.television
                     ? 'Show or episode title'
@@ -407,10 +477,35 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
               },
             ),
           ),
-          if (_reading || widget.kind == LibraryKind.television)
+          if (_reading ||
+              _listening ||
+              widget.kind == LibraryKind.television ||
+              widget.kind == LibraryKind.homeVideos)
             _statusFilters(),
           if (widget.libraryId == null && !widget.nested) _libraryFilter(),
         ],
+      ),
+      const SizedBox(height: 12),
+      CatalogBrowseControls(
+        sort: _sort,
+        grid: _gridView,
+        favorites: _favorites,
+        tag: _tag,
+        libraryId: widget.libraryId ?? _library,
+        category: widget.kind.name,
+        onSort: (value) {
+          _sort = value;
+          _reload();
+        },
+        onGrid: (value) => setState(() => _gridView = value),
+        onFavorites: (value) {
+          _favorites = value;
+          _reload();
+        },
+        onTag: (value) {
+          _tag = value;
+          _reload();
+        },
       ),
       if (widget.kind == LibraryKind.comics &&
           widget.filters.containsKey('series')) ...[
@@ -469,7 +564,9 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                   Text(
                     widget.filters.isEmpty &&
                             _search.text.isEmpty &&
-                            _status == ShelfStatus.all
+                            _status == ShelfStatus.all &&
+                            !_favorites &&
+                            _tag == null
                         ? 'No ${widget.kind.label.toLowerCase()} yet'
                         : 'No titles match this selection',
                     style: Theme.of(context).textTheme.titleLarge,
@@ -482,6 +579,16 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                       'Browse artists, albums and numbered tracks. Embedded tags and chosen catalog matches organize your music.',
                     LibraryKind.comics =>
                       'Browse series, volumes and chapters. Local filename hints help organize comics; title details can correct them.',
+                    LibraryKind.audiobooks =>
+                      'Browse books, authors and chapters. Correct missing tags in title details.',
+                    LibraryKind.podcasts =>
+                      'Browse local shows and episodes. No feed subscription is required.',
+                    LibraryKind.photos || LibraryKind.homeVideos =>
+                      'Browse by file month or source folder. File month reflects the file timestamp, not an assumed capture date.',
+                    LibraryKind.musicVideos =>
+                      'Browse artists and videos. Unidentified artists remain available.',
+                    LibraryKind.documents =>
+                      'Browse document formats and folders. Notes and reading progress stay with each file.',
                     _ =>
                       'Browse your book shelf, authors and series. Reading progress stays attached to each book.',
                   }),
@@ -492,11 +599,15 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                     ),
                   if (_status != ShelfStatus.all ||
                       _search.text.isNotEmpty ||
-                      _units != ReadingUnits.all)
+                      _units != ReadingUnits.all ||
+                      _favorites ||
+                      _tag != null)
                     TextButton(
                       onPressed: () {
                         _status = ShelfStatus.all;
                         _units = ReadingUnits.all;
+                        _favorites = false;
+                        _tag = null;
                         _search.clear();
                         _reload();
                       },
@@ -517,7 +628,7 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                     '${_fieldLabel(_group, widget.kind)}${page.more ? ' · more on the next page' : ''}',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
-                  if (widget.kind == LibraryKind.music ||
+                  if (_listening ||
                       widget.kind == LibraryKind.television &&
                           _group == null) ...[
                     FilledButton.icon(
@@ -546,7 +657,26 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                 ],
               ),
               const SizedBox(height: 12),
-              if (_group != null)
+              if (_group != null && !_gridView)
+                for (final group in page.groups)
+                  Card(
+                    child: ListTile(
+                      leading: ItemArtwork(item: group.cover, size: 56),
+                      title: Text(
+                        _groupLabel(
+                          _group!,
+                          group.label ?? group.value,
+                          widget.kind,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '${group.qualifier == null ? '' : '${group.qualifier} · '}${_count(group)}',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => _openGroup(group),
+                    ),
+                  )
+              else if (_group != null)
                 _grid(page.groups.length, (index) {
                   final group = page.groups[index];
                   final name = _groupLabel(
@@ -559,32 +689,43 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                     artworkFit: _reading ? BoxFit.contain : BoxFit.cover,
                     title: name,
                     subtitle:
-                        '${group.qualifier == null ? '' : '${_groupLabel('artist', group.qualifier!, widget.kind)} · '}${_count(group)}',
+                        '${group.qualifier == null ? '' : '${_groupLabel(widget.kind == LibraryKind.audiobooks ? 'author' : 'artist', group.qualifier!, widget.kind)} · '}${_count(group)}',
                     icon: switch (_group) {
                       'show' || 'season' => Icons.live_tv,
                       'artist' => Icons.person_outline,
                       'album' => Icons.album_outlined,
+                      'folder' => Icons.folder_outlined,
+                      'month' => Icons.calendar_month_outlined,
+                      'format' => Icons.description_outlined,
+                      'series' when widget.kind == LibraryKind.podcasts =>
+                        Icons.podcasts,
+                      'series' when widget.kind == LibraryKind.audiobooks =>
+                        Icons.headphones,
                       _ => Icons.auto_stories_outlined,
                     },
                     onOpen: () => _openGroup(group),
                   );
                 }, square: widget.kind == LibraryKind.music)
-              else if (_reading)
+              else if (_gridView)
                 _grid(page.titles.length, (index) {
                   final title = page.titles[index],
                       metadata = page.titles[index].metadata;
                   return CinematicMediaCard(
                     item: title.item,
                     displayTitle: '${metadata['title'] ?? title.item.title}',
-                    subtitle: _readingLabel(title),
+                    subtitle: _reading
+                        ? _readingLabel(title)
+                        : '${title.metadata['artist'] ?? title.libraryTitle}${title.item.unavailable ? ' · Source offline' : ''}',
                     progressPercent: title.progress,
-                    actionLabel: title.progress > 0 && !title.completed
+                    actionLabel: !_reading
+                        ? MediaVisuals.action(title.item)
+                        : title.progress > 0 && !title.completed
                         ? 'Resume reading'
                         : 'Read',
                     onDetails: () => _details(title.item),
-                    onOpen: () => context.push(MediaVisuals.route(title.item)),
+                    onOpen: () => _openTitle(title),
                   );
-                }, square: false)
+                }, square: _visual)
               else
                 for (final title in page.titles) _mediaRow(title),
               if (_history.isNotEmpty || page.more)
@@ -621,6 +762,25 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
       ),
     ],
   );
+  void _openTitle(CategoryTitle title) {
+    if (title.item.unavailable) return;
+    if (widget.kind == LibraryKind.photos) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => PhotoSlideshowScreen(
+            libraryId: title.item.libraryId,
+            scope: _scope,
+            initialItemId: title.item.id,
+          ),
+        ),
+      );
+    } else if ({'audio', 'video'}.contains(title.item.itemType)) {
+      unawaited(_play(start: title.item.id));
+    } else {
+      context.push(MediaVisuals.route(title.item));
+    }
+  }
+
   String _readingLabel(CategoryTitle title) => [
     if (title.metadata['volume'] != null) 'Volume ${title.metadata['volume']}',
     if (title.metadata['chapter'] != null)
@@ -664,6 +824,20 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     },
   );
   Widget _mediaRow(CategoryTitle title) {
+    if (_reading || widget.kind == LibraryKind.photos)
+      return Card(
+        child: ListTile(
+          leading: ItemArtwork(item: title.item, size: 56),
+          title: Text('${title.metadata['title'] ?? title.item.title}'),
+          subtitle: Text(_reading ? _readingLabel(title) : title.libraryTitle),
+          onTap: () => _details(title.item),
+          trailing: IconButton(
+            tooltip: MediaVisuals.action(title.item),
+            onPressed: title.item.unavailable ? null : () => _openTitle(title),
+            icon: Icon(MediaVisuals.icon(title.item)),
+          ),
+        ),
+      );
     final metadata = title.metadata, tv = widget.kind == LibraryKind.television;
     final number = tv
         ? metadata['episode'] == null
@@ -676,6 +850,11 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
         CatalogHints.episodeLabel(metadata)!,
       if (!tv && metadata['artist'] != null) '${metadata['artist']}',
       if (!tv && metadata['album'] != null) '${metadata['album']}',
+      if (!tv && metadata['series'] != null) '${metadata['series']}',
+      if (!tv && metadata['author'] != null) '${metadata['author']}',
+      if (metadata['airDate'] != null) '${metadata['airDate']}',
+      if (metadata['extra'] == true)
+        'Extra · ${metadata['extraType'] ?? 'unclassified'}',
       if (duration != null)
         '${duration ~/ 60}:${(duration.toInt() % 60).toString().padLeft(2, '0')}',
       if (metadata['edition'] is String &&
@@ -738,12 +917,25 @@ class _CategoryDrillScreen extends StatelessWidget {
     required this.group,
     required this.title,
     required this.rootRoute,
+    required this.sort,
+    required this.grid,
+    required this.favorites,
+    required this.tag,
+    required this.query,
+    required this.status,
+    required this.units,
   });
   final LibraryKind kind;
   final String? libraryId, group;
   final Map<String, String> filters;
   final String title;
   final Route<dynamic>? rootRoute;
+  final BrowseSort sort;
+  final bool grid, favorites;
+  final String? tag;
+  final String query;
+  final ShelfStatus status;
+  final ReadingUnits units;
   void _ancestor(BuildContext context, String key) {
     final prefix = <String, String>{};
     for (final entry in filters.entries) {
@@ -759,11 +951,18 @@ class _CategoryDrillScreen extends StatelessWidget {
           title: _groupLabel(key, filters[key]!, kind),
           group: switch (key) {
             'show' => 'season',
-            'artist' => 'album',
+            'artist' => kind == LibraryKind.musicVideos ? null : 'album',
             'author' => 'series',
             _ => null,
           },
           rootRoute: rootRoute,
+          sort: sort,
+          grid: grid,
+          favorites: favorites,
+          tag: tag,
+          query: query,
+          status: status,
+          units: units,
         ),
       ),
     );
@@ -806,6 +1005,13 @@ class _CategoryDrillScreen extends StatelessWidget {
             group: group,
             nested: true,
             rootRoute: rootRoute,
+            initialSort: sort,
+            initialGrid: grid,
+            initialFavorites: favorites,
+            initialTag: tag,
+            initialQuery: query,
+            initialStatus: status,
+            initialUnits: units,
           ),
         ],
       ),

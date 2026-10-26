@@ -330,6 +330,8 @@ abstract final class MediaRecordContract {
             fit: locator.fit,
             zoom: locator.zoom,
             textOffset: locator.textOffset,
+            textQuote: locator.textQuote,
+            textBias: locator.textBias,
           ).encode();
         }
       }

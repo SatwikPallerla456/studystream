@@ -17,11 +17,10 @@ class EmbeddedAudioTags {
         int sync(List<int> value) =>
             value.fold<int>(0, (n, b) => (n << 7) | (b & 0x7f));
         final length = sync(prefix.sublist(6, 10));
-        if (length > maxBytes) return {};
-        final bytes = await handle.read(length);
-        final data = ByteData.sublistView(bytes);
+        if (length > 32 * 1024 * 1024 || length + 10 > await handle.length())
+          return {};
         final tags = <String, dynamic>{};
-        var offset = 0;
+        var offset = 10, frames = 0, retained = 0;
         const names = {
           'TIT2': 'title',
           'TPE1': 'artist',
@@ -31,39 +30,43 @@ class EmbeddedAudioTags {
           'TRCK': 'track',
           'TPOS': 'disc',
         };
-        while (offset + 10 <= bytes.length) {
-          final id = ascii.decode(
-            bytes.sublist(offset, offset + 4),
-            allowInvalid: true,
-          );
+        while (offset + 10 <= length + 10 && frames++ < 4096) {
+          await handle.setPosition(offset);
+          final header = await handle.read(10);
+          if (header.length != 10) break;
+          final id = ascii.decode(header.sublist(0, 4), allowInvalid: true);
           if (!RegExp(r'^[A-Z0-9]{4}$').hasMatch(id)) break;
+          final data = ByteData.sublistView(header);
           final size = version == 4
-              ? sync(bytes.sublist(offset + 4, offset + 8))
-              : data.getUint32(offset + 4, Endian.big);
-          if (size <= 0 || size > 16000 || offset + 10 + size > bytes.length)
-            break;
-          final flags = data.getUint16(offset + 8, Endian.big);
-          final field = names[id];
-          if (field != null && flags == 0)
-            _put(
-              tags,
-              field,
-              _text(bytes.sublist(offset + 10, offset + 10 + size)),
-            );
+              ? sync(header.sublist(4, 8))
+              : data.getUint32(4, Endian.big);
+          if (size <= 0 || offset + 10 + size > length + 10) break;
+          final flags = data.getUint16(8, Endian.big), field = names[id];
+          if (field != null &&
+              (flags & 0xff) == 0 &&
+              size <= 16000 &&
+              retained + size <= maxBytes) {
+            final bytes = await handle.read(size);
+            if (bytes.length != size) break;
+            retained += size;
+            _put(tags, field, _text(bytes));
+          }
+          // Large picture/unknown frames are skipped without allocating their body.
           offset += 10 + size;
         }
         return tags;
       }
       if (ascii.decode(prefix.take(4).toList(), allowInvalid: true) == 'fLaC') {
         await handle.setPosition(4);
-        var total = 0;
-        while (total < maxBytes) {
+        var total = 0, blocks = 0;
+        while (total < 32 * 1024 * 1024 && blocks++ < 4096) {
           final header = await handle.read(4);
           if (header.length != 4) break;
           final length = (header[1] << 16) | (header[2] << 8) | header[3];
           total += length + 4;
-          if (total > maxBytes) break;
+          if (total > 32 * 1024 * 1024) break;
           if (header[0] & 0x7f == 4) {
+            if (length > maxBytes) return {};
             final bytes = await handle.read(length), tags = <String, dynamic>{};
             final data = ByteData.sublistView(bytes);
             var offset = 0;
@@ -89,7 +92,11 @@ class EmbeddedAudioTags {
             };
             for (var i = 0; i < count; i++) {
               final n = takeLength();
-              if (n > 16000 || offset + n > bytes.length) return {};
+              if (offset + n > bytes.length) return {};
+              if (n > 16000) {
+                offset += n;
+                continue;
+              }
               final line = utf8.decode(
                 bytes.sublist(offset, offset + n),
                 allowMalformed: true,

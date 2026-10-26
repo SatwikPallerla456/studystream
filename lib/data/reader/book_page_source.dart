@@ -6,6 +6,7 @@ import 'package:xml/xml.dart';
 import '../../core/utils/sort_utils.dart';
 import 'safe_book_archive.dart';
 import 'publication_server.dart';
+import 'publication_content.dart';
 
 class BookPage {
   const BookPage({this.image, this.html, this.title = ''});
@@ -41,7 +42,15 @@ abstract class BookPageSource {
 }
 
 class ArchiveBookSource implements BookPageSource {
-  ArchiveBookSource._(this.archive, this.paths, this.titles, this.reflowable);
+  ArchiveBookSource._(
+    this.archive,
+    this.paths,
+    this.titles,
+    this.reflowable, [
+    this.contents = const [],
+  ]);
+  final List<PublicationDestination> contents;
+  final _textCache = ReaderByteCache<String>(8 * 1024 * 1024);
   final SafeBookArchive archive;
   final List<String> paths;
   @override
@@ -102,6 +111,7 @@ class ArchiveBookSource implements BookPageSource {
     if (root == null) throw const FormatException('EPUB package missing');
     final package = XmlDocument.parse(await archive.text(root));
     final manifest = <String, String>{};
+    String? nav, ncx;
     for (final entry in package.descendants.whereType<XmlElement>().where(
       (e) => e.name.local == 'item',
     )) {
@@ -111,6 +121,12 @@ class ArchiveBookSource implements BookPageSource {
         if (uri.hasScheme || uri.hasAuthority)
           throw const FormatException('External EPUB resource');
         manifest[id] = PublicationServer.resolve(root, href);
+        if ((entry.getAttribute('properties') ?? '')
+            .split(RegExp(r'\s+'))
+            .contains('nav'))
+          nav = manifest[id];
+        if (entry.getAttribute('media-type') == 'application/x-dtbncx+xml')
+          ncx = manifest[id];
       }
     }
     final pages = <String>[];
@@ -119,6 +135,10 @@ class ArchiveBookSource implements BookPageSource {
     )) {
       final resource = manifest[spine.getAttribute('idref')];
       if (resource != null) pages.add(resource);
+      if (pages.length > 10000)
+        throw const FormatException(
+          'EPUB reading order exceeds 10,000 sections',
+        );
     }
     if (pages.isEmpty)
       throw const FormatException('EPUB reading order missing');
@@ -128,13 +148,124 @@ class ArchiveBookSource implements BookPageSource {
           e.getAttribute('property') == 'rendition:layout' &&
           e.innerText.trim() == 'pre-paginated',
     );
-    return ArchiveBookSource._(
-      archive,
-      pages,
-      List.generate(pages.length, (i) => 'Chapter ${i + 1}'),
-      !fixed,
-    );
+    final titles = pages
+        .map((path) => p.posix.basenameWithoutExtension(path))
+        .toList();
+    final contents = <PublicationDestination>[];
+    for (final candidate in [
+      if (nav != null) (nav, false),
+      if (ncx != null) (ncx, true),
+    ]) {
+      try {
+        final entries = await publicationContents(
+          await archive.text(candidate.$1!),
+          ncx: candidate.$2,
+        );
+        final named = <int>{};
+        for (final entry in entries) {
+          try {
+            final uri = Uri.parse(entry.href);
+            // Fragment-only hrefs refer to the navigation resource itself.
+            final path = uri.path.isEmpty
+                ? candidate.$1!
+                : PublicationServer.resolve(candidate.$1!, entry.href);
+            if (!archive.entries.containsKey(path) ||
+                !RegExp(
+                  r'\.(xhtml|html|htm|svg)$',
+                  caseSensitive: false,
+                ).hasMatch(path))
+              continue;
+            var index = pages.indexOf(path);
+            if (index < 0) {
+              // Auxiliary destinations do not shift existing canonical spine locators.
+              pages.add(path);
+              titles.add(p.posix.basenameWithoutExtension(path));
+              index = pages.length - 1;
+            }
+            contents.add(
+              PublicationDestination(
+                entry.title,
+                index + 1,
+                uri.fragment,
+                entry.depth,
+              ),
+            );
+            if (named.add(index)) titles[index] = entry.title;
+          } on FormatException {
+            /* Ignore an invalid destination, retain other chapters. */
+          }
+        }
+        if (contents.isNotEmpty) break;
+      } on Object {
+        /* A malformed contents resource must not prevent reading. */
+      }
+    }
+    return ArchiveBookSource._(archive, pages, titles, !fixed, contents);
   }
+
+  /// Bounded, cancellable batches. The cursor continues inside a dense chapter.
+  Future<PublicationSearchBatch> search(
+    String query, {
+    int startPage = 1,
+    int startOffset = 0,
+    ReaderCancellation? cancellation,
+  }) async {
+    query = query.trim();
+    if (query.isEmpty || query.length > 200)
+      throw ArgumentError('Search requires 1–200 characters');
+    final pattern = RegExp(
+      RegExp.escape(query),
+      caseSensitive: false,
+      unicode: true,
+    );
+    final hits = <PublicationSearchHit>[], skipped = <int>[];
+    var examined = 0;
+    for (var page = startPage.clamp(1, pageCount); page <= pageCount; page++) {
+      cancellation?.check();
+      if (examined++ >= 24)
+        return PublicationSearchBatch(hits, page, 0, skipped);
+      if (!publicationPage(page)) continue;
+      try {
+        final key = locator(page);
+        var text = _textCache.get(key);
+        if (text == null) {
+          text = await publicationText(await archive.text(key));
+          cancellation?.check();
+          if (_disposed) throw const ReaderCancelled();
+          _textCache.put(key, text, text.length * 2);
+        }
+        for (final match in pattern.allMatches(
+          text,
+          page == startPage ? startOffset.clamp(0, text.length) : 0,
+        )) {
+          cancellation?.check();
+          hits.add(
+            PublicationSearchHit(
+              page,
+              match.start,
+              match.end,
+              text.substring(match.start, match.end),
+              text
+                  .substring(
+                    (match.start - 65).clamp(0, text.length),
+                    (match.end + 100).clamp(0, text.length),
+                  )
+                  .replaceAll(RegExp(r'\s+'), ' '),
+            ),
+          );
+          if (hits.length >= 60)
+            return PublicationSearchBatch(hits, page, match.end, skipped);
+        }
+      } on ReaderCancelled {
+        rethrow;
+      } on Object {
+        skipped.add(page);
+      }
+    }
+    return PublicationSearchBatch(hits, null, 0, skipped);
+  }
+
+  void clearRegenerableCaches() => _textCache.clear();
 
   @override
   Set<ReaderCapability> get capabilities => {
@@ -142,6 +273,7 @@ class ArchiveBookSource implements BookPageSource {
     if (publication) ...{
       ReaderCapability.nativeText,
       ReaderCapability.textSelection,
+      ReaderCapability.textSearch,
       ReaderCapability.publicationMetrics,
     } else
       ReaderCapability.rasterRender,
@@ -158,10 +290,7 @@ class ArchiveBookSource implements BookPageSource {
     cancellation?.check();
     if (_disposed) throw StateError('Reader closed');
     final path = paths[canonicalPage - 1];
-    if (!path.endsWith('.xhtml') &&
-        !path.endsWith('.html') &&
-        !path.endsWith('.htm') &&
-        !path.endsWith('.svg'))
+    if (!publicationPage(canonicalPage))
       return BookPage(
         image: await archive.read(
           path,
@@ -170,10 +299,10 @@ class ArchiveBookSource implements BookPageSource {
         ),
         title: titles[canonicalPage - 1],
       );
-    return BookPage(
-      html: await archive.text(path),
-      title: titles[canonicalPage - 1],
-    );
+    final html = await archive.text(path);
+    cancellation?.check();
+    if (_disposed) throw const ReaderCancelled();
+    return BookPage(html: html, title: titles[canonicalPage - 1]);
   }
 
   @override
@@ -182,6 +311,7 @@ class ArchiveBookSource implements BookPageSource {
     ReaderCancellation? cancellation,
   }) async {
     final page = await load(canonicalPage, cancellation: cancellation);
+    cancellation?.check();
     if (page.image == null) {
       final xml = XmlDocument.parse(page.html!);
       final viewport =
@@ -252,6 +382,7 @@ class ArchiveBookSource implements BookPageSource {
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _textCache.clear();
     await (await _publicationServer)?.dispose();
   }
 }

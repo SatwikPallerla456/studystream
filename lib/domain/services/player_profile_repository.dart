@@ -4,11 +4,13 @@ import 'package:uuid/uuid.dart';
 
 import '../../data/db/app_database.dart';
 import 'player_controls_repository.dart';
+import 'player_library_repository.dart';
 
 /// Reusable non-secret control/engine snapshots. Applying a profile does not
 /// modify the media library, current item's locator or device pairing settings.
 class PlayerProfileRepository {
-  const PlayerProfileRepository(this.database);
+  const PlayerProfileRepository(this.database, {this.queueNamespace});
+  final String? queueNamespace;
   final AppDatabase database;
   static const key = 'player.profiles.v1';
   Future<List<Map<String, dynamic>>> load() async {
@@ -38,6 +40,9 @@ class PlayerProfileRepository {
           'controls': (await repository.load()).toJson(),
           'native': await repository.nativePreferences(),
           'speed': await database.getSetting('defaultPlaybackSpeed'),
+          'effects': jsonDecode(
+            await database.getSetting('player.profile.effects') ?? 'null',
+          ),
         };
         final index = profiles.indexWhere((row) => row['id'] == profile['id']);
         if (index < 0) {
@@ -51,13 +56,43 @@ class PlayerProfileRepository {
   Future<void> apply(String id) => database.transaction(() async {
     final profile = (await load()).where((row) => row['id'] == id).firstOrNull;
     if (profile == null) throw StateError('This profile no longer exists.');
-    await PlayerControlsRepository(
-      database,
-    ).save(PlayerControls.fromJson(profile['controls'] as Map));
+    final controls = PlayerControlsRepository(database);
+    if (profile['controls'] is Map) {
+      await controls.save(PlayerControls.fromJson(profile['controls'] as Map));
+    } else if (profile['controlsPatch'] is Map) {
+      await controls.save(
+        PlayerControls.fromJson({
+          ...(await controls.load()).toJson(),
+          ...Map<String, dynamic>.from(profile['controlsPatch'] as Map),
+        }),
+      );
+    }
     final native = Map<String, String>.from(profile['native'] as Map);
+    final queue = PlayerLibraryRepository(
+      database,
+      queueNamespace: queueNamespace,
+    );
+    final queueState = await queue.load();
+    if (native['repeat'] != null && native['repeat'] != queueState.repeat.name)
+      await queue.setRepeat(
+        QueueRepeat.values.firstWhere(
+          (v) => v.name == native['repeat'],
+          orElse: () => QueueRepeat.off,
+        ),
+      );
+    if (native['shuffle'] != null &&
+        (native['shuffle'] == 'true') != queueState.shuffle)
+      await queue.setShuffle(native['shuffle'] == 'true');
     // Imported native values are filtered against the bridge's supported schema
     // again before engine construction; credentials are never profile fields.
     await database.setSetting('player.native.preferences', jsonEncode(native));
+    if (profile['effects'] is Map)
+      await database.setSetting(
+        'player.profile.effects',
+        jsonEncode(profile['effects']),
+      );
+    else
+      await database.setSetting('player.profile.effects', 'null');
     if (profile['speed'] is String) {
       await database.setSetting(
         'defaultPlaybackSpeed',
@@ -65,7 +100,47 @@ class PlayerProfileRepository {
       );
     }
   });
+  Future<void> importLegacy(List<Map<String, dynamic>> incoming) =>
+      database.transaction(() async {
+        final profiles = await load();
+        final removed =
+            (jsonDecode(
+                      await database.getSetting(
+                            'player.profiles.removedLegacy',
+                          ) ??
+                          '[]',
+                    )
+                    as List)
+                .cast<String>();
+        for (final profile in incoming) {
+          if (removed.contains(profile['id']) ||
+              profiles.any((p) => p['id'] == profile['id']))
+            continue;
+          if (profiles.length >= 100)
+            throw const FormatException(
+              'At most 100 player profiles can be stored.',
+            );
+          profiles.add(profile);
+        }
+        await database.setSetting(key, jsonEncode(profiles));
+      });
   Future<void> delete(String id) => database.transaction(() async {
+    if (id.startsWith('legacy:')) {
+      final removed =
+          (jsonDecode(
+                    await database.getSetting(
+                          'player.profiles.removedLegacy',
+                        ) ??
+                        '[]',
+                  )
+                  as List)
+              .cast<String>();
+      if (!removed.contains(id)) removed.add(id);
+      await database.setSetting(
+        'player.profiles.removedLegacy',
+        jsonEncode(removed),
+      );
+    }
     final profiles = (await load())..removeWhere((row) => row['id'] == id);
     await database.setSetting(key, jsonEncode(profiles));
   });

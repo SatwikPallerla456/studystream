@@ -26,34 +26,78 @@ struct ShortcutKey {
 
 
 @MainActor final class MyVLCGlobalShortcuts {
+    let token = UUID()
+    let bindings: [String: String]
+    let window: () -> NSWindow?
+    let action: (String) -> Void
+    var errors: [String] = []
+    init(bindings: [String: String], window: @escaping () -> NSWindow? = { nil }, action: @escaping (String) -> Void) {
+        self.bindings = bindings; self.window = window; self.action = action
+        ShortcutBroker.shared.add(self)
+    }
+    deinit { let id = token; Task { @MainActor in ShortcutBroker.shared.remove(id) } }
+}
+
+private final class WeakShortcutOwner {
+    weak var value: MyVLCGlobalShortcuts?
+    init(_ value: MyVLCGlobalShortcuts) { self.value = value }
+}
+
+/// Register each physical global key once, then route to the focused or last
+/// active player. Opening another player cannot steal or duplicate its hotkeys.
+@MainActor private final class ShortcutBroker {
+    static let shared = ShortcutBroker()
+    private var owners: [UUID: WeakShortcutOwner] = [:]
+    private var keys: [(UInt16, UInt32)] = []
     private var registrations: [EventHotKeyRef] = []
     private var handler: EventHandlerRef?
-    private var actions: [String] = []
-    private let action: (String) -> Void
-    private(set) var errors: [String] = []
-    init(bindings: [String: String], action: @escaping (String) -> Void) {
-        self.action = action
-        var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
-            guard let event, let context else { return noErr }
-            var id = EventHotKeyID()
-            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
-            let owner = Unmanaged<MyVLCGlobalShortcuts>.fromOpaque(context).takeUnretainedValue()
-            DispatchQueue.main.async { [weak owner] in
-                guard let owner, Int(id.id) < owner.actions.count else { return }
-                owner.action(owner.actions[Int(id.id)])
-            }
-            return noErr
-        }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        for (name, text) in bindings.sorted(by: { $0.key < $1.key }) where !text.isEmpty {
-            guard let key = ShortcutKey.parse(text), key.carbonModifiers != 0 else { errors.append("Invalid global shortcut: \(text)"); continue }
-            let index = actions.count
-            actions.append(name)
-            var reference: EventHotKeyRef?
-            let status = RegisterEventHotKey(UInt32(key.code), key.carbonModifiers, EventHotKeyID(signature: 0x54414E47, id: UInt32(index)), GetApplicationEventTarget(), 0, &reference)
-            if status == noErr, let reference { registrations.append(reference) }
-            else { errors.append("Global shortcut \(text) is already in use or unavailable.") }
+    private var lastActive: UUID?
+    private var focusObserver: NSObjectProtocol?
+    private init() {
+        focusObserver=NotificationCenter.default.addObserver(forName:NSWindow.didBecomeKeyNotification,object:nil,queue:.main) { [weak self] notification in
+            MainActor.assumeIsolated { guard let self, let window=notification.object as? NSWindow else{return};if let owner=self.owners.values.compactMap(\.value).first(where:{$0.window()===window}){self.lastActive=owner.token} }
         }
     }
-    deinit { registrations.forEach { UnregisterEventHotKey($0) }; if let handler { RemoveEventHandler(handler) } }
+    func add(_ owner: MyVLCGlobalShortcuts) { owners[owner.token] = WeakShortcutOwner(owner); lastActive = owner.token; rebuild() }
+    func remove(_ id: UUID) { owners.removeValue(forKey: id); if lastActive == id { lastActive = owners.keys.first }; rebuild() }
+    private func rebuild() {
+        registrations.forEach { UnregisterEventHotKey($0) }; registrations.removeAll(); keys.removeAll()
+        owners = owners.filter { $0.value.value != nil }
+        if owners.isEmpty { if let handler { RemoveEventHandler(handler) }; handler = nil; return }
+        if handler == nil {
+            var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+                guard let event, let context else { return noErr }
+                var id = EventHotKeyID()
+                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
+                let owner = Unmanaged<ShortcutBroker>.fromOpaque(context).takeUnretainedValue()
+                DispatchQueue.main.async { [weak owner] in owner?.dispatch(Int(id.id)) }
+                return noErr
+            }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
+        }
+        var seen = Set<String>()
+        for weakOwner in owners.values {
+            guard let owner = weakOwner.value else { continue }; owner.errors.removeAll()
+            for text in owner.bindings.values where !text.isEmpty {
+                guard let key = ShortcutKey.parse(text), key.carbonModifiers != 0 else { owner.errors.append("Invalid global shortcut: \(text)"); continue }
+                let normalized = "\(key.code):\(key.carbonModifiers)"
+                if !seen.insert(normalized).inserted { continue }
+                let index = keys.count; keys.append((key.code, key.carbonModifiers))
+                var reference: EventHotKeyRef?
+                let status = RegisterEventHotKey(UInt32(key.code), key.carbonModifiers, EventHotKeyID(signature: 0x54414E47, id: UInt32(index)), GetApplicationEventTarget(), 0, &reference)
+                if status == noErr, let reference { registrations.append(reference) }
+                else { owner.errors.append("Global shortcut \(text) is already in use or unavailable.") }
+            }
+        }
+    }
+    private func dispatch(_ index: Int) {
+        guard keys.indices.contains(index) else { return }
+        let focused = owners.values.compactMap(\.value).first { $0.window() === NSApp.keyWindow && $0.window() != nil }
+        let owner = focused ?? lastActive.flatMap { owners[$0]?.value }
+        guard let owner else { return }; lastActive = owner.token
+        let key = keys[index]
+        for (action, text) in owner.bindings {
+            if let candidate = ShortcutKey.parse(text), candidate.code == key.0, candidate.carbonModifiers == key.1 { owner.action(action); return }
+        }
+    }
 }

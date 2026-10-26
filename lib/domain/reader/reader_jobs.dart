@@ -75,6 +75,17 @@ class ReaderJobScheduler {
   final _jobs = <String, _Job>{};
   int _active = 0, _bytes = 0;
   bool _closed = false;
+  final _idleWaiters = <Completer<void>>[];
+
+  /// After cancellation, wait for native/decode work to unwind before deleting
+  /// authenticated temporary files or closing the owning archive/document.
+  Future<void> get settled {
+    if (_active == 0) return Future.value();
+    final waiter = Completer<void>();
+    _idleWaiters.add(waiter);
+    return waiter.future;
+  }
+
   int get inflightBytes => _bytes;
   ReaderLease<T> request<T>({
     required String key,
@@ -156,6 +167,12 @@ class ReaderJobScheduler {
       _active--;
       _bytes -= job.bytes;
       _drain();
+      if (_active == 0) {
+        for (final waiter in _idleWaiters) {
+          waiter.complete();
+        }
+        _idleWaiters.clear();
+      }
     }
   }
 
@@ -196,8 +213,8 @@ class ReaderJobScheduler {
 
 /// Access-aware retained buffers; durable state is deliberately outside this cache.
 class ReaderByteCache<T> {
-  ReaderByteCache(this.maxBytes, {this.onEvict});
-  final int maxBytes;
+  ReaderByteCache(this.maxBytes, {this.onEvict, this.maxEntries = 256});
+  final int maxBytes, maxEntries;
   final void Function(T)? onEvict;
   final _entries = LinkedHashMap<String, ({T value, int bytes})>();
   int bytes = 0;
@@ -219,7 +236,8 @@ class ReaderByteCache<T> {
       onEvict?.call(value);
       return;
     }
-    while (bytes + size > maxBytes && _entries.isNotEmpty) {
+    while ((bytes + size > maxBytes || _entries.length >= maxEntries) &&
+        _entries.isNotEmpty) {
       final entry = _entries.remove(_entries.keys.first)!;
       bytes -= entry.bytes;
       onEvict?.call(entry.value);

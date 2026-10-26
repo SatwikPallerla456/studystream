@@ -1,0 +1,22 @@
+name: tangerine_vlc
+description: Owned VideoLAN libVLC platform boundary for Tangerine.
+version: 1.0.0
+publish_to: none
+environment:
+  sdk: ^3.11.1
+  flutter: '>=3.35.0'
+dependencies:
+  flutter:
+    sdk: flutter
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.tangerine.vlc
+        pluginClass: TangerineVlcPlugin
+      ios:
+        pluginClass: TangerineVlcPlugin
+      windows:
+        pluginClass: TangerineVlcPluginCApi
+      linux:
+        pluginClass: TangerineVlcPlugin

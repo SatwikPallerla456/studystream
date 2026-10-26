@@ -20,6 +20,8 @@ import 'catalog_editor_screen.dart';
 import 'media_versions_section.dart';
 import 'technical_media_panel.dart';
 import '../library/collections_screen.dart';
+import '../library/photo_slideshow_screen.dart';
+import '../player/desktop_playback_windows.dart';
 
 class _Details {
   const _Details(
@@ -30,6 +32,7 @@ class _Details {
     this.playback,
     this.reading, {
     required this.experience,
+    this.tags = const [],
     this.multipart = false,
     this.partsResume = false,
     this.partsComplete = false,
@@ -39,6 +42,7 @@ class _Details {
   final Library? library;
   final Map<String, dynamic> metadata;
   final bool favorite;
+  final List<String> tags;
   final PlaybackProgressData? playback;
   final ReadingProgressData? reading;
   final MediaExperience experience;
@@ -69,6 +73,19 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
     _details = _load();
   }
 
+  Future<void> _editTags(_Details details) async {
+    final tags = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _TagEditor(tags: details.tags),
+    );
+    if (tags != null && mounted)
+      await _change(
+        () => MediaCatalogRepository(
+          ref.read(appDatabaseProvider),
+        ).setTags(details.item, tags),
+      );
+  }
+
   @override
   void didUpdateWidget(covariant MediaDetailsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -90,14 +107,16 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
     final histories = await Future.wait(
       parts.map((part) => db.getPlaybackByItemId(part.item.id)),
     );
+    final organization =
+        (await catalog.record('organization:${item.id}'))?.data ?? {};
     return _Details(
       item,
       await db.getLibraryById(item.libraryId),
       await catalog.metadata(item),
-      (await catalog.record('organization:${item.id}'))?.data['favorite'] ==
-          true,
+      organization['favorite'] == true,
       await db.getPlaybackByItemId(item.id),
       await db.getReadingByItemId(item.id),
+      tags: List<String>.from(organization['tags'] as List? ?? const []),
       experience: MediaExperience(
         await catalog.libraryKind(item.libraryId),
         item.itemType,
@@ -141,6 +160,19 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
   Future<void> _open(_Details details) async {
     try {
       final item = details.item;
+      if (item.itemType == 'image') {
+        await Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (_) => PhotoSlideshowScreen(
+              libraryId: item.libraryId,
+              initialItemId: item.id,
+            ),
+          ),
+        );
+        if (mounted) setState(() => _details = _load());
+        return;
+      }
       var route = MediaVisuals.route(item);
       if (details.multipart) {
         final target = await CatalogPlayback(
@@ -282,6 +314,32 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                                   : MediaVisuals.action(item),
                             ),
                           ),
+                          if (DesktopPlaybackWindows.available &&
+                              {'audio', 'video'}.contains(item.itemType))
+                            TextButton.icon(
+                              onPressed: item.unavailable
+                                  ? null
+                                  : () async {
+                                      try {
+                                        await DesktopPlaybackWindows.open(
+                                          item.id,
+                                        );
+                                      } catch (_) {
+                                        if (context.mounted)
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                'The independent player could not open.',
+                                              ),
+                                            ),
+                                          );
+                                      }
+                                    },
+                              icon: const Icon(Icons.open_in_new),
+                              label: const Text('Play in new window'),
+                            ),
                           TextButton.icon(
                             onPressed: () => Navigator.of(context).push(
                               MaterialPageRoute<void>(
@@ -343,6 +401,17 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                             ),
                             label: Text(
                               details.favorite ? 'Favorited' : 'Favorite',
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: _saving
+                                ? null
+                                : () => _editTags(details),
+                            icon: const Icon(Icons.label_outline),
+                            label: Text(
+                              details.tags.isEmpty
+                                  ? 'Add tags'
+                                  : 'Edit tags (${details.tags.length})',
                             ),
                           ),
                           if (details.experience.completion)
@@ -411,6 +480,17 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                 },
               ),
               const SizedBox(height: AppSpace.xl),
+              if (details.tags.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final tag in details.tags) Chip(label: Text(tag)),
+                    ],
+                  ),
+                ),
               if ((details.metadata['synopsis'] as String? ?? '')
                   .trim()
                   .isNotEmpty) ...[
@@ -465,7 +545,14 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                       onChanged: () => setState(() => _details = _load()),
                     ),
                   if (details.experience.photo) SelectableText(item.filename),
-                  if ({'audio', 'video'}.contains(item.itemType))
+                  if ({
+                    'audio',
+                    'video',
+                    'image',
+                    'pdf',
+                    'epub',
+                    'cbz',
+                  }.contains(item.itemType))
                     TechnicalMediaPanel(key: ValueKey(item.id), item: item),
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 12),
@@ -499,5 +586,76 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
         );
       },
     ),
+  );
+}
+
+class _TagEditor extends StatefulWidget {
+  const _TagEditor({required this.tags});
+  final List<String> tags;
+  @override
+  State<_TagEditor> createState() => _TagEditorState();
+}
+
+class _TagEditorState extends State<_TagEditor> {
+  late final _text = TextEditingController(text: widget.tags.join('\n'));
+  String? _error;
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final unique = <String, String>{};
+    for (final raw in _text.text.split('\n')) {
+      final tag = raw.trim();
+      if (tag.isNotEmpty) unique.putIfAbsent(tag.toLowerCase(), () => tag);
+    }
+    if (unique.length > 100 || unique.values.any((t) => t.length > 200)) {
+      setState(
+        () => _error =
+            'Use at most 100 tags, each no longer than 200 characters.',
+      );
+      return;
+    }
+    Navigator.pop(context, unique.values.toList());
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Your tags'),
+    content: SizedBox(
+      width: 440,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Use one tag per line. Tags organize your library and can be searched or filtered.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _text,
+              autofocus: true,
+              minLines: 3,
+              maxLines: 8,
+              maxLength: 20100,
+              decoration: InputDecoration(
+                labelText: 'Tags',
+                helperText: 'Up to 100 tags · 200 characters each',
+                errorText: _error,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(onPressed: _save, child: const Text('Save tags')),
+    ],
   );
 }

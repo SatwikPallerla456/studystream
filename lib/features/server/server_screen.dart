@@ -327,9 +327,11 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                             const SizedBox(height: AppSpace.sm),
                             SwitchListTile(
                               contentPadding: EdgeInsets.zero,
-                              title: const Text('Start when this app opens'),
+                              title: const Text(
+                                'Start automatically in Server mode',
+                              ),
                               subtitle: const Text(
-                                'Only while this device is in Server mode.',
+                                'Resume sharing after you choose Server on the opening screen.',
                               ),
                               value: _autoStart,
                               onChanged: _busy

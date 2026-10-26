@@ -6,6 +6,7 @@ import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as path;
 
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
@@ -23,7 +24,35 @@ class PlaylistsScreen extends ConsumerStatefulWidget {
 class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
   String? _selected;
   String _search = '';
-  bool _busy = false;
+  bool _busy = false, _tree = false;
+  @override
+  void initState() {
+    super.initState();
+    _loadViewPreference();
+  }
+
+  Future<void> _loadViewPreference() async {
+    final raw = await ref
+        .read(appDatabaseProvider)
+        .getSetting('player.native.preferences');
+    if (raw == null) return;
+    final value = jsonDecode(raw) as Map;
+    if (mounted) setState(() => _tree = value['playlistTree'] == 'true');
+  }
+
+  Future<void> _setTree(bool value) async {
+    setState(() => _tree = value);
+    final db = ref.read(appDatabaseProvider);
+    await db.transaction(() async {
+      final prefs = Map<String, dynamic>.from(
+        jsonDecode(await db.getSetting('player.native.preferences') ?? '{}')
+            as Map,
+      );
+      prefs['playlistTree'] = '$value';
+      await db.setSetting('player.native.preferences', jsonEncode(prefs));
+    });
+  }
+
   PlayerLibraryRepository get repository =>
       ref.read(playerLibraryRepositoryProvider);
   void _message(String value) => ScaffoldMessenger.of(
@@ -98,14 +127,33 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
     if (mounted) setState(() => _selected = id);
   });
   Future<void> _export(NamedMediaPlaylist playlist) => _run(() async {
-    final text = await repository.exportM3u(playlist);
+    final format = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Export playlist'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'm3u8'),
+            child: const Text('M3U8 · UTF-8 playlist'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'pls'),
+            child: const Text('PLS · numbered playlist'),
+          ),
+        ],
+      ),
+    );
+    if (format == null) return;
+    final text = format == 'pls'
+        ? await repository.exportPls(playlist)
+        : await repository.exportM3u(playlist);
     final bytes = Uint8List.fromList(utf8.encode(text));
     final selected = await FilePicker.platform.saveFile(
       dialogTitle: 'Export playlist',
-      fileName: '${playlist.title.replaceAll(RegExp(r'[^\w -]'), '_')}.m3u8',
+      fileName: '${playlist.title.replaceAll(RegExp(r'[^\w -]'), '_')}.$format',
       bytes: bytes,
       type: FileType.custom,
-      allowedExtensions: ['m3u8'],
+      allowedExtensions: [format],
     );
     if (selected != null && !Platform.isAndroid && !Platform.isIOS) {
       await File(selected).writeAsBytes(bytes, flush: true);
@@ -333,6 +381,8 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                           }),
                           child: const Text('Rename'),
                         ),
+                        if (playlist.artwork != null)
+                          _PlaylistArtwork(encoded: playlist.artwork!),
                         TextButton(
                           onPressed: () => _export(playlist),
                           child: const Text('Export'),
@@ -367,6 +417,19 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                     ],
                   ),
                 if (_busy) const LinearProgressIndicator(),
+                if (ids.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: FilterChip(
+                      label: const Text('Group by folder'),
+                      selected: _tree,
+                      onSelected: (value) => _run(() => _setTree(value)),
+                    ),
+                  ),
+                if (_tree && ids.isNotEmpty)
+                  const Text(
+                    'Folder grouping preserves playback order. Turn it off to reorder entries.',
+                  ),
                 if (ids.isNotEmpty)
                   TextField(
                     decoration: const InputDecoration(
@@ -414,6 +477,108 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                           ),
                         );
                       }
+                      Widget entryTile(int index) {
+                        final item = items[index];
+                        final title =
+                            item?.userTitle ?? item?.title ?? 'Removed media';
+                        if (_search.isNotEmpty &&
+                            !title.toLowerCase().contains(
+                              _search.toLowerCase(),
+                            )) {
+                          return SizedBox.shrink(
+                            key: ValueKey('hidden-$index'),
+                          );
+                        }
+                        final entry = playlist == null
+                            ? state.queue[index]
+                            : null;
+                        return ListTile(
+                          key: ValueKey(entry?.id ?? '$index-${ids[index]}'),
+                          selected:
+                              entry != null && entry.id == state.currentEntryId,
+                          leading: Icon(
+                            item?.unavailable == true || item == null
+                                ? Icons.link_off
+                                : Icons.play_circle_outline,
+                          ),
+                          title: Text(title),
+                          subtitle: Text(
+                            item?.filename ?? 'Your saved entry is retained.',
+                          ),
+                          onTap: item == null || item.unavailable
+                              ? null
+                              : () => _run(() async {
+                                  if (entry != null) {
+                                    await repository.select(entry.id);
+                                  } else {
+                                    await repository.setQueue(
+                                      ids,
+                                      currentIndex: index,
+                                    );
+                                  }
+                                  if (mounted) _open(ids[index]);
+                                }),
+                          trailing: Padding(
+                            padding: const EdgeInsets.only(right: 24),
+                            child: IconButton(
+                              tooltip: 'Remove entry',
+                              icon: const Icon(Icons.close),
+                              onPressed: () => _run(() async {
+                                if (entry != null) {
+                                  await repository.remove(entry.id);
+                                } else {
+                                  final updated = List.of(ids)..removeAt(index);
+                                  await repository.savePlaylist(
+                                    playlist!.title,
+                                    updated,
+                                    playlistId: playlist.id,
+                                  );
+                                }
+                              }),
+                            ),
+                          ),
+                        );
+                      }
+
+                      if (_tree) {
+                        final folders = <String, List<int>>{};
+                        for (var index = 0; index < items.length; index++) {
+                          final item = items[index];
+                          final title =
+                              item?.userTitle ?? item?.title ?? 'Removed media';
+                          if (_search.isNotEmpty &&
+                              !title.toLowerCase().contains(
+                                _search.toLowerCase(),
+                              ))
+                            continue;
+                          final folder = item == null
+                              ? 'Removed media'
+                              : item.filePath.startsWith('remote:')
+                              ? 'Remote library'
+                              : path.dirname(item.filePath);
+                          (folders[folder] ??= []).add(index);
+                        }
+                        return ListView(
+                          children: [
+                            for (final group in folders.entries)
+                              ExpansionTile(
+                                key: ValueKey('folder:${group.key}'),
+                                leading: const Icon(Icons.folder_outlined),
+                                title: Text(
+                                  group.key == 'Remote library' ||
+                                          group.key == 'Removed media'
+                                      ? group.key
+                                      : path.basename(group.key),
+                                ),
+                                subtitle: Text('${group.value.length} entries'),
+                                children: [
+                                  for (final index in group.value)
+                                    entryTile(index),
+                                ],
+                              ),
+                          ],
+                        );
+                      }
                       return ReorderableListView.builder(
                         buildDefaultDragHandles: _search.isEmpty,
                         itemCount: items.length,
@@ -434,70 +599,7 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                             );
                           }
                         }),
-                        itemBuilder: (context, index) {
-                          final item = items[index];
-                          final title =
-                              item?.userTitle ?? item?.title ?? 'Removed media';
-                          if (_search.isNotEmpty &&
-                              !title.toLowerCase().contains(
-                                _search.toLowerCase(),
-                              )) {
-                            return SizedBox.shrink(
-                              key: ValueKey('hidden-$index'),
-                            );
-                          }
-                          final entry = playlist == null
-                              ? state.queue[index]
-                              : null;
-                          return ListTile(
-                            key: ValueKey(entry?.id ?? '$index-${ids[index]}'),
-                            selected:
-                                entry != null &&
-                                entry.id == state.currentEntryId,
-                            leading: Icon(
-                              item?.unavailable == true || item == null
-                                  ? Icons.link_off
-                                  : Icons.play_circle_outline,
-                            ),
-                            title: Text(title),
-                            subtitle: Text(
-                              item?.filename ?? 'Your saved entry is retained.',
-                            ),
-                            onTap: item == null || item.unavailable
-                                ? null
-                                : () => _run(() async {
-                                    if (entry != null) {
-                                      await repository.select(entry.id);
-                                    } else {
-                                      await repository.setQueue(
-                                        ids,
-                                        currentIndex: index,
-                                      );
-                                    }
-                                    if (mounted) _open(ids[index]);
-                                  }),
-                            trailing: Padding(
-                              padding: const EdgeInsets.only(right: 24),
-                              child: IconButton(
-                                tooltip: 'Remove entry',
-                                icon: const Icon(Icons.close),
-                                onPressed: () => _run(() async {
-                                  if (entry != null) {
-                                    await repository.remove(entry.id);
-                                  } else {
-                                    final updated = List.of(ids)
-                                      ..removeAt(index);
-                                    await repository.savePlaylist(
-                                      playlist!.title,
-                                      updated,
-                                      playlistId: playlist.id,
-                                    );
-                                  }
-                                }),
-                              ),
-                            ),
-                          );
-                        },
+                        itemBuilder: (context, index) => entryTile(index),
                       );
                     },
                   ),
@@ -508,5 +610,29 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
         },
       ),
     );
+  }
+}
+
+class _PlaylistArtwork extends StatelessWidget {
+  const _PlaylistArtwork({required this.encoded});
+  final String encoded;
+  @override
+  Widget build(BuildContext context) {
+    if (encoded.length > 1400000) return const SizedBox.shrink();
+    try {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.memory(
+          base64Decode(encoded),
+          width: 64,
+          height: 64,
+          cacheWidth: 128,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const Icon(Icons.queue_music),
+        ),
+      );
+    } catch (_) {
+      return const Icon(Icons.queue_music);
+    }
   }
 }

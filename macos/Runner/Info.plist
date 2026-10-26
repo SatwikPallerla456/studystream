@@ -30,5 +30,7 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key><string>Tangerine previews and records the camera you explicitly choose.</string>
+	<key>NSMicrophoneUsageDescription</key><string>Tangerine records the microphone you explicitly choose.</string>
 </dict>
 </plist>

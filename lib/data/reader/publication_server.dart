@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math';
 
@@ -8,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import 'package:xml/xml.dart';
 
 import 'safe_book_archive.dart';
+import 'publication_content.dart';
 
 /// A publication-only loopback origin. It never serves host filesystem paths.
 /// Package scripts, event handlers, external navigation and network resources
@@ -19,6 +21,33 @@ class PublicationServer {
   final String _token;
   int _active = 0;
   bool _closed = false;
+  final _waiting = Queue<Completer<bool>>();
+  Future<bool> _acquire() async {
+    if (_closed) return false;
+    if (_active < 4) {
+      _active++;
+      return true;
+    }
+    if (_waiting.length >= 64) return false;
+    final pending = Completer<bool>();
+    _waiting.add(pending);
+    return pending.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        _waiting.remove(pending);
+        return false;
+      },
+    );
+  }
+
+  void _release() {
+    _active--;
+    if (!_closed && _waiting.isNotEmpty) {
+      _active++;
+      _waiting.removeFirst().complete(true);
+    }
+  }
+
   static Future<PublicationServer> open(SafeBookArchive archive) async {
     final server = await HttpServer.bind(
       InternetAddress.loopbackIPv4,
@@ -97,13 +126,16 @@ class PublicationServer {
   Future<void> _serve(HttpRequest request) async {
     if (_closed ||
         !{'GET', 'HEAD'}.contains(request.method) ||
-        !request.uri.path.startsWith('/$_token/') ||
-        _active >= 4) {
+        !request.uri.path.startsWith('/$_token/')) {
       request.response.statusCode = HttpStatus.notFound;
       await request.response.close();
       return;
     }
-    _active++;
+    if (!await _acquire()) {
+      request.response.statusCode = HttpStatus.serviceUnavailable;
+      await request.response.close();
+      return;
+    }
     try {
       final name = SafeBookArchive.normalizeName(
         Uri.decodeComponent(request.uri.path.substring(_token.length + 2)),
@@ -124,46 +156,22 @@ class PublicationServer {
         'Content-Security-Policy',
         "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'nonce-$nonce'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'",
       );
-      final bytes = await archive.read(name, limit: 32 * 1024 * 1024);
+      final bytes = await archive.read(
+        name,
+        limit: (mime.startsWith('text/html') || mime == 'image/svg+xml')
+            ? 2 * 1024 * 1024
+            : 32 * 1024 * 1024,
+      );
       if (request.method == 'HEAD') {
         request.response.contentLength = bytes.length;
         return;
       }
       if (mime.startsWith('text/html') || mime == 'image/svg+xml') {
-        var xml = XmlDocument.parse(utf8.decode(bytes));
+        var xml = publicationDocument(utf8.decode(bytes));
         if (svgPage)
           xml = XmlDocument.parse(
             '<html><head></head><body>${xml.rootElement.toXmlString()}</body></html>',
           );
-        for (final node in xml.descendants.whereType<XmlElement>().toList()) {
-          if ({
-            'script',
-            'iframe',
-            'object',
-            'embed',
-            'base',
-            'form',
-            'foreignObject',
-          }.contains(node.name.local)) {
-            node.parent?.children.remove(node);
-            continue;
-          }
-          node.attributes.removeWhere(
-            (a) =>
-                a.name.local.toLowerCase().startsWith('on') ||
-                a.name.local == 'srcdoc',
-          );
-          for (final attr in node.attributes.toList()) {
-            if ({'src', 'href', 'poster', 'action'}.contains(attr.name.local)) {
-              final value = attr.value.trim();
-              if (value.startsWith('#')) continue;
-              if (Uri.tryParse(value)?.hasScheme != false ||
-                  value.startsWith('//') ||
-                  value.startsWith('/'))
-                node.attributes.remove(attr);
-            }
-          }
-        }
         if (mime.startsWith('text/html')) {
           final head = xml.descendants
               .whereType<XmlElement>()
@@ -241,7 +249,7 @@ class PublicationServer {
     } catch (_) {
       request.response.statusCode = HttpStatus.unprocessableEntity;
     } finally {
-      _active--;
+      _release();
       await request.response.close();
     }
   }
@@ -270,8 +278,8 @@ class PublicationServer {
     final font = dimension('font', 20).clamp(12, 36),
         line = dimension('line', 1.6).clamp(1.2, 2.4);
     return '''(()=>{'use strict';const scope=$scope;let sequence=0,ready=false,timer;
-const flow=$flow,declared=${args['declared'] == 'true'},sourceWidth=$width,sourceHeight=$height;
-const post=(data)=>{if(window.TangerineReader)TangerineReader.postMessage(JSON.stringify({...scope,sequence:++sequence,...data}));};
+const flow=$flow,declared=${args['declared'] == 'true'};let sourceWidth=$width,sourceHeight=$height;
+const post=(data)=>{const packet=JSON.stringify({...scope,sequence:++sequence,...data});if(window.flutter_inappwebview)window.flutter_inappwebview.callHandler('TangerineReader',packet);else if(window.TangerineReader)TangerineReader.postMessage(packet);return packet;};
 const authorSize={width:false,height:false};let ruleCount=0;
 const inspect=(rules)=>{for(const rule of rules){if(++ruleCount>2000)return;if(rule.cssRules)inspect(rule.cssRules);if(!rule.selectorText||!rule.style)continue;try{if(document.body.matches(rule.selectorText)){if(rule.style.width)authorSize.width=true;if(rule.style.height)authorSize.height=true;}}catch(_){}}};
 const measure=()=>{
@@ -292,20 +300,46 @@ Promise.race([Promise.all([document.fonts?document.fonts.ready:Promise.resolve()
  .then(()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{ready=true;measure();}))).catch(error=>post({kind:'error',message:error.message}));
 addEventListener('resize',()=>{clearTimeout(timer);timer=setTimeout(measure,80);});
 if(window.ResizeObserver){const observer=new ResizeObserver(()=>{clearTimeout(timer);timer=setTimeout(measure,80);});observer.observe(document.body);}
-addEventListener('scroll',()=>{clearTimeout(timer);timer=setTimeout(measure,700);},{passive:true});
+addEventListener('scroll',()=>{clearTimeout(timer);timer=setTimeout(()=>{measure();window.tangerineCapturePosition();},220);},{passive:true});
+addEventListener('flutterInAppWebViewPlatformReady',()=>{if(ready)measure();});
+window.tangerineMeasure=()=>{if(ready)measure();};
+window.tangerineSourceGeometry=(width,height)=>{if(Number.isFinite(width)&&Number.isFinite(height)&&width>0&&height>0&&width<=24000&&height<=24000&&width*height<=80000000){sourceWidth=width;sourceHeight=height;if(ready)measure();}};
 let tapTimer;
-document.addEventListener('click',(event)=>{clearTimeout(tapTimer);if(window.visualViewport&&window.visualViewport.scale>1.05)return;const selection=getSelection();if(event.target.closest&&event.target.closest('a,button,input,textarea,select')||selection&&!selection.isCollapsed)return;const x=event.clientX/innerWidth,y=event.clientY/innerHeight;tapTimer=setTimeout(()=>post({kind:'tap',x,y}),500);});
+document.addEventListener('click',(event)=>{const link=event.target.closest&&event.target.closest('a[href]');if(link){event.preventDefault();post({kind:'link',href:link.getAttribute('href')});return;}clearTimeout(tapTimer);if(window.visualViewport&&window.visualViewport.scale>1.05)return;const selection=getSelection();if(event.target.closest&&event.target.closest('a,button,input,textarea,select')||selection&&!selection.isCollapsed)return;const x=event.clientX/innerWidth,y=event.clientY/innerHeight;tapTimer=setTimeout(()=>post({kind:'tap',x,y}),500);});
 document.addEventListener('dblclick',()=>clearTimeout(tapTimer));
 const textNodes=(root)=>{const nodes=[],walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);let node;while(node=walker.nextNode()){if(node.parentElement&&node.parentElement.closest('script,style,noscript'))continue;nodes.push(node);if(nodes.length>250000)throw new Error('Publication text exceeds limits');}return nodes;};
 const offsetAt=(container,offset)=>{const prefix=document.createRange();prefix.selectNodeContents(document.body);prefix.setEnd(container,offset);return textNodes(prefix.cloneContents()).reduce((sum,node)=>sum+node.data.length,0);};
 let selectionTimer;
 document.addEventListener('selectionchange',()=>{clearTimeout(selectionTimer);selectionTimer=setTimeout(()=>{try{const s=getSelection();if(!s||s.rangeCount===0||s.isCollapsed){post({kind:'selection',text:'',offset:0,end:0});return;}const range=s.getRangeAt(0),start=offsetAt(range.startContainer,range.startOffset),end=offsetAt(range.endContainer,range.endOffset);if(end>100000000)return;post({kind:'selection',text:s.toString().slice(0,16000),offset:start,end});}catch(error){post({kind:'error',message:error.message});}},160);});
-window.tangerineRestoreText=(args)=>{if(args.request!==scope.request||args.revision!==scope.revision||args.pageKey!==scope.pageKey||!Number.isInteger(args.start)||!Number.isInteger(args.end)||args.start<0||args.end<=args.start)return;try{const nodes=textNodes(document.body);let count=0,start=null,end=null;for(const node of nodes){const next=count+node.data.length;if(!start&&args.start<next)start=[node,args.start-count];if(args.end<=next){end=[node,args.end-count];break;}count=next;}if(!start||!end)throw new Error('Saved passage offsets are unavailable');const range=document.createRange();range.setStart(...start);range.setEnd(...end);if(args.quote&&!range.toString().startsWith(args.quote))throw new Error('Saved passage text changed');const selection=getSelection();selection.removeAllRanges();selection.addRange(range);const rect=range.getBoundingClientRect();scrollTo(0,scrollY+rect.top-innerHeight*.3);measure();}catch(error){post({kind:'anchorError',message:error.message});}};
+let positionActive=false,textIndex;
+const indexText=()=>{if(textIndex)return textIndex;const nodes=textNodes(document.body),starts=[];let total=0;for(const n of nodes){starts.push(total);total+=n.data.length;if(total>8000000)throw new Error('Publication text exceeds limits');}return textIndex={nodes,starts,text:nodes.map(n=>n.data).join('')};};
+const rangeAt=(offset,end)=>{const idx=indexText();let startNode,endNode;for(let i=0;i<idx.nodes.length;i++){const n=idx.nodes[i],s=idx.starts[i],e=s+n.data.length;if(!startNode&&offset<e)startNode=[n,Math.max(0,offset-s)];if(end<=e){endNode=[n,Math.max(0,end-s)];break;}}if(!startNode||!endNode)throw new Error('Saved text offsets are unavailable');const range=document.createRange();range.setStart(...startNode);range.setEnd(...endNode);return range;};
+window.tangerineCapturePosition=()=>{if(!ready||!positionActive)return null;try{
+ const idx=indexText();let range,offset;
+ for(const x of [Math.min(innerWidth-1,24),innerWidth*.2,innerWidth*.5]){const y=innerHeight*.2;if(document.caretRangeFromPoint)range=document.caretRangeFromPoint(x,y);else if(document.caretPositionFromPoint){const c=document.caretPositionFromPoint(x,y);if(c){range=document.createRange();range.setStart(c.offsetNode,c.offset);range.collapse(true);}}if(range&&range.startContainer.nodeType===Node.TEXT_NODE&&document.body.contains(range.startContainer))break;range=null;}
+ if(range){const i=idx.nodes.indexOf(range.startContainer);if(i>=0)offset=idx.starts[i]+range.startOffset;}
+ if(offset===undefined){for(let i=0;i<idx.nodes.length;i++){if(!idx.nodes[i].data.trim())continue;const r=document.createRange();r.selectNodeContents(idx.nodes[i]);const rect=r.getBoundingClientRect();if(rect.bottom>0&&rect.top<innerHeight){range=r;offset=idx.starts[i];break;}}}
+ if(offset===undefined||offset>=idx.text.length)return null;
+ const rect=range.getBoundingClientRect();return post({kind:'position',offset,quote:idx.text.slice(offset,offset+120),bias:Math.max(0,Math.min(1,rect.top/innerHeight))});
+ }catch(_){return null;}};
+window.tangerineActivate=()=>{positionActive=true;measure();window.tangerineCapturePosition();};
+window.tangerineRestoreText=(args)=>{if(args.request!==scope.request||args.revision!==scope.revision||args.pageKey!==scope.pageKey||!Number.isInteger(args.start)||args.start<0)return false;try{
+ const idx=indexText();let start=args.start,end=Number.isInteger(args.end)?args.end:start+1;
+ if(args.quote&&idx.text.slice(start,start+args.quote.length)!==args.quote){const found=idx.text.indexOf(args.quote);if(found<0||idx.text.indexOf(args.quote,found+1)>=0)throw new Error('Saved passage text changed or is ambiguous');end=found+(end-start);start=found;}
+ const range=rangeAt(start,Math.min(Math.max(start+1,end),idx.text.length));
+ if(args.select){const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}
+ const rect=range.getBoundingClientRect();scrollTo(0,scrollY+rect.top-innerHeight*(Number.isFinite(args.bias)?Math.max(0,Math.min(1,args.bias)):.2));return true;
+ }catch(error){post({kind:'anchorError',message:error.message});return false;}};
+window.tangerineFragment=(id)=>{const node=document.getElementById(id)||Array.from(document.getElementsByName(id))[0];if(!node){post({kind:'anchorError',message:'This chapter destination is missing from the publication.'});return false;}node.scrollIntoView();return true;};
 })();''';
   }
 
   Future<void> dispose() async {
     _closed = true;
+    for (final pending in _waiting) {
+      pending.complete(false);
+    }
+    _waiting.clear();
     await _server.close(force: true);
   }
 }

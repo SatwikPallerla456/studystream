@@ -121,6 +121,7 @@ final class VLCEngine {
     var version: String { String(cString: libvlc_get_version()) }
     var metadata: [String: String] {
         guard let media = libvlc_media_player_get_media(player) else { return [:] }
+        defer { libvlc_media_release(media) }
         var values: [String: String] = [:]
         for (name, field) in [("Title", libvlc_meta_Title), ("Artist", libvlc_meta_Artist), ("Album", libvlc_meta_Album), ("Genre", libvlc_meta_Genre), ("Artwork", libvlc_meta_ArtworkURL)] {
             if let pointer = libvlc_media_get_meta(media, field) { values[name] = String(cString: pointer); libvlc_free(pointer) }
@@ -129,6 +130,7 @@ final class VLCEngine {
     }
     var statistics: [String: String] {
         guard let media = libvlc_media_player_get_media(player) else { return [:] }
+        defer { libvlc_media_release(media) }
         var stats = libvlc_media_stats_t()
         guard libvlc_media_get_stats(media, &stats) != 0 else { return [:] }
         return ["Decoded video frames": String(stats.i_decoded_video), "Displayed pictures": String(stats.i_displayed_pictures),
@@ -137,6 +139,25 @@ final class VLCEngine {
                 "Input bitrate (Mb/s)": String(format: "%.3f", stats.f_input_bitrate * 8)]
     }
 
+    var audioOutputDevices: [[String: String]] {
+        guard let first = libvlc_audio_output_device_enum(player) else { return [] }
+        defer { libvlc_audio_output_device_list_release(first) }
+        var rows: [[String: String]] = [], cursor: UnsafeMutablePointer<libvlc_audio_output_device_t>? = first
+        while let row = cursor, rows.count < 128 {
+            if let id = row.pointee.psz_device { rows.append(["id": String(cString: id), "title": row.pointee.psz_description.map { String(cString: $0) } ?? "Audio output"]) }
+            cursor = row.pointee.p_next
+        }
+        return rows
+    }
+    var outputDevice: String {
+        guard let value = libvlc_audio_output_device_get(player) else { return "" }
+        defer { libvlc_free(value) }; return String(cString: value)
+    }
+    func selectOutputDevice(_ id: String) throws {
+        guard id.isEmpty || audioOutputDevices.contains(where: { $0["id"] == id }) else { throw PlayerError.media }
+        if id.isEmpty { libvlc_audio_output_device_set(player, nil, nil) }
+        else { id.withCString { libvlc_audio_output_device_set(player, nil, $0) } }
+    }
     var videoSize: CGSize {
         var width: UInt32 = 0, height: UInt32 = 0
         libvlc_video_get_size(player, 0, &width, &height)

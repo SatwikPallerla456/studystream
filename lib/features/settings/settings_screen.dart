@@ -362,7 +362,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             leading: const Icon(Icons.manage_search),
             title: const Text('Metadata providers & credits'),
             subtitle: const Text(
-              'Online identification, artwork and TMDB setup',
+              'TheTVDB included, artwork and optional providers',
             ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.of(context).push(
@@ -387,6 +387,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 onPressed: () => context.push('/player-settings'),
                 icon: const Icon(Icons.keyboard),
                 label: const Text('Player controls & engine'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => context.push('/advanced-player'),
+                icon: const Icon(Icons.video_settings),
+                label: const Text('Advanced player workflows'),
               ),
               OutlinedButton.icon(
                 onPressed: () => context.push('/playlists'),

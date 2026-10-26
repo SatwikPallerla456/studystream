@@ -21,6 +21,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		AD0123456789000000000001 /* AdvancedMyVLC.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0123456789000000000002; };
 		331C80D8294CF71000263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C80D7294CF71000263BE5 /* RunnerTests.swift */; };
 		335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */; };
 		33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC10F02044A3C60003C045 /* AppDelegate.swift */; };
@@ -72,6 +73,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AD0123456789000000000002 /* AdvancedMyVLC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvancedMyVLC.swift; sourceTree = "<group>"; };
 		23F61C25FA4399271A3241B8 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 		331C80D5294CF71000263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		331C80D7294CF71000263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
@@ -218,6 +220,7 @@
 				AABBCCDDEEFF002222330000 /* MyVLC/OutputJobs.swift */,
 				AABBCCDDEEFF001122330005 /* MyVLC/VLCOptions.json */,
 				AABBCCDDEEFF001122330004 /* MyVLCBridge.swift */,
+				AD0123456789000000000002 /* AdvancedMyVLC.swift */,
 				AABBCCDDEEFF001122330003 /* MyVLC/MediaLibrary.swift */,
 				AABBCCDDEEFF001122330002 /* MyVLC/OptionLexer.swift */,
 				AABBCCDDEEFF001122330001 /* MyVLC/Preferences.swift */,
@@ -463,6 +466,7 @@
 		};
 		AABBCCDDEEFF003333440000 /* Bundle libVLC runtime */ = {
             isa = PBXShellScriptBuildPhase;
+            alwaysOutOfDate = 1;
             buildActionMask = 2147483647;
             files = ();
             inputPaths = ();
@@ -493,6 +497,7 @@
 				AABBCCDDEEFF002222440001 /* MyVLCDesktop.swift in Sources */,
 				AABBCCDDEEFF002222440000 /* MyVLC/OutputJobs.swift in Sources */,
 				AABBCCDDEEFF001122440004 /* MyVLCBridge.swift in Sources */,
+				AD0123456789000000000001 /* AdvancedMyVLC.swift in Sources */,
 				AABBCCDDEEFF001122440003 /* MyVLC/MediaLibrary.swift in Sources */,
 				AABBCCDDEEFF001122440002 /* MyVLC/OptionLexer.swift in Sources */,
 				AABBCCDDEEFF001122440001 /* MyVLC/Preferences.swift in Sources */,

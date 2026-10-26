@@ -16,6 +16,7 @@ import 'collections_screen.dart';
 import 'photo_slideshow_screen.dart';
 import 'library_scan_dialog.dart';
 import 'category_browse_section.dart';
+import 'library_processing_screen.dart';
 
 class TypedLibraryScreen extends ConsumerStatefulWidget {
   const TypedLibraryScreen({
@@ -251,6 +252,7 @@ class _TypedLibraryState extends ConsumerState<TypedLibraryScreen> {
                   icon: const Icon(Icons.manage_search),
                   label: const Text('Identify titles'),
                 ),
+                LibraryProcessingButton(libraryId: widget.library.id),
                 TextButton.icon(
                   onPressed: () =>
                       context.push('/library/${widget.library.id}/sources'),
@@ -307,10 +309,13 @@ class _TypedLibraryState extends ConsumerState<TypedLibraryScreen> {
                 ],
               ),
             ),
-          if (hasCategoryHierarchy(widget.kind) && widget.filters.isEmpty)
+          if (hasCategoryHierarchy(widget.kind))
             CategoryBrowseSection(
               kind: widget.kind,
               libraryId: widget.library.id,
+              filters: widget.filters,
+              group: widget.field,
+              nested: widget.filters.isNotEmpty,
             )
           else if (_field == null && widget.filters.isEmpty)
             MediaBrowserSection(

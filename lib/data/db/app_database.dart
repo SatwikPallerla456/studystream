@@ -1,3 +1,4 @@
+import '../../domain/catalog/library_processing.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -264,9 +265,10 @@ class GlobalSearchEntry {
     this.positionSeconds,
     this.pageNumber,
     this.libraryId,
+    this.referenceId,
   });
 
-  final String? libraryId;
+  final String? libraryId, referenceId;
   final String kind;
   final String title;
   final String libraryTitle;
@@ -357,11 +359,14 @@ class AppDatabase extends _$AppDatabase {
       }
     },
     beforeOpen: (_) async {
+      await customStatement('PRAGMA busy_timeout=5000');
+      await customStatement('PRAGMA journal_mode=WAL');
       await _createMediaTables();
       await _backfillSources();
       await LibrarySourceStore(this).createTables();
       await LibrarySourceStore(this).backfill();
       await CatalogIdentityStore(this).createTables();
+      await LibraryProcessingStore.createTables(this);
       await CatalogIdentityStore(this).backfill();
       await LibraryAccessStore(this).createTables();
       await SyncChangeJournal(this).createTables();
@@ -406,6 +411,7 @@ class AppDatabase extends _$AppDatabase {
     bool includeSources = false,
     Set<String>? allowedLibraryIds,
   }) => transaction(() async {
+    var discoveryChanged = false;
     for (final table in [
       'media_records',
       if (includeSources) 'library_sources',
@@ -452,6 +458,7 @@ class AppDatabase extends _$AppDatabase {
               ![0, 1].contains(row['deleted'])) {
             throw const FormatException('Invalid media record fields');
           }
+          if (kind != 'reader') discoveryChanged = true;
           MediaRecordContract.identity(deviceId);
           if (utf8.encode(payload).length >
               MediaRecordContract.maxPayloadBytes) {
@@ -538,6 +545,7 @@ class AppDatabase extends _$AppDatabase {
         );
       }
     }
+    if (discoveryChanged) notifyUpdates({TableUpdate.onTable(appSettings)});
   });
 
   Future<void> _createIndexes() async {

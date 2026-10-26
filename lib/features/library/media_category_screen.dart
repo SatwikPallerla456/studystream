@@ -12,6 +12,7 @@ import '../media/media_browser_section.dart';
 import 'library_creation.dart';
 import 'library_scan_dialog.dart';
 import 'category_browse_section.dart';
+import 'library_processing_screen.dart';
 
 class MediaCategoryScreen extends ConsumerWidget {
   const MediaCategoryScreen({super.key, required this.kind});
@@ -63,6 +64,9 @@ class MediaCategoryScreen extends ConsumerWidget {
                           ),
                         ),
                       if (sources.length == 1) ...[
+                        LibraryProcessingButton(
+                          libraryId: sources.single.data['id'] as String,
+                        ),
                         OutlinedButton.icon(
                           onPressed: () => showLibraryScan(
                             context,

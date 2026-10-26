@@ -13,6 +13,8 @@ class ReaderLocator {
     this.fit = 'contain',
     this.zoom = 1,
     this.textOffset,
+    this.textQuote,
+    this.textBias = .2,
     this.viewState,
   });
   final String resourceId, revision, pageKey, fit;
@@ -20,6 +22,8 @@ class ReaderLocator {
   final Offset point;
   final double zoom;
   final int? textOffset;
+  final String? textQuote;
+  final double textBias;
   final Map<String, dynamic>? viewState;
   String encode() => jsonEncode({
     'version': 1,
@@ -32,6 +36,8 @@ class ReaderLocator {
     'fit': fit,
     'zoom': zoom,
     if (textOffset != null) 'textOffset': textOffset,
+    if (textQuote != null) 'textQuote': textQuote,
+    if (textOffset != null) 'textBias': textBias,
     if (viewState != null) 'viewState': viewState,
   });
   static ReaderLocator? decode(String? value) {
@@ -61,9 +67,18 @@ class ReaderLocator {
             ? data['fit']
             : 'contain',
         zoom: bounded('zoom', 1, 5, 1),
-        textOffset: data['textOffset'] is int && data['textOffset'] >= 0
+        textOffset:
+            data['textOffset'] is int &&
+                data['textOffset'] >= 0 &&
+                data['textOffset'] <= 8000000
             ? data['textOffset']
             : null,
+        textQuote:
+            data['textQuote'] is String &&
+                (data['textQuote'] as String).length <= 120
+            ? data['textQuote']
+            : null,
+        textBias: bounded('textBias', 0, 1, .2),
         viewState: data['viewState'] is Map<String, dynamic>
             ? ReaderViewportState.decode(data['viewState'])?.toJson()
             : null,

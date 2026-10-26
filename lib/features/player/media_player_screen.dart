@@ -5,12 +5,18 @@ import 'dart:ui' show AppExitResponse;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:media_kit/media_kit.dart';
 import '../../data/playback/playback_engine.dart';
 import 'native_playback_tools.dart';
 import 'native_output_tools.dart';
+import 'advanced_player_screen.dart';
+import 'custom_player_strip.dart';
+import '../../domain/services/advanced_player_repository.dart';
+import '../../domain/services/player_library_repository.dart';
+import 'desktop_playback_windows.dart';
 import '../../domain/services/player_controls_repository.dart';
 import '../../data/playback/remote_playback_controller.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -67,13 +73,156 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   bool _completionHandled = false;
   double _speed = 1;
   PlayerControls _controls = PlayerControls();
+  Map<String, String> _behavior = {};
+  Map<String, String> _playerSkin = {};
+  Color _skinColor(String key, Color fallback) {
+    final raw = _playerSkin[key]?.replaceFirst('#', '');
+    return raw == null
+        ? fallback
+        : Color(0xff000000 | int.parse(raw, radix: 16));
+  }
+
+  bool _trackAnnounced = false;
+  bool _chromeHidden = false, _stopped = false, _closingWindow = false;
+  bool get _fullscreen =>
+      _player is NativeVlcEngine &&
+      (_player! as NativeVlcEngine).diagnostics['fullscreen'] == true;
+  bool get _controlsHidden =>
+      _chromeHidden ||
+      (_fullscreen && _behavior['fullscreenControls'] == 'false');
+  Timer? _chromeTimer;
+  void _revealControls() {
+    if (_chromeHidden && mounted) setState(() => _chromeHidden = false);
+    _chromeTimer?.cancel();
+    final mode = _behavior['autoHide'] ?? 'In fullscreen only';
+    final fullscreen =
+        (_player is NativeVlcEngine) &&
+        (_player! as NativeVlcEngine).diagnostics['fullscreen'] == true;
+    if (mode == 'Always' || mode == 'In fullscreen only' && fullscreen) {
+      _chromeTimer = Timer(
+        Duration(
+          seconds:
+              (double.tryParse(_behavior['hideAfter'] ?? '3')?.round() ?? 3)
+                  .clamp(1, 10),
+        ),
+        () {
+          if (mounted && _player?.state.playing == true)
+            setState(() => _chromeHidden = true);
+        },
+      );
+    }
+  }
+
+  void _mouseAction(String action) {
+    if (action != 'none') _performAction(action);
+    _revealControls();
+  }
+
+  bool _rememberPath(String path) {
+    if (_behavior['saveHistory'] == 'false') return false;
+    final pattern = _behavior['historyExclusion'] ?? '';
+    if (pattern.isEmpty) return true;
+    try {
+      return !RegExp(pattern).hasMatch(path);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _scrollAction(double dx, double dy) {
+    final horizontal = dx.abs() > dy.abs(),
+        action = dx.abs() > dy.abs()
+            ? _controls.horizontalScroll
+            : _controls.verticalScroll;
+    final delta = (horizontal ? dx : dy) * (_controls.reverseScroll ? -1 : 1);
+    if (action == 'volume')
+      _player?.setVolume((_player!.state.volume + delta / 5).clamp(0, 100));
+    if (action == 'seek') _seekRelative((delta / 4).round());
+    _revealControls();
+  }
+
   Timer? _sleepTimer;
   Object? _remoteOwner;
+  late final Future<void> Function() _exitPreparation = _prepareForExit;
+  Future<void> _prepareForExit() async {
+    await _player?.pause();
+    await _progressWriter?.flush();
+    if (_player is NativeVlcEngine)
+      await (_player! as NativeVlcEngine).prepareExit();
+  }
+
+  Future<bool> _finishPolicy() async {
+    final action = _behavior['finished'] ?? 'Stop';
+    if (!DesktopPlaybackWindows.available ||
+        action == 'Stop' ||
+        _player is! NativeVlcEngine)
+      return false;
+    try {
+      await _prepareForExit();
+      if (action == 'Quit')
+        await DesktopPlaybackWindows.prepareOtherWindowsForExit();
+      await (_player! as NativeVlcEngine).finishWindow(action);
+      return true;
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Playback stopped. The window could not complete its finish action.',
+            ),
+          ),
+        );
+      return false;
+    }
+  }
+
+  Future<void> _takeSnapshot() async {
+    final player = _player;
+    if (player is! NativeVlcEngine || !player.supports('snapshot'))
+      throw UnsupportedError('Snapshot');
+    final path = await player.snapshot();
+    if (path == null || !mounted) return;
+    if (_behavior['snapshotPreview'] == 'false') {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Snapshot saved')));
+      return;
+    }
+    final file = File(path);
+    for (var i = 0; i < 30; i++) {
+      if (await file.exists() && await file.length() > 0) break;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Snapshot saved'),
+        content: Image.file(
+          file,
+          cacheWidth: 640,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => const Text(
+            'The snapshot preview is unavailable. Open the selected save folder to view it.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+  }
+
   late final RemotePlaybackController _remoteController;
 
+  void Function()? _releaseLibraryProcessing;
   @override
   void initState() {
     super.initState();
+    _releaseLibraryProcessing = ref.read(libraryProcessingProvider).hold();
     WidgetsBinding.instance.addObserver(this);
     _database = ref.read(appDatabaseProvider);
     _remoteController = ref.read(remotePlaybackControllerProvider);
@@ -94,6 +243,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         _progressWriter = null;
       }
       _completionHandled = false;
+      _trackAnnounced = false;
       final item = await _database.getItemById(widget.itemId);
       if (item == null) throw StateError('This file no longer exists.');
       _experience = MediaExperience(
@@ -130,18 +280,60 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       if (!mounted) return;
       final source = await ref.read(lanSyncClientProvider).sourceFor(item);
       if (!mounted) return;
+      _playerSkin = await AdvancedPlayerRepository(_database).skin();
       final controlRepository = PlayerControlsRepository(_database);
       _controls = await controlRepository.load();
+      _behavior = await controlRepository.nativePreferences();
+      if (DesktopPlaybackWindows.available &&
+          !ref.read(independentPlaybackWindowProvider) &&
+          _behavior['embeddedVideo'] == 'false') {
+        await DesktopPlaybackWindows.open(
+          item.id,
+          database: _database,
+          position: widget.initialPositionSeconds,
+          fromQueue: widget.fromQueue,
+          title: widget.multipartRepresentationId,
+        );
+        if (mounted) _back();
+        return;
+      }
       final player = initializing = await PlaybackEngine.create(
         nativePreferences: await controlRepository.nativePreferences(),
         globalShortcuts: _controls.global,
+        nextSnapshotSequence: () => _database.transaction(() async {
+          await _database.customStatement(
+            'INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1, updated_at = excluded.updated_at',
+            [
+              'player.snapshot.sequence',
+              '1',
+              DateTime.now().millisecondsSinceEpoch,
+            ],
+          );
+          return int.parse(
+            (await _database.getSetting('player.snapshot.sequence'))!,
+          );
+        }),
       );
       if (player is NativeVlcEngine) {
         _subscriptions.add(player.actions.listen(_performAction));
+        _subscriptions.add(
+          player.fullscreenChanges.listen((_) {
+            if (mounted) {
+              setState(() {});
+              _revealControls();
+            }
+          }),
+        );
       }
       final speed = saved?.playbackSpeed ?? preferences.defaultPlaybackSpeed;
-      final exactPosition = widget.initialPositionSeconds;
-      final resume = exactPosition == null
+      final exactPosition =
+          widget.initialPositionSeconds ??
+          (_behavior['resume'] == 'false' ||
+                  _behavior['continue'] == 'Never' ||
+                  !_rememberPath(item.filePath)
+              ? 0.0
+              : null);
+      var resume = exactPosition == null
           ? ResumeService.mediaResumeSeconds(
               saved?.lastPositionSeconds ?? 0,
               durationSeconds:
@@ -150,6 +342,35 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
               rewindSeconds: preferences.resumeRewindSeconds,
             )
           : exactPosition.clamp(0, double.infinity);
+      if (exactPosition == null &&
+          resume > 0 &&
+          _behavior['continue'] == 'Ask' &&
+          mounted) {
+        final keep = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Continue playback?'),
+            content: Text(
+              'Resume ${cleanDisplayTitle(item.userTitle ?? item.title)} at ${_AudioSurface._time(Duration(seconds: resume.floor()))}?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Start over'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Resume'),
+              ),
+            ],
+          ),
+        );
+        if (keep != true) resume = 0;
+      }
+      if (!mounted) {
+        await player.dispose();
+        return;
+      }
       await player.open(
         Media(
           source.uri.scheme == 'file' ? item.filePath : source.uri.toString(),
@@ -172,7 +393,35 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         return;
       }
       await player.setRate(speed);
+      final savedVolume = double.tryParse(
+        await _database.getSetting('player.lastVolume') ?? '',
+      );
+      final startupVolume =
+          double.tryParse(_behavior['startupVolume'] ?? '75') ?? 75;
+      await player.setVolume(
+        (_behavior['rememberVolume'] != 'false' && savedVolume != null
+                ? savedVolume
+                : startupVolume)
+            .clamp(0, 100),
+      );
       if (player is NativeVlcEngine) {
+        await player.windowPreferences({
+          ...await controlRepository.nativePreferences(),
+          'independentPlaybackWindow':
+              '${ref.read(independentPlaybackWindowProvider)}',
+          'windowFrameKey': 'Tangerine.player.${item.id}',
+          'windowTitle': item.filename,
+          'videoWidth': '${player.state.width ?? 0}',
+          'videoHeight': '${player.state.height ?? 0}',
+        });
+        final device = _behavior['outputDevice'];
+        if (player.supports('devices') && device != null && device.isNotEmpty) {
+          try {
+            await player.setOutputDevice(device);
+          } catch (_) {
+            await player.setOutputDevice('');
+          }
+        }
         await (await NativePlaybackSettings.load(
           _database,
           item.id,
@@ -199,10 +448,34 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         await player.dispose();
         return;
       }
+      if (player is NativeVlcEngine && Platform.isMacOS) {
+        final repo = AdvancedPlayerRepository(_database),
+            addons = await AdvancedPlayerRepository(_database).list('addons');
+        for (final addon in addons.where((a) => a['enabled'] == true)) {
+          try {
+            await player.runAddon(
+              addon['source'] as String,
+              title: item.userTitle ?? item.title,
+            );
+          } catch (_) {
+            addon['enabled'] = false;
+            await repo.saveList('addons', addons);
+            if (mounted)
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'An add-on failed and was disabled. Review it in Advanced player → Customize.',
+                  ),
+                ),
+              );
+          }
+        }
+      }
       final writer =
           MediaProgressWriter(
             database: _database,
             item: item,
+            saveHistory: _rememberPath(item.filePath),
             completionThreshold: preferences.completionThreshold,
             resumeRewindSeconds: preferences.resumeRewindSeconds,
             onError: (error) {
@@ -227,7 +500,19 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           );
       _subscriptions
         ..add(
+          player.stream.volume.listen((volume) {
+            if (_behavior['rememberVolume'] != 'false' && volume.isFinite)
+              unawaited(
+                _database.setSetting(
+                  'player.lastVolume',
+                  '${volume.clamp(0, 100)}',
+                ),
+              );
+          }),
+        )
+        ..add(
           player.stream.position.listen((position) {
+            if (_stopped) return;
             writer.schedule(
               position: position,
               duration: player.state.duration,
@@ -237,6 +522,20 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         )
         ..add(
           player.stream.playing.listen((playing) {
+            if (playing) {
+              _revealControls();
+              if (!_trackAnnounced &&
+                  DesktopPlaybackWindows.available &&
+                  player is NativeVlcEngine) {
+                _trackAnnounced = true;
+                unawaited(
+                  DesktopPlaybackWindows.notifyTrack(
+                    cleanDisplayTitle(item.userTitle ?? item.title),
+                    player.diagnostics['minimized'] == true,
+                  ).catchError((Object _) {}),
+                );
+              }
+            }
             unawaited(_setWakelock(playing));
             if (!playing) unawaited(writer.flush());
           }),
@@ -273,6 +572,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         _speed = speed;
         _loading = false;
       });
+      if (DesktopPlaybackWindows.available)
+        DesktopPlaybackWindows.prepareExit = _exitPreparation;
       _remoteOwner = _remoteController.attach(
         status: () => {
           'active': mounted && _player != null,
@@ -314,9 +615,27 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           }
         },
       );
-      if (widget.fromQueue) await player.play();
+      _chromeHidden =
+          _behavior['compactStartup'] == 'true' && _experience.video;
+      if (_behavior['startFullscreen'] == 'true' &&
+          _experience.video &&
+          player is NativeVlcEngine &&
+          player.supports('fullscreen'))
+        await player.toggleFullscreen();
+      if (widget.fromQueue || _behavior['startPlaying'] != 'false')
+        await player.play();
     } catch (error) {
       await initializing?.dispose();
+      if (_player != null) {
+        for (final subscription in _subscriptions) {
+          await subscription.cancel();
+        }
+        _subscriptions.clear();
+        await _progressWriter?.dispose();
+        await _player?.dispose();
+        _player = null;
+        _progressWriter = null;
+      }
       if (!mounted) return;
       setState(() {
         _error = _friendlyPlaybackError(error.toString());
@@ -346,11 +665,14 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   Future<void> _completedNaturally({required bool autoAdvance}) async {
     final writer = _progressWriter;
     if (writer != null) await writer.flush(forceComplete: true);
-    if (autoAdvance && _experience.sequential ||
-        widget.fromQueue ||
-        widget.multipartRepresentationId != null) {
+    if (_behavior['stopEach'] != 'true' &&
+        (autoAdvance && _experience.sequential ||
+            widget.fromQueue ||
+            widget.multipartRepresentationId != null)) {
       await _navigate(forward: true, countdown: true);
     } else if (mounted) {
+      if (await _finishPolicy()) return;
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(_experience.completedLabel)));
@@ -375,6 +697,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         if (!mounted) return;
         if (next == null) {
           _navigating = false;
+          if (countdown && await _finishPolicy()) return;
+          if (!mounted) return;
           if (countdown) {
             context.pushReplacement('/details/${Uri.encodeComponent(title)}');
           } else {
@@ -440,6 +764,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       return;
     }
     if (!mounted) return;
+    if (countdown && next == null && await _finishPolicy()) return;
+    if (!mounted) return;
     if (countdown && !queueActive) {
       final action = await showNextItemCountdownDialog(
         context: context,
@@ -486,7 +812,11 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   Future<void> _back() async {
     await _progressWriter?.flush();
     if (!mounted) return;
-    context.go('/library/${_item?.libraryId ?? ''}');
+    context.go(
+      ref.read(independentPlaybackWindowProvider)
+          ? '/'
+          : '/library/${_item?.libraryId ?? ''}',
+    );
   }
 
   Future<void> _showQueue() async {
@@ -718,6 +1048,14 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                           ),
                         ],
                       ),
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.pop(modalContext);
+                          _advanced(tab: 1);
+                        },
+                        icon: const Icon(Icons.travel_explore),
+                        label: const Text('Search online subtitles'),
+                      ),
                       if (_item?.filePath.startsWith('remote:') == false)
                         TextButton.icon(
                           onPressed: () {
@@ -771,9 +1109,61 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   }
 
   void _performAction(String action) {
+    unawaited(
+      _dispatchAction(action).catchError((Object error) {
+        if (mounted)
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                error is UnsupportedError
+                    ? 'This control is unavailable on this platform.'
+                    : 'The player action could not finish.',
+              ),
+            ),
+          );
+      }),
+    );
+  }
+
+  Future<void> _dispatchAction(String action) async {
+    final player = _player;
+    if (player == null) return;
+    if (action.startsWith('pointer.')) {
+      if (action == 'pointer.single') _mouseAction(_controls.singleClick);
+      if (action == 'pointer.double') _mouseAction(_controls.doubleClick);
+      if (action == 'pointer.hover') _revealControls();
+      if (action.startsWith('pointer.scroll:')) {
+        final fields = action.split(':');
+        if (fields.length == 3)
+          _scrollAction(
+            double.tryParse(fields[1]) ?? 0,
+            double.tryParse(fields[2]) ?? 0,
+          );
+      }
+      return;
+    }
     switch (action) {
+      case 'window.close':
+        if (_closingWindow) return;
+        _closingWindow = true;
+        try {
+          await player.pause();
+          await _progressWriter?.flush();
+          if (player is NativeVlcEngine) await player.closeWindow();
+        } catch (_) {
+          _closingWindow = false;
+          rethrow;
+        }
       case 'playPause':
+        _stopped = false;
         _togglePlay();
+        _revealControls();
+      case 'stop':
+        await _progressWriter?.flush();
+        _stopped = true;
+        await player.pause();
+        await player.seek(Duration.zero);
+        _revealControls();
       case 'seekBack':
         _seekRelative(-_controls.skipSeconds);
       case 'seekForward':
@@ -781,38 +1171,105 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       case 'mute':
         _toggleMute();
       case 'next':
-        unawaited(_navigate(forward: true));
+        await _navigate(forward: true);
       case 'previous':
-        unawaited(_navigate(forward: false));
+        await _navigate(forward: false);
       case 'volumeUp':
-        _player?.setVolume(
-          (_player!.state.volume + _controls.volumeStep).clamp(0, 100),
+        await player.setVolume(
+          (player.state.volume + _controls.volumeStep).clamp(0, 100),
         );
       case 'volumeDown':
-        _player?.setVolume(
-          (_player!.state.volume - _controls.volumeStep).clamp(0, 100),
+        await player.setVolume(
+          (player.state.volume - _controls.volumeStep).clamp(0, 100),
         );
+      case 'position':
+        if (mounted)
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${_AudioSurface._time(player.state.position)} / ${_AudioSurface._time(player.state.duration)}',
+              ),
+            ),
+          );
+      case 'hideUI':
+        setState(() => _chromeHidden = !_chromeHidden);
+      case 'escape':
+        if (player is NativeVlcEngine && player.supports('escape'))
+          await player.exitPresentation();
+        _revealControls();
       case 'fullscreen':
-        if (_player is NativeVlcEngine) {
-          (_player! as NativeVlcEngine).toggleFullscreen();
+        if (player is NativeVlcEngine && player.supports('fullscreen')) {
+          await player.toggleFullscreen();
+          _revealControls();
+          if (mounted) setState(() {});
+        } else {
+          throw UnsupportedError('Fullscreen');
         }
       case 'miniPlayer':
-        if (_player is NativeVlcEngine) {
-          (_player! as NativeVlcEngine).toggleMini();
-        }
+        if (player is NativeVlcEngine && player.supports('mini'))
+          await player.toggleMini();
+        else
+          throw UnsupportedError('Mini player');
+      case 'snapshot':
+        if (player is NativeVlcEngine && player.supports('snapshot'))
+          await _takeSnapshot();
+        else
+          throw UnsupportedError('Snapshot');
+      case 'record':
+        if (player is NativeVlcEngine && player.supports('outputs'))
+          await player.toggleRecording();
+        else
+          throw UnsupportedError('Recording');
       case 'nextFrame':
-        if (_player is NativeVlcEngine) {
-          (_player! as NativeVlcEngine).nextFrame();
-        }
+        if (player is NativeVlcEngine && player.supports('frame'))
+          await player.nextFrame();
+        else
+          throw UnsupportedError('Frame stepping');
+      case 'nextChapter':
+        if (player is NativeVlcEngine && player.supports('chapters'))
+          await player.setChapter(
+            ((player.diagnostics['chapter'] as num?)?.toInt() ?? 0) + 1,
+          );
+      case 'previousChapter':
+        if (player is NativeVlcEngine && player.supports('chapters'))
+          await player.setChapter(
+            (((player.diagnostics['chapter'] as num?)?.toInt() ?? 0) - 1).clamp(
+              0,
+              100000,
+            ),
+          );
     }
   }
 
   void _playerAction(String action) {
+    if (action == 'newWindow') {
+      unawaited(
+        DesktopPlaybackWindows.open(
+          widget.itemId,
+          database: _database,
+          position: _player!.state.position.inMilliseconds / 1000,
+          fromQueue: widget.fromQueue,
+          title: widget.multipartRepresentationId,
+        ).catchError((Object _) {
+          if (mounted)
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'A playback window could not open. Close an unused window and try again.',
+                ),
+              ),
+            );
+        }),
+      );
+    }
     if (action == 'queue') _showQueue();
     if (action == 'outputs' && _player is NativeVlcEngine) {
       showStudyAdaptiveModal<void>(
         context: context,
-        builder: (_) => NativeOutputTools(engine: _player! as NativeVlcEngine),
+        builder: (_) => NativeOutputTools(
+          engine: _player! as NativeVlcEngine,
+          onSnapshot: _takeSnapshot,
+        ),
       );
     }
     if (action.startsWith('sleep:')) _setSleep(int.parse(action.substring(6)));
@@ -839,11 +1296,17 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     );
   }
 
-  void _togglePlay() => _player?.playOrPause();
+  void _togglePlay() {
+    _stopped = false;
+    _player?.playOrPause();
+    _revealControls();
+  }
 
   Future<void> _setWakelock(bool enabled) async {
     try {
-      await WakelockPlus.toggle(enable: enabled);
+      await WakelockPlus.toggle(
+        enable: enabled && _behavior['preventSleep'] != 'false',
+      );
     } on PlatformException {
       // Playback remains usable when keeping the display awake is unavailable.
     } on MissingPluginException {
@@ -880,12 +1343,19 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) unawaited(_progressWriter?.flush());
+    if (state == AppLifecycleState.paused &&
+        (Platform.isAndroid || Platform.isIOS))
+      unawaited(_player?.pause());
   }
 
   @override
   void dispose() {
+    _releaseLibraryProcessing?.call();
+    if (identical(DesktopPlaybackWindows.prepareExit, _exitPreparation))
+      DesktopPlaybackWindows.prepareExit = null;
     WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
+    _chromeTimer?.cancel();
     _remoteController.detach(_remoteOwner);
     for (final subscription in _subscriptions) {
       subscription.cancel();
@@ -902,6 +1372,27 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     final compact = MediaQuery.sizeOf(context).width < 700;
     return CallbackShortcuts(
       bindings: {
+        for (final row in <(bool, int)>[
+          (false, _controls.veryShortSkip),
+          (true, _controls.mediumSkip),
+        ])
+          for (final forward in [false, true])
+            SingleActivator(
+              forward
+                  ? LogicalKeyboardKey.arrowRight
+                  : LogicalKeyboardKey.arrowLeft,
+              control: !row.$1,
+              shift: row.$1,
+            ): () =>
+                _seekRelative(forward ? row.$2 : -row.$2),
+        for (final forward in [false, true])
+          SingleActivator(
+            forward
+                ? LogicalKeyboardKey.arrowRight
+                : LogicalKeyboardKey.arrowLeft,
+            alt: true,
+          ): () =>
+              _seekRelative(forward ? _controls.longSkip : -_controls.longSkip),
         for (final binding in _controls.local.entries)
           ?PlayerControls.activator(binding.value): () =>
               _performAction(binding.key),
@@ -909,261 +1400,286 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          appBar: AppTopBar(
-            title: cleanDisplayTitle(
-              item?.userTitle ?? item?.title ?? 'Player',
-            ),
-            showBack: true,
-            showHome: true,
-            onBack: _back,
-            actions: [
-              if (_player is NativeVlcEngine)
-                IconButton(
-                  tooltip: 'Playback tools',
-                  onPressed: () => showStudyAdaptiveModal<void>(
-                    context: context,
-                    builder: (_) => NativePlaybackTools(
-                      engine: _player! as NativeVlcEngine,
-                      database: _database,
-                      itemId: widget.itemId,
-                      video: _experience.video,
-                    ),
+          appBar: _controlsHidden && _experience.video
+              ? null
+              : AppTopBar(
+                  title: cleanDisplayTitle(
+                    item?.userTitle ?? item?.title ?? 'Player',
                   ),
-                  icon: const Icon(Icons.tune),
-                ),
-              if (!compact &&
-                  (_experience.sequential ||
-                      widget.fromQueue ||
-                      widget.multipartRepresentationId != null))
-                IconButton(
-                  tooltip: 'Previous',
-                  onPressed: item == null
-                      ? null
-                      : () => _navigate(forward: false),
-                  icon: const Icon(Icons.skip_previous),
-                ),
-              if (_experience.notes)
-                IconButton(
-                  tooltip: _experience.notesLabel,
-                  onPressed: item == null ? null : _showStudyTools,
-                  icon: const Icon(Icons.note_alt_outlined),
-                ),
-              if (!compact) ...[
-                IconButton(
-                  tooltip: _experience.video
-                      ? 'Audio and subtitle tracks'
-                      : 'Audio tracks',
-                  onPressed: item == null ? null : _showTracks,
-                  icon: const Icon(Icons.closed_caption_outlined),
-                ),
-                PopupMenuButton<double>(
-                  tooltip: 'Playback speed',
-                  initialValue: _speed,
-                  onSelected: _setSpeed,
-                  itemBuilder: (_) => playbackSpeeds
-                      .map(
-                        (speed) =>
-                            PopupMenuItem(value: speed, child: Text('$speed×')),
-                      )
-                      .toList(),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    child: Center(
-                      child: Text(
-                        '$_speed×',
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  ),
-                ),
-                PopupMenuButton<String>(
-                  tooltip: 'Playback actions',
-                  onSelected: _playerAction,
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: 'queue',
-                      child: Text('Queue & playlists'),
-                    ),
+                  showBack: true,
+                  showHome: true,
+                  onBack: _back,
+                  actions: [
                     if (_player is NativeVlcEngine)
-                      const PopupMenuItem(
-                        value: 'outputs',
-                        child: Text('Outputs & windows'),
+                      IconButton(
+                        tooltip: 'Advanced player workflows',
+                        onPressed: () => _advanced(),
+                        icon: const Icon(Icons.video_settings),
                       ),
-                    for (final minutes in [15, 30, 60, 0])
-                      PopupMenuItem(
-                        value: 'sleep:$minutes',
-                        child: Text(
-                          minutes == 0
-                              ? 'Cancel sleep timer'
-                              : 'Sleep in $minutes minutes',
-                        ),
-                      ),
-
-                    if (_experience.completion)
-                      PopupMenuItem(
-                        value: 'complete',
-                        child: Text(_experience.completionLabel(false)),
-                      ),
-                    if (_experience.completion)
-                      PopupMenuItem(
-                        value: 'incomplete',
-                        child: Text(_experience.completionLabel(true)),
-                      ),
-                  ],
-                ),
-                IconButton(
-                  tooltip: 'Next',
-                  onPressed: item == null
-                      ? null
-                      : () => _navigate(forward: true),
-                  icon: const Icon(Icons.skip_next),
-                ),
-              ] else
-                PopupMenuButton<String>(
-                  tooltip: 'Player options',
-                  onSelected: (value) {
-                    _playerAction(value);
-                    if (value == 'previous') _navigate(forward: false);
-                    if (value == 'next') _navigate(forward: true);
-                    if (value == 'complete') _setCompleted(true);
-                    if (value == 'incomplete') _setCompleted(false);
-                    if (value == 'tracks') _showTracks();
-                    if (value.startsWith('speed:')) {
-                      _setSpeed(double.parse(value.substring(6)));
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: 'queue',
-                      child: Text('Queue & playlists'),
-                    ),
                     if (_player is NativeVlcEngine)
-                      const PopupMenuItem(
-                        value: 'outputs',
-                        child: Text('Outputs & windows'),
-                      ),
-                    for (final minutes in [15, 30, 60, 0])
-                      PopupMenuItem(
-                        value: 'sleep:$minutes',
-                        child: Text(
-                          minutes == 0
-                              ? 'Cancel sleep timer'
-                              : 'Sleep in $minutes minutes',
+                      IconButton(
+                        tooltip: 'Playback tools',
+                        onPressed: () => showStudyAdaptiveModal<void>(
+                          context: context,
+                          builder: (_) => NativePlaybackTools(
+                            engine: _player! as NativeVlcEngine,
+                            database: _database,
+                            itemId: widget.itemId,
+                            video: _experience.video,
+                          ),
                         ),
+                        icon: const Icon(Icons.tune),
                       ),
-                    const PopupMenuItem(
-                      value: 'previous',
-                      child: Text('Previous'),
-                    ),
-                    const PopupMenuItem(value: 'next', child: Text('Next')),
-                    const PopupMenuDivider(),
-                    PopupMenuItem(
-                      value: 'tracks',
-                      child: Text(
-                        _experience.video
-                            ? 'Audio and subtitles'
+                    if (!compact &&
+                        (_experience.sequential ||
+                            widget.fromQueue ||
+                            widget.multipartRepresentationId != null))
+                      IconButton(
+                        tooltip: 'Previous',
+                        onPressed: item == null
+                            ? null
+                            : () => _navigate(forward: false),
+                        icon: const Icon(Icons.skip_previous),
+                      ),
+                    if (_experience.notes)
+                      IconButton(
+                        tooltip: _experience.notesLabel,
+                        onPressed: item == null ? null : _showStudyTools,
+                        icon: const Icon(Icons.note_alt_outlined),
+                      ),
+                    if (!compact) ...[
+                      IconButton(
+                        tooltip: _experience.video
+                            ? 'Audio and subtitle tracks'
                             : 'Audio tracks',
+                        onPressed: item == null ? null : _showTracks,
+                        icon: const Icon(Icons.closed_caption_outlined),
                       ),
-                    ),
-                    for (final speed in playbackSpeeds)
-                      PopupMenuItem(
-                        value: 'speed:$speed',
-                        child: Text(
-                          speed == _speed
-                              ? 'Playback speed: $speed× ✓'
-                              : 'Playback speed: $speed×',
+                      PopupMenuButton<double>(
+                        tooltip: 'Playback speed',
+                        initialValue: _speed,
+                        onSelected: _setSpeed,
+                        itemBuilder: (_) => playbackSpeeds
+                            .map(
+                              (speed) => PopupMenuItem(
+                                value: speed,
+                                child: Text('$speed×'),
+                              ),
+                            )
+                            .toList(),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Center(
+                            child: Text(
+                              '$_speed×',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    const PopupMenuDivider(),
-                    if (_experience.completion)
-                      PopupMenuItem(
-                        value: 'complete',
-                        child: Text(_experience.completionLabel(false)),
+                      PopupMenuButton<String>(
+                        tooltip: 'Playback actions',
+                        onSelected: _playerAction,
+                        itemBuilder: (_) => [
+                          if (DesktopPlaybackWindows.available)
+                            const PopupMenuItem(
+                              value: 'newWindow',
+                              child: Text('Open independent playback window'),
+                            ),
+                          const PopupMenuItem(
+                            value: 'queue',
+                            child: Text('Queue & playlists'),
+                          ),
+                          if (_player is NativeVlcEngine)
+                            const PopupMenuItem(
+                              value: 'outputs',
+                              child: Text('Outputs & windows'),
+                            ),
+                          for (final minutes in [15, 30, 60, 0])
+                            PopupMenuItem(
+                              value: 'sleep:$minutes',
+                              child: Text(
+                                minutes == 0
+                                    ? 'Cancel sleep timer'
+                                    : 'Sleep in $minutes minutes',
+                              ),
+                            ),
+
+                          if (_experience.completion)
+                            PopupMenuItem(
+                              value: 'complete',
+                              child: Text(_experience.completionLabel(false)),
+                            ),
+                          if (_experience.completion)
+                            PopupMenuItem(
+                              value: 'incomplete',
+                              child: Text(_experience.completionLabel(true)),
+                            ),
+                        ],
                       ),
-                    if (_experience.completion)
-                      PopupMenuItem(
-                        value: 'incomplete',
-                        child: Text(_experience.completionLabel(true)),
+                      IconButton(
+                        tooltip: 'Next',
+                        onPressed: item == null
+                            ? null
+                            : () => _navigate(forward: true),
+                        icon: const Icon(Icons.skip_next),
+                      ),
+                    ] else
+                      PopupMenuButton<String>(
+                        tooltip: 'Player options',
+                        onSelected: (value) {
+                          _playerAction(value);
+                          if (value == 'previous') _navigate(forward: false);
+                          if (value == 'next') _navigate(forward: true);
+                          if (value == 'complete') _setCompleted(true);
+                          if (value == 'incomplete') _setCompleted(false);
+                          if (value == 'tracks') _showTracks();
+                          if (value.startsWith('speed:')) {
+                            _setSpeed(double.parse(value.substring(6)));
+                          }
+                        },
+                        itemBuilder: (_) => [
+                          if (DesktopPlaybackWindows.available)
+                            const PopupMenuItem(
+                              value: 'newWindow',
+                              child: Text('Open independent playback window'),
+                            ),
+                          const PopupMenuItem(
+                            value: 'queue',
+                            child: Text('Queue & playlists'),
+                          ),
+                          if (_player is NativeVlcEngine)
+                            const PopupMenuItem(
+                              value: 'outputs',
+                              child: Text('Outputs & windows'),
+                            ),
+                          for (final minutes in [15, 30, 60, 0])
+                            PopupMenuItem(
+                              value: 'sleep:$minutes',
+                              child: Text(
+                                minutes == 0
+                                    ? 'Cancel sleep timer'
+                                    : 'Sleep in $minutes minutes',
+                              ),
+                            ),
+                          const PopupMenuItem(
+                            value: 'previous',
+                            child: Text('Previous'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'next',
+                            child: Text('Next'),
+                          ),
+                          const PopupMenuDivider(),
+                          PopupMenuItem(
+                            value: 'tracks',
+                            child: Text(
+                              _experience.video
+                                  ? 'Audio and subtitles'
+                                  : 'Audio tracks',
+                            ),
+                          ),
+                          for (final speed in playbackSpeeds)
+                            PopupMenuItem(
+                              value: 'speed:$speed',
+                              child: Text(
+                                speed == _speed
+                                    ? 'Playback speed: $speed× ✓'
+                                    : 'Playback speed: $speed×',
+                              ),
+                            ),
+                          const PopupMenuDivider(),
+                          if (_experience.completion)
+                            PopupMenuItem(
+                              value: 'complete',
+                              child: Text(_experience.completionLabel(false)),
+                            ),
+                          if (_experience.completion)
+                            PopupMenuItem(
+                              value: 'incomplete',
+                              child: Text(_experience.completionLabel(true)),
+                            ),
+                        ],
                       ),
                   ],
                 ),
-            ],
-          ),
           body: _body(),
         ),
       ),
     );
   }
 
-  Widget _nativeTransport() => StreamBuilder<Duration>(
-    stream: _player!.stream.position,
-    initialData: _player!.state.position,
-    builder: (context, snapshot) {
-      final player = _player!;
-      final duration = player.state.duration.inMilliseconds.toDouble();
-      return SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Slider(
-                value: (snapshot.data ?? Duration.zero).inMilliseconds
-                    .clamp(0, duration > 0 ? duration : 1)
-                    .toDouble(),
-                max: duration > 0 ? duration : 1,
-                onChanged: duration > 0
-                    ? (value) =>
-                          player.seek(Duration(milliseconds: value.round()))
-                    : null,
-              ),
-              Wrap(
-                alignment: WrapAlignment.center,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  StreamBuilder<bool>(
-                    stream: player.stream.playing,
-                    initialData: player.state.playing,
-                    builder: (context, playing) => IconButton(
-                      tooltip: playing.data == true ? 'Pause' : 'Play',
-                      color: Colors.white,
-                      onPressed: _togglePlay,
-                      icon: Icon(
-                        playing.data == true ? Icons.pause : Icons.play_arrow,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Back 10 seconds',
-                    color: Colors.white,
-                    onPressed: () => _seekRelative(-10),
-                    icon: const Icon(Icons.replay_10),
-                  ),
-                  IconButton(
-                    tooltip: 'Forward 10 seconds',
-                    color: Colors.white,
-                    onPressed: () => _seekRelative(10),
-                    icon: const Icon(Icons.forward_10),
-                  ),
-                  IconButton(
-                    tooltip: 'Next frame',
-                    color: Colors.white,
-                    onPressed: () => (player as NativeVlcEngine).nextFrame(),
-                    icon: const Icon(Icons.skip_next),
-                  ),
-                  Text(
-                    '${_AudioSurface._time(snapshot.data ?? Duration.zero)} / ${_AudioSurface._time(player.state.duration)}',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-              ),
-            ],
-          ),
+  int _customizationVersion = 0;
+  Future<void> _advanced({int tab = 0}) async {
+    final player = _player;
+    if (player is! NativeVlcEngine) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => AdvancedPlayerScreen(
+          activePlayer: player,
+          itemId: widget.itemId,
+          title: _item?.userTitle ?? _item?.title,
+          initialTab: tab,
         ),
-      );
-    },
+      ),
+    );
+    final skin = await AdvancedPlayerRepository(_database).skin();
+    if (mounted)
+      setState(() {
+        _customizationVersion++;
+        _playerSkin = skin;
+      });
+  }
+
+  Future<void> _queuePolicy(bool shuffle) async {
+    try {
+      final repo = ref.read(playerLibraryRepositoryProvider),
+          state = await ref.read(playerLibraryRepositoryProvider).load();
+      if (shuffle) {
+        await repo.setShuffle(!state.shuffle);
+      } else {
+        await repo.setRepeat(
+          QueueRepeat.values[(state.repeat.index + 1) %
+              QueueRepeat.values.length],
+        );
+      }
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              shuffle
+                  ? 'Shuffle ${!state.shuffle ? 'enabled' : 'disabled'}'
+                  : 'Repeat updated',
+            ),
+          ),
+        );
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Queue policy could not be saved.')),
+        );
+    }
+  }
+
+  Widget _nativeTransport() => CustomPlayerStrip(
+    key: ValueKey(_customizationVersion),
+    player: _player!,
+    database: _database,
+    onTracks: _showTracks,
+    onTogglePlay: _togglePlay,
+    onSnapshot: _takeSnapshot,
+    onQueue: _showQueue,
+    onPrevious: _experience.sequential || widget.fromQueue
+        ? () => _navigate(forward: false)
+        : null,
+    onNext: _experience.sequential || widget.fromQueue
+        ? () => _navigate(forward: true)
+        : null,
+    onShuffle: () => _queuePolicy(true),
+    onRepeat: () => _queuePolicy(false),
+    onCustomize: () => _advanced(tab: 3),
   );
 
   Widget _body() {
@@ -1199,7 +1715,14 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (item.itemType == 'audio') {
       return _AudioSurface(
         player: _player!,
+        customControls: _nativeTransport(),
+        skin: _playerSkin,
         item: item,
+        skipSeconds: _controls.skipSeconds,
+        onTogglePlay: _togglePlay,
+        onSeekRelative: _seekRelative,
+        showArtwork: _behavior['coverArt'] != 'false',
+        saveHistory: _rememberPath(item.filePath),
         speed: _speed,
         onSetSpeed: _setSpeed,
         onPrevious:
@@ -1218,11 +1741,39 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       );
     }
     return ColoredBox(
-      color: context.studyColors.player,
+      color: _skinColor('canvas', context.studyColors.player),
       child: Column(
         children: [
-          Expanded(child: _player!.videoSurface()),
-          if (_player is NativeVlcEngine) _nativeTransport(),
+          Expanded(
+            child: MouseRegion(
+              onHover: (_) => _revealControls(),
+              child: Listener(
+                onPointerSignal: (event) {
+                  if (event is PointerScrollEvent)
+                    GestureBinding.instance.pointerSignalResolver.register(
+                      event,
+                      (signal) => _scrollAction(
+                        -event.scrollDelta.dx,
+                        -event.scrollDelta.dy,
+                      ),
+                    );
+                },
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _mouseAction(_controls.singleClick),
+                  onDoubleTap: () => _mouseAction(_controls.doubleClick),
+                  child: _player!.videoSurface(),
+                ),
+              ),
+            ),
+          ),
+          if (_player is NativeVlcEngine && !_controlsHidden)
+            Opacity(
+              opacity:
+                  (double.tryParse(_behavior['controlsOpacity'] ?? '1') ?? 1)
+                      .clamp(.1, 1),
+              child: _nativeTransport(),
+            ),
           StreamBuilder<bool>(
             stream: _player!.stream.buffering,
             initialData: _player!.state.buffering,
@@ -1274,16 +1825,36 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
 class _AudioSurface extends StatelessWidget {
   const _AudioSurface({
     required this.player,
+    this.customControls,
+    this.skin = const {},
     required this.item,
     required this.speed,
     required this.onSetSpeed,
     required this.onPrevious,
     required this.onNext,
     required this.onStudy,
+    this.showArtwork = true,
+    this.saveHistory = true,
+    required this.skipSeconds,
+    required this.onTogglePlay,
+    required this.onSeekRelative,
   });
 
   final PlaybackEngine player;
+  final Widget? customControls;
+  final Map<String, String> skin;
+  Color _skinColor(String key, Color fallback) {
+    final raw = skin[key]?.replaceFirst('#', '');
+    return raw == null
+        ? fallback
+        : Color(0xff000000 | int.parse(raw, radix: 16));
+  }
+
   final Item item;
+  final bool showArtwork, saveHistory;
+  final int skipSeconds;
+  final VoidCallback onTogglePlay;
+  final ValueChanged<int> onSeekRelative;
   final double speed;
   final ValueChanged<double> onSetSpeed;
   final VoidCallback? onPrevious;
@@ -1293,7 +1864,7 @@ class _AudioSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ColoredBox(
-      color: context.studyColors.player,
+      color: _skinColor('canvas', context.studyColors.player),
       child: Center(
         child: SingleChildScrollView(
           padding: EdgeInsets.all(
@@ -1306,20 +1877,23 @@ class _AudioSurface extends StatelessWidget {
                 AppBreakpoints.isCompact(context) ? AppSpace.md : AppSpace.xl,
               ),
               decoration: BoxDecoration(
-                color: context.studyColors.playerRaised,
-                border: Border.all(color: const Color(0xFF403C38)),
+                color: _skinColor('panel', context.studyColors.playerRaised),
+                border: Border.all(
+                  color: _skinColor('divider', const Color(0xFF403C38)),
+                ),
                 borderRadius: BorderRadius.circular(AppRadius.xl),
                 boxShadow: AppElevation.level2,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  StudyArtwork(
-                    path: item.thumbnailPath,
-                    kind: 'audio',
-                    size: MediaQuery.sizeOf(context).height < 750 ? 84 : 128,
-                    radius: AppRadius.xl,
-                  ),
+                  if (showArtwork)
+                    StudyArtwork(
+                      path: item.thumbnailPath,
+                      kind: 'audio',
+                      size: MediaQuery.sizeOf(context).height < 750 ? 84 : 128,
+                      radius: AppRadius.xl,
+                    ),
                   const SizedBox(height: AppSpace.lg),
                   StudyStatusBadge(
                     label: 'Now playing',
@@ -1332,157 +1906,155 @@ class _AudioSurface extends StatelessWidget {
                     textAlign: TextAlign.center,
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.headlineMedium?.copyWith(color: Colors.white),
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      color: _skinColor('text', Colors.white),
+                    ),
                   ),
                   const SizedBox(height: AppSpace.xxs),
                   Text(
-                    item.filePath.startsWith('remote:')
-                        ? 'Desktop audio · Progress saves automatically'
-                        : 'Local audio · Progress saves automatically',
+                    '${item.filePath.startsWith('remote:') ? 'Desktop audio' : 'Local audio'} · ${saveHistory ? 'Progress saves automatically' : 'Activity saving disabled'}',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: const Color(0xFFB3ABA5),
+                      color: _skinColor('muted', const Color(0xFFB3ABA5)),
                     ),
                   ),
                   const SizedBox(height: AppSpace.lg),
-                  StreamBuilder<Duration>(
-                    stream: player.stream.position,
-                    initialData: player.state.position,
-                    builder: (context, positionSnapshot) {
-                      return StreamBuilder<Duration>(
-                        stream: player.stream.duration,
-                        initialData: player.state.duration,
-                        builder: (context, durationSnapshot) {
-                          final position =
-                              positionSnapshot.data ?? Duration.zero;
-                          final duration =
-                              durationSnapshot.data ?? Duration.zero;
-                          final max = duration.inMilliseconds <= 0
-                              ? 1.0
-                              : duration.inMilliseconds.toDouble();
-                          return Column(
-                            children: [
-                              Slider(
-                                value: position.inMilliseconds
-                                    .clamp(0, max.toInt())
-                                    .toDouble(),
-                                max: max,
-                                onChanged: duration == Duration.zero
-                                    ? null
-                                    : (value) => player.seek(
-                                        Duration(milliseconds: value.round()),
-                                      ),
-                              ),
-                              Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    _time(position),
-                                    style: const TextStyle(
-                                      color: Color(0xFFCBD6D0),
-                                    ),
-                                  ),
-                                  Text(
-                                    duration == Duration.zero
-                                        ? 'Loading duration'
-                                        : _time(duration),
-                                    style: const TextStyle(
-                                      color: Color(0xFFCBD6D0),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              StreamBuilder<double>(
-                                stream: player.stream.volume,
-                                initialData: player.state.volume,
-                                builder: (context, snapshot) => Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.volume_down_rounded,
-                                      color: Colors.white,
-                                    ),
-                                    Expanded(
-                                      child: Slider(
-                                        value: (snapshot.data ?? 100).clamp(
-                                          0,
-                                          100,
+                  if (customControls != null)
+                    customControls!
+                  else ...[
+                    StreamBuilder<Duration>(
+                      stream: player.stream.position,
+                      initialData: player.state.position,
+                      builder: (context, positionSnapshot) {
+                        return StreamBuilder<Duration>(
+                          stream: player.stream.duration,
+                          initialData: player.state.duration,
+                          builder: (context, durationSnapshot) {
+                            final position =
+                                positionSnapshot.data ?? Duration.zero;
+                            final duration =
+                                durationSnapshot.data ?? Duration.zero;
+                            final max = duration.inMilliseconds <= 0
+                                ? 1.0
+                                : duration.inMilliseconds.toDouble();
+                            return Column(
+                              children: [
+                                Slider(
+                                  value: position.inMilliseconds
+                                      .clamp(0, max.toInt())
+                                      .toDouble(),
+                                  max: max,
+                                  onChanged: duration == Duration.zero
+                                      ? null
+                                      : (value) => player.seek(
+                                          Duration(milliseconds: value.round()),
                                         ),
-                                        max: 100,
-                                        onChanged: player.setVolume,
+                                ),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(
+                                      _time(position),
+                                      style: const TextStyle(
+                                        color: Color(0xFFCBD6D0),
                                       ),
                                     ),
-                                    const Icon(
-                                      Icons.volume_up_rounded,
-                                      color: Colors.white,
+                                    Text(
+                                      duration == Duration.zero
+                                          ? 'Loading duration'
+                                          : _time(duration),
+                                      style: const TextStyle(
+                                        color: Color(0xFFCBD6D0),
+                                      ),
                                     ),
                                   ],
                                 ),
-                              ),
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  ),
-                  const SizedBox(height: AppSpace.md),
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: AppSpace.xxs,
-                    runSpacing: AppSpace.xs,
-                    children: [
-                      IconButton(
-                        tooltip: 'Previous',
-                        color: Colors.white,
-                        onPressed: onPrevious,
-                        icon: const Icon(Icons.skip_previous_rounded),
-                      ),
-                      IconButton(
-                        tooltip: 'Back 10 seconds',
-                        color: Colors.white,
-                        onPressed: () => player.seek(
-                          player.state.position - const Duration(seconds: 10),
+                                StreamBuilder<double>(
+                                  stream: player.stream.volume,
+                                  initialData: player.state.volume,
+                                  builder: (context, snapshot) => Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.volume_down_rounded,
+                                        color: Colors.white,
+                                      ),
+                                      Expanded(
+                                        child: Slider(
+                                          value: (snapshot.data ?? 100).clamp(
+                                            0,
+                                            100,
+                                          ),
+                                          max: 100,
+                                          onChanged: player.setVolume,
+                                        ),
+                                      ),
+                                      const Icon(
+                                        Icons.volume_up_rounded,
+                                        color: Colors.white,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        );
+                      },
+                    ),
+                    const SizedBox(height: AppSpace.md),
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: AppSpace.xxs,
+                      runSpacing: AppSpace.xs,
+                      children: [
+                        IconButton(
+                          tooltip: 'Previous',
+                          color: Colors.white,
+                          onPressed: onPrevious,
+                          icon: const Icon(Icons.skip_previous_rounded),
                         ),
-                        icon: const Icon(Icons.replay_10_rounded),
-                      ),
-                      const SizedBox(width: AppSpace.xs),
-                      StreamBuilder<bool>(
-                        stream: player.stream.playing,
-                        initialData: player.state.playing,
-                        builder: (context, snapshot) => IconButton.filled(
-                          tooltip: snapshot.data == true ? 'Pause' : 'Play',
-                          iconSize: 36,
-                          style: IconButton.styleFrom(
-                            minimumSize: const Size(68, 68),
+                        IconButton(
+                          tooltip: 'Back $skipSeconds seconds',
+                          color: Colors.white,
+                          onPressed: () => onSeekRelative(-skipSeconds),
+                          icon: const Icon(Icons.fast_rewind_rounded),
+                        ),
+                        const SizedBox(width: AppSpace.xs),
+                        StreamBuilder<bool>(
+                          stream: player.stream.playing,
+                          initialData: player.state.playing,
+                          builder: (context, snapshot) => IconButton.filled(
+                            tooltip: snapshot.data == true ? 'Pause' : 'Play',
+                            iconSize: 36,
+                            style: IconButton.styleFrom(
+                              minimumSize: const Size(68, 68),
+                            ),
+                            onPressed: onTogglePlay,
+                            icon: Icon(
+                              snapshot.data == true
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                            ),
                           ),
-                          onPressed: player.playOrPause,
-                          icon: Icon(
-                            snapshot.data == true
-                                ? Icons.pause_rounded
-                                : Icons.play_arrow_rounded,
-                          ),
                         ),
-                      ),
-                      const SizedBox(width: AppSpace.xs),
-                      IconButton(
-                        tooltip: 'Forward 10 seconds',
-                        color: Colors.white,
-                        onPressed: () => player.seek(
-                          player.state.position + const Duration(seconds: 10),
+                        const SizedBox(width: AppSpace.xs),
+                        IconButton(
+                          tooltip: 'Forward $skipSeconds seconds',
+                          color: Colors.white,
+                          onPressed: () => onSeekRelative(skipSeconds),
+                          icon: const Icon(Icons.fast_forward_rounded),
                         ),
-                        icon: const Icon(Icons.forward_10_rounded),
-                      ),
-                      IconButton(
-                        tooltip: 'Next',
-                        color: Colors.white,
-                        onPressed: onNext,
-                        icon: const Icon(Icons.skip_next_rounded),
-                      ),
-                    ],
-                  ),
+                        IconButton(
+                          tooltip: 'Next',
+                          color: Colors.white,
+                          onPressed: onNext,
+                          icon: const Icon(Icons.skip_next_rounded),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: AppSpace.lg),
                   Wrap(
                     alignment: WrapAlignment.center,
@@ -1494,15 +2066,7 @@ class _AudioSurface extends StatelessWidget {
                         initialValue: speed,
                         onSelected: onSetSpeed,
                         itemBuilder: (_) => [
-                          for (final value in const [
-                            .5,
-                            .75,
-                            1.0,
-                            1.25,
-                            1.5,
-                            1.75,
-                            2.0,
-                          ])
+                          for (final value in playbackSpeeds)
                             PopupMenuItem(value: value, child: Text('$value×')),
                         ],
                         child: _PlayerPill(

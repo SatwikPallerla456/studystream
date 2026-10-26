@@ -285,17 +285,67 @@ trackpad pan and horizontal-wheel turning with zoom/pinch/selection guards, and
 spread boundary controls. Canonical page identity and stored preferences remain
 unchanged. Tests/analyzers and full gesture acceptance remain deferred.
 
+## Animated opening screen — 22 October 2026
+
+Added a first-frame Tangerine splash before native/database startup, with the
+existing brand mark, a short orbit/scale reveal, staggered wordmark/tagline and
+a readiness-gated fade into the routed app. Light/dark appearance, static
+reduced-motion behavior, actual startup-stage labels and guarded retry are
+implemented. Existing provider/watcher/client initialization is retained.
+
+Saved pre-change design notes and coverage boundaries in
+TANGERINE_SPLASH_DESIGN_2026-10-22.md. An isolated preview covered light, dark,
+replayed animation and failure appearance. The normal macOS build succeeds
+and opens the existing Home/library; it is restored and running. Automated
+tests/analyzers and full startup/platform acceptance remain deferred.
+
+## Opening chooser after splash — 22 October 2026
+
+Extended the existing logo reveal with a one-second hold, then an 850 ms hero
+transition to a distinct opening page. The logo moves from the centre to an
+upper-left header, while Player/Server choices occupy the middle. Every launch
+waits for a mode choice, with last-used role guidance and persisted setup.
+Server auto-start now waits for Server selection, and its preference wording
+matches that behavior. Existing later mode switching remains available.
+
+Pre-change findings, the preview-only toolbar rendering fault and its correction,
+and light/dark/replay screenshots are recorded in
+TANGERINE_SPLASH_DESIGN_2026-10-22.md. The final normal macOS build succeeds and visibly waits on the new opening
+chooser after the splash; it is left running for the user. No mode selection
+was executed as runtime acceptance; automated tests/analyzers remain deferred.
+
+## Automatic library processing and remaining category organization — 25 October 2026
+
+Implemented persistent device-local organization/analysis jobs, transactional scan
+hooks, bounded startup reconciliation, revision/lease guards, restart recovery,
+per-library pause/resume, foreground viewer priority and bounded retries/offline
+waits. Processing is visible in library/category controls and title details.
+Organization candidates lead to explicit parent/part/edition editing; matches,
+manual corrections, file identity, notes and progress retain their ownership.
+
+Added local metadata/technical probes for audio/video and supported reading/image
+formats, embedded audiobook chapters, and category browsing for audiobooks,
+podcasts, photos, home videos, music videos and documents. File-month labels do
+not imply recovered camera capture metadata. See
+TANGERINE_LIBRARY_PROCESSING_2026-10-25.md for concrete pre-change findings,
+Plex scanner/catalog and Panels job/cache mappings, source scope and limitations.
+
+The isolated synthetic UI preview and normal entry-point restoration compile on
+macOS. The app is left closed. Revised visual review is pending a Mac unlock; no
+processing worker or runtime acceptance was run.
+Automated tests/analyzers remain deferred until full master-plan implementation.
+
 ## Remaining implementation before testing may start
 
 The master plan is the complete scope; this list highlights known open work and
 is not a reduction of that scope:
 
-- Complete automatic/background technical-analysis scheduling, other-platform
-  technical bindings and organization for categories outside this requested TV/music/reading pass. Online-provider
-  search/preview/selection and artwork now have source implementations; see
-  TANGERINE_ONLINE_METADATA_2026-10-21.md for provider coverage and evidence limits.
-  macOS on-demand analysis and explainable offline ranking now have
-  source implementations, alongside title files and associated extras.
+- Automatic app-open technical/organization scheduling and the remaining category
+  browsing now have source implementations. Reconcile their source contracts with
+  final P0–P11 requirements; platform availability, lifecycle, retry/restart,
+  resource and end-to-end acceptance remain unverified. Online-provider
+  search/preview/selection and artwork have source implementations; see
+  TANGERINE_ONLINE_METADATA_2026-10-21.md for provider scope and evidence limits.
 - Reconcile remaining renderer/cache ownership edge cases. Compatible viewport
   replay, page-quote macOS OCR, complete-layer backgrounds, cancellation and cache
   accounting now have source implementations. Coordinate/gesture correctness,
@@ -315,3 +365,136 @@ is not a reduction of that scope:
 
 No release gate is marked passed by this worklog. Working changes are not a new
 release or a verified checkpoint. Checkpoint 2a3ff62 preceded the online metadata, category browsing and manga-direction changes documented above.
+
+## Remaining-feature source audit — 25 October 2026
+
+The user cancelled further screenshot review, then requested the complete remaining
+feature list. Saved TANGERINE_REMAINING_IMPLEMENTATION_2026-10-25.md with 36 grouped
+implementation/integration/capability entries, seven source-audit closure items,
+and a separate later acceptance inventory. It corrects stale “missing” statuses
+for queues/playlists, mini-player, outputs/casting, preferences/profiles, typed
+browsing and current catalog/transport work. No product source, tests, analyzers,
+builds, screenshots or runtime journeys were executed for this audit.
+
+
+## Native player/platform implementation — 25 October 2026
+
+Saved pre-change source findings in TANGERINE_NATIVE_PLAYER_2026-10-25.md, then
+added real VideoLAN Android/iOS/Windows/Linux bindings, independent desktop
+engines/windows with queues/close-flush ownership, live framing/output selection
+and diagnostics, all original action/mouse/modifier bindings, supported original
+settings/profile/EQ/picture/artwork migration and PLS export. Reconciled N01/N02/
+N10/N11/N12/N13 source status with explicit supported-field/platform boundaries,
+without claiming all original catalog/volume-boost/service policies as parity. The plugin README records platform
+capability, lifecycle, resource and runtime provisioning boundaries.
+
+Dependency resolution completed (`flutter pub get`, iOS `pod install`), with
+MobileVLCKit 3.6.0 locked and iOS Profile configuration separated. Dart formatting
+and source diff whitespace review were performed. Graphify query/path guided
+scoped investigation; AST maintenance and project remapping include the new
+native package and Objective-C method-channel literals. Graph parser warnings
+for macros/Gradle are extraction limitations, not compiler results.
+
+No application tests, analyzers, builds, startup, screenshots or runtime journeys
+were run. Platform acceptance remains deferred until the full master-plan
+implementation phase is closed. Changes are uncommitted; no commit/push was
+requested for this pass. The prior library-processing visual review was cancelled
+by the user, superseding its historical pending-unlock note above.
+
+Follow-on source work wires embedded/detached policy, primary-serialized window
+admission, queue snapshot handoff, tray/start-hidden, track notifications, folder
+playlist grouping, finish/quit preparation across windows, original decimal skip
+values, queue repeat/shuffle and snapshot defaults/preview. Primary ownership
+keeps process-wide desktop resources out of child services. Pinned tray/notifier
+dependencies resolved and macOS pods installed. CocoaPods emitted custom base
+configuration and generated DART_DEFINES parsing warnings; no application build
+was run to accept those configurations. Windows/Linux now additionally require
+the documented tray/notification system dependencies at build/distribution time.
+
+### 25 October 2026 — books/comics/publication performance implementation
+
+Saved source-only findings first in TANGERINE_READER_PERFORMANCE_2026-10-25.md;
+used Graphify query/explain mappings and the retained Panels EPUB/geometry/cache
+findings. Added native Windows/Linux EPUB rendering through the pinned Forge
+WebView2/WPE dependency and shared Apple/Android bridge; EPUB 3/NCX contents and
+fragment/internal destinations; bounded/cancellable text search with continuation;
+ordinary-scroll text anchors and capture-before-reflow persistence; finite,
+actionable publication retries; measured outer geometry and on-demand geometry
+loading; lazy HTML/raster/PDF thumbnail navigation; scheduler lifetime settlement,
+separate byte/count caches and protected-recency disk cleanup. Declared macOS-only
+Vision OCR and visible availability explanations elsewhere. Narrow reader toolbars
+keep navigation/Study discoverable without adding every control to one row.
+Reconciled R01–R09 as source implementation/capability decisions with target
+acceptance and runtime distribution limits kept separate. Dependency resolution
+and formatting only; no tests, analyzers, builds, app runs or screenshot review.
+
+### 25 October 2026 — browsing, global search and organization
+
+Saved screen/source findings first in TANGERINE_BROWSING_ORGANIZATION_2026-10-25.md
+and used Graphify plus retained Plex catalog/schema/API and Panels geometry/cache
+references. Implemented catalog FTS global search with SQL filters/order/keyset
+paging and saved Study destinations; shared specialized/generic sort/grid/list/
+favorite/tag controls; dedicated ordered collection/album detail, reading,
+playback and photo journeys; tag editing and transaction-safe organization writes;
+separate Continue Watching/Reading/Listening and Home collection shelves; bounded
+photo zoom/pan/reset and album-scoped navigation; offline ID3/FLAC/MP4/Vorbis/Opus
+embedded cover extraction with cache invalidation and atomic publication. Kept
+provider/user artwork precedence, named-library membership, saved notes and file
+identity. Source-only implementation with explicit parser/platform limits; no
+tests, analyzers, builds, app runs or screenshot review. Later acceptance remains
+separate. Updated U01–U07 backlog entries to reflect source coverage.
+
+### 25 October 2026 — reported macOS Dart compilation blockers
+
+The user's launch log reported an unwired PdfReaderScreen.initialStudyAnchor
+constructor argument, nullable import-preview data captured by a dialog closure,
+and player-state calls to an audio-surface-local time formatter. Added the PDF
+constructor parameter, captured an immutable checked preview for dialog/state
+callbacks, and qualified the existing formatter consistently. Dart formatting
+completed; Graphify refreshed. The supplied failed build is user evidence, not a
+locally executed check. No build, analyzer, tests or runtime launch was performed
+for this repair; startup success is not yet verified. The plugin Swift Package
+Manager notices and libVLC script-phase warning are separate from these reported
+Dart errors.
+
+Follow-up to the user's next launch log: corrected the remaining speed read in
+_importPreferences' setState callback to use the checked immutable preview.
+Reviewed the entire method; all reads after its null guard, including both UI
+callbacks, now use preview/native/local/global rather than nullable data. The
+previous repair missed this final reference. Formatting only; no local build,
+analyzer or tests were run.
+
+### 26 October 2026 — macOS build verification and Advanced MyVLC workflows
+
+The user explicitly authorized solving the supplied build errors and executing a
+verified build. The original macOS debug build now succeeds with a durable local
+Forge macOS WebView override (SDK insets, availability and public default arguments),
+preserved macOS 12 target and explicit always-run VLC bundling. Signature verification
+passes. Historical startup found a Future-returning identification setState callback;
+both refresh sites are corrected. See TANGERINE_MACOS_BUILD_VERIFICATION_2026-10-25.md
+for the actual build/startup evidence and remaining upstream warnings.
+
+Saved source-only workflow findings first in TANGERINE_ADVANCED_MYVLC_2026-10-26.md
+and used Graphify plus original MyPlayer capture/subtitle/add-on/skin/control-strip/
+preferences sources. Added the Advanced player entry from Settings and playback,
+separate input player, explicit AVFoundation capture, libVLC screen/disc inputs and
+navigation, saved streams with credential-vault query URLs and previewed idempotent
+legacy remote-entry import, bounded paged subtitle search/download/current-title
+assignment, opt-in original Last.fm and authenticated proxy configuration through
+native Keychain, bounded macOS MyVLC JavaScript management/execution, JSON color
+skins and shared reorderable audio/video/input controls. Native-only capabilities
+are labeled on other platforms. Source implementation, final successful macOS
+build/signature and later hardware/account acceptance are recorded separately.
+No screenshot review or automated acceptance tests were run.
+
+### 26 October 2026 — browser experience safe checkpoint
+
+Reviewed the browser/server/catalog/reader boundary using Graphify and retained
+Plex/Panels findings; saved source-only screen findings before edits. Drafted
+category/details/reader APIs, EPUB text bridge, HTML screen structure and richer
+host-remote integration. The user requested stopping before the browser JavaScript
+controller was complete. Restored the existing browser/server/remote contract and
+removed only this turn's additions from previously modified player/category code.
+Saved inactive drafts, isolated patches and remaining correctness/integration work
+in docs/browser-checkpoint-2026-10-26/. No partial feature is activated. No tests,
+analyzers, builds, screenshot review, commit or push were performed for this task.

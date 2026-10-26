@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:drift/drift.dart' show Variable;
+import 'package:go_router/go_router.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/technical_media.dart';
+import '../../domain/catalog/library_processing.dart';
 
 class TechnicalMediaPanel extends ConsumerStatefulWidget {
   const TechnicalMediaPanel({super.key, required this.item});
@@ -12,15 +15,46 @@ class TechnicalMediaPanel extends ConsumerStatefulWidget {
 }
 
 class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
+  String _time(int seconds) =>
+      '${seconds ~/ 3600}:${((seconds ~/ 60) % 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
   TechnicalMediaAnalyzer get _analysis =>
       TechnicalMediaAnalyzer(ref.read(appDatabaseProvider));
-  late Future<Map<String, dynamic>?> _data = _analysis.read(widget.item);
+  late Stream<Map<String, dynamic>?> _data = _watch();
+  Stream<Map<String, dynamic>?> _watch() {
+    final db = ref.read(appDatabaseProvider);
+    return db
+        .customSelect('SELECT 1', readsFrom: {db.items, db.appSettings})
+        .watch()
+        .asyncMap((_) async {
+          final data = await _analysis.read(widget.item);
+          final job = await db
+              .customSelect(
+                "SELECT state,attempts FROM library_processing_jobs WHERE item_id=? AND kind='analyze'",
+                variables: [Variable(widget.item.id)],
+              )
+              .getSingleOrNull();
+          return <String, dynamic>{
+            ...?data,
+            if (job != null) '_job': job.data['state'],
+            '_paused':
+                await db.getSetting(
+                  'processing.pause:${widget.item.libraryId}',
+                ) ==
+                'true',
+          };
+        });
+  }
+
+  int _chapterPage = 0;
   bool _busy = false;
   String? _error;
   @override
   void didUpdateWidget(covariant TechnicalMediaPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.item != widget.item) _data = _analysis.read(widget.item);
+    if (oldWidget.item != widget.item) {
+      _data = _watch();
+      _chapterPage = 0;
+    }
   }
 
   Future<void> _run() async {
@@ -29,8 +63,9 @@ class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
       _error = null;
     });
     try {
-      await _analysis.analyze(widget.item);
-      if (mounted) setState(() => _data = _analysis.read(widget.item));
+      final store = LibraryProcessingStore(ref.read(appDatabaseProvider));
+      await store.enqueue(widget.item, force: true, only: 'analyze');
+      store.notify();
     } catch (error) {
       if (mounted)
         setState(
@@ -44,11 +79,16 @@ class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<Map<String, dynamic>?>(
-    future: _data,
+  Widget build(BuildContext context) => StreamBuilder<Map<String, dynamic>?>(
+    stream: _data,
     builder: (context, snapshot) {
       final data = snapshot.data;
       final streams = data?['streams'] as List? ?? [];
+      final chapters = data?['chapters'] as List? ?? [];
+      final page = _chapterPage.clamp(
+        0,
+        chapters.isEmpty ? 0 : (chapters.length - 1) ~/ 50,
+      );
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -62,8 +102,23 @@ class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
             const Text(
               'Saved technical data could not be read. Analyze the file again.',
             ),
-          if (data == null || data['analysisState'] == 'indexed')
-            const Text('This file has not been analyzed yet.'),
+          if (data?['analysisState'] == null ||
+              data?['analysisState'] == 'indexed')
+            const Text(
+              'Technical analysis is queued automatically on the device hosting this file. See Library → Processing for status, pause and retry.',
+            ),
+          if (data?['_job'] case final String state)
+            Text(
+              'Analysis: ${switch (state) {
+                'queued' => 'Waiting',
+                'running' => 'Processing',
+                'complete' => 'Ready',
+                'failed' => 'Needs retry',
+                'deferred' => 'Waiting for source',
+                'unsupported' => 'Unsupported',
+                _ => state,
+              }}${data?['_paused'] == true ? ' · Library processing paused' : ''}',
+            ),
           if (data?['analysisState'] == 'failed')
             const Text('The file could not be analyzed. You can retry.'),
           if (data?['analysisState'] == 'unsupported')
@@ -74,6 +129,10 @@ class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
             Text(
               '${(duration / 60).toStringAsFixed(1)} minutes · ${data?['container'] ?? 'unknown'} file',
             ),
+          if (data?['pageCount'] case final num pages)
+            Text('$pages pages / reading sections'),
+          if (data?['width'] != null && data?['height'] != null)
+            Text('${data?['width']} × ${data?['height']}'),
           for (final stream in streams)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),
@@ -95,6 +154,43 @@ class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
                 ].join(' · '),
               ),
             ),
+          if (chapters.isNotEmpty)
+            ExpansionTile(
+              title: Text('Embedded chapters · ${chapters.length}'),
+              tilePadding: EdgeInsets.zero,
+              children: [
+                for (final chapter in chapters.skip(page * 50).take(50))
+                  ListTile(
+                    title: Text(chapter['title'] as String),
+                    subtitle: Text(
+                      _time((chapter['startSeconds'] as num).toInt()),
+                    ),
+                    leading: const Icon(Icons.play_circle_outline),
+                    enabled: !widget.item.unavailable,
+                    onTap: () => context.push(
+                      '/player/${Uri.encodeComponent(widget.item.id)}?position=${chapter['startSeconds']}',
+                    ),
+                  ),
+                if (chapters.length > 50)
+                  Wrap(
+                    spacing: 12,
+                    children: [
+                      TextButton(
+                        onPressed: page == 0
+                            ? null
+                            : () => setState(() => _chapterPage = page - 1),
+                        child: const Text('Previous chapters'),
+                      ),
+                      TextButton(
+                        onPressed: (page + 1) * 50 >= chapters.length
+                            ? null
+                            : () => setState(() => _chapterPage = page + 1),
+                        child: const Text('More chapters'),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
           if (TechnicalMediaAnalyzer.supports(widget.item))
             OutlinedButton.icon(
               onPressed: _busy || widget.item.unavailable ? null : _run,
@@ -105,11 +201,13 @@ class _TechnicalMediaState extends ConsumerState<TechnicalMediaPanel> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.analytics_outlined),
-              label: Text(_busy ? 'Analyzing file…' : 'Analyze file'),
+              label: Text(
+                _busy ? 'Queueing analysis…' : 'Queue analysis again',
+              ),
             ),
           if (!TechnicalMediaAnalyzer.supports(widget.item) && streams.isEmpty)
             const Text(
-              'Technical analysis runs on the Mac that hosts the file.',
+              'Technical analysis runs on the device hosting this file.',
             ),
         ],
       );

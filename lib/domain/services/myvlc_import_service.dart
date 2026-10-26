@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
@@ -87,6 +88,20 @@ class MyVlcImportService {
         if (await database.getPlaybackByItemId(matches.single.id) != null) {
           conflicts++;
         }
+      }
+    }
+    var artworkBytes = 0;
+    for (final playlist in playlists) {
+      if (playlist['artwork'] == null) continue;
+      final artwork = await _artwork(playlist['artwork']);
+      if (artwork == null || artworkBytes + artwork.length > 8 * 1024 * 1024) {
+        playlist.remove('artwork');
+        warnings.add(
+          'Skipped invalid or oversized playlist artwork; membership is retained.',
+        );
+      } else {
+        playlist['artwork'] = artwork;
+        artworkBytes += artwork.length;
       }
     }
     return MyVlcImportPreview._(
@@ -213,12 +228,18 @@ class MyVlcImportService {
         () => {
           'id': legacyID,
           'title': title,
+          if (row['artwork'] is String) 'artwork': row['artwork'],
           'itemIds': members
               .map((v) => mapping[v])
               .whereType<String>()
               .toList(),
         },
       );
+    }
+    for (final row in _rows(snapshot, 'playlists')) {
+      final saved = playlists[row['id']];
+      if (saved is Map && saved['artwork'] == null && row['artwork'] is String)
+        saved['artwork'] = row['artwork'];
     }
     await database.setSetting('myvlc.playlists', jsonEncode(playlists));
     final queue = snapshot['queue'];
@@ -288,6 +309,28 @@ class MyVlcImportService {
       return null;
     }
     return path;
+  }
+
+  static Future<String?> _artwork(Object? raw) async {
+    if (raw is! String || raw.length > 1400000) return null;
+    ui.ImmutableBuffer? buffer;
+    ui.ImageDescriptor? descriptor;
+    try {
+      final bytes = base64Decode(raw);
+      if (bytes.isEmpty || bytes.length > 1024 * 1024) return null;
+      buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+      descriptor = await ui.ImageDescriptor.encoded(buffer);
+      if (descriptor.width <= 0 ||
+          descriptor.height <= 0 ||
+          descriptor.width * descriptor.height > 16000000)
+        return null;
+      return base64Encode(bytes);
+    } catch (_) {
+      return null;
+    } finally {
+      descriptor?.dispose();
+      buffer?.dispose();
+    }
   }
 
   static double _resume(Map<String, dynamic> row) {

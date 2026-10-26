@@ -112,7 +112,12 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (connected) ...[
-                SelectableText(state.address!),
+                SelectableText(
+                  state.address!,
+                  // Keep the internal scroll offset separate from the enclosing
+                  // settings ExpansionTile's boolean expansion state.
+                  key: const PageStorageKey('sync-client-server-address'),
+                ),
                 const SizedBox(height: AppSpace.xs),
                 Text(
                   state.lastSyncAt == null

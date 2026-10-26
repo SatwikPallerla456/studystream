@@ -33,6 +33,7 @@ abstract final class MediaVisuals {
     'video' || 'audio' => '/player/${Uri.encodeComponent(item.id)}',
     'epub' || 'cbz' => '/book/${Uri.encodeComponent(item.id)}',
     'pdf' => '/pdf/${Uri.encodeComponent(item.id)}',
+    'image' => '/photo/${Uri.encodeComponent(item.id)}',
     _ => '/resource/${Uri.encodeComponent(item.id)}',
   };
 }

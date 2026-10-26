@@ -1,5 +1,12 @@
 # MyVLC preservation matrix
 
+**Historical checkpoint matrix.** Platform/controls/migration entries below are
+superseded by the source implementation and capability table in
+[TANGERINE_NATIVE_PLAYER_2026-10-25.md](TANGERINE_NATIVE_PLAYER_2026-10-25.md).
+The native default now includes Android/iOS/Windows/Linux; target acceptance is
+deferred. Preserve historical evidence without treating these older statuses as
+the current backlog.
+
 Source audit: `/Users/satwikpallerla/Documents/ChatGPT/MyPlayer`, including
 `Sources/MyPlayer/`, `docs/FEATURE_COVERAGE.md`, and `docs/verification-results.json`.
 The source application and its user data have not been modified. Original

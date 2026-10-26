@@ -28,17 +28,6 @@ class DeviceRuntime extends AsyncNotifier<DeviceConfiguration> {
         // A damaged preference does not affect libraries or learning records.
       }
     }
-    if (configuration.role == AppRole.server &&
-        configuration.serverConfigured &&
-        configuration.autoStart) {
-      try {
-        await ref
-            .read(lanSyncServerProvider)
-            .start(port: configuration.port, name: configuration.serverName);
-      } on Object {
-        // Keep Server mode open so the user can repair a port/permission failure.
-      }
-    }
     return configuration;
   }
 
@@ -49,6 +38,15 @@ class DeviceRuntime extends AsyncNotifier<DeviceConfiguration> {
     await _save(next);
     if (role != AppRole.server) {
       await ref.read(lanSyncServerProvider).stop();
+    } else if (next.serverConfigured && next.autoStart) {
+      // Opening settings is read-only. Resume sharing only after Server is chosen.
+      try {
+        final server = ref.read(lanSyncServerProvider);
+        if (!server.state.running)
+          await server.start(port: next.port, name: next.serverName);
+      } on Object {
+        // Show Server so a port/permission failure can be repaired there.
+      }
     }
     if (ref.mounted) state = AsyncData(next);
   }

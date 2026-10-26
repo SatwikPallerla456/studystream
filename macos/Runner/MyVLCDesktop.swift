@@ -3,7 +3,24 @@ import FlutterMacOS
 
 /// Moves one stable video canvas between its Flutter host and a native mini-player.
 /// Every window shares the owning libVLC instance and transport.
+private final class TangerineHostView: NSView {
+    var attached: (() -> Void)?
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); attached?() }
+}
+
+/// Intercepts only a secondary player window, forwarding the Flutter window's
+/// existing delegate behavior until the durable progress flush has completed.
+private final class TangerineCloseDelegate: NSObject, NSWindowDelegate {
+    weak var previous: NSWindowDelegate?
+    var request: (() -> Void)?
+    func windowShouldClose(_ sender: NSWindow) -> Bool { request?(); return false }
+    override func responds(to selector: Selector!) -> Bool { super.responds(to: selector) || (previous?.responds(to: selector) ?? false) }
+    override func forwardingTarget(for selector: Selector!) -> Any? { previous }
+}
+
 final class MyVLCDesktop: NSObject, NSWindowDelegate {
+    private let windowProvider: () -> NSWindow?
+    var window:NSWindow? {host.window ?? windowProvider()}
     private let engine: VLCEngine
     let host: NSView
     private let canvas: NSView
@@ -13,16 +30,72 @@ final class MyVLCDesktop: NSObject, NSWindowDelegate {
     private var timeline: NSSlider?
     var onSeek: (() -> Void)?
     var onTransport: ((Bool) -> Void)?
+    var onPointer: ((String) -> Void)?
+    private var closeDelegate:TangerineCloseDelegate?
+    private weak var delegatedWindow:NSWindow?
+    private var pointerMonitor: Any?
+    private var singleClick: Timer?
+    private var lastHover = Date.distantPast
+    var fullscreen: Bool { window?.styleMask.contains(.fullScreen) == true }
 
-    @MainActor init(engine: VLCEngine) {
-        self.engine = engine
-        host = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 360))
+    @MainActor init(engine: VLCEngine, windowProvider: @escaping () -> NSWindow? = { nil }) {
+        self.engine = engine;self.windowProvider=windowProvider
+        host = TangerineHostView(frame: NSRect(x: 0, y: 0, width: 640, height: 360))
         canvas = NSView(frame: host.bounds)
         super.init()
         host.wantsLayer = true; canvas.wantsLayer = true
         host.layer?.backgroundColor = NSColor.black.cgColor; canvas.layer?.backgroundColor = NSColor.black.cgColor
         canvas.autoresizingMask = [.width, .height]; host.addSubview(canvas)
         engine.attach(to: canvas)
+        (host as? TangerineHostView)?.attached = { [weak self] in guard let self else { return }; self.applyPreferences(self.preferences) }
+        pointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
+            guard let self, event.window === self.host.window, self.host.bounds.contains(self.host.convert(event.locationInWindow, from: nil)) else { return event }
+            if event.type == .leftMouseDown {
+                self.singleClick?.invalidate()
+                if event.clickCount >= 2 { self.onPointer?("pointer.double") }
+                else { self.singleClick = Timer.scheduledTimer(withTimeInterval: NSEvent.doubleClickInterval, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.onPointer?("pointer.single") } } }
+                return nil
+            }
+            if event.type == .scrollWheel { self.onPointer?("pointer.scroll:\(event.scrollingDeltaX):\(event.scrollingDeltaY)"); return nil }
+            if Date().timeIntervalSince(self.lastHover) > 0.2 { self.lastHover = Date(); self.onPointer?("pointer.hover") }
+            return event
+        }
+    }
+    private var preferences: [String: String] = [:]
+    var currentPreferences: [String: String] { preferences }
+    @MainActor private static let resizedWindows = NSHashTable<NSWindow>.weakObjects()
+    private var restoredFrameName: String?
+    private var notifications: [NSObjectProtocol] = []
+    @MainActor func applyPreferences(_ values: [String: String]) {
+        preferences = values; applyWindowPreferences()
+        notifications.forEach { NotificationCenter.default.removeObserver($0) }; notifications.removeAll()
+        if let window = window {
+            notifications.append(NotificationCenter.default.addObserver(forName: NSWindow.didMiniaturizeNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { if self?.preferences["pauseMinimized"] == "true" { self?.engine.pause(true); self?.onTransport?(false) } }
+            })
+        }
+    }
+    @MainActor private func applyWindowPreferences() {
+        guard let window = window else { return }
+        if preferences["independentPlaybackWindow"]=="true", closeDelegate==nil {
+            let delegate=TangerineCloseDelegate();delegate.previous=window.delegate
+            delegate.request={ [weak self] in self?.onPointer?("window.close") }
+            closeDelegate=delegate;delegatedWindow=window;window.delegate=delegate
+        }
+        window.acceptsMouseMovedEvents = true
+        window.alphaValue = min(1,max(0.1,Double(preferences["opacity"] ?? "1") ?? 1))
+        if preferences["frontPlayback"] == "true" { window.makeKeyAndOrderFront(nil) }
+        window.title = preferences["filenameTitle"] == "false" ? "Tangerine" : (preferences["windowTitle"] ?? "Tangerine")
+        window.level = preferences["alwaysOnTop"] == "true" ? .floating : .normal
+        if preferences["rememberWindow"] != "false" {
+            let name = preferences["windowFrameKey"] ?? "Tangerine.player"
+            if restoredFrameName != name { _ = window.setFrameUsingName(name); window.setFrameAutosaveName(name); restoredFrameName = name }
+        }
+        window.titleVisibility = preferences["decorations"] == "false" ? .hidden : .visible
+        if preferences["resizeVideo"] == "Always" || (preferences["resizeVideo"] == "On first video" && !Self.resizedWindows.contains(window)) {
+            let size = engine.videoSize
+            if size.width > 0 && size.height > 0 { let bounds=window.screen?.visibleFrame.size ?? NSSize(width:1600,height:1000);let scale=min(1,min(bounds.width*0.85/size.width,bounds.height*0.85/(size.height+140)));window.setContentSize(NSSize(width:max(480,size.width*scale),height:max(300,size.height*scale+140)));Self.resizedWindows.add(window) }
+        }
     }
     @MainActor func toggleMini() {
         if let mini { mini.close(); return }
@@ -55,7 +128,11 @@ final class MyVLCDesktop: NSObject, NSWindowDelegate {
         canvas.removeFromSuperview(); canvas.frame = host.bounds; host.addSubview(canvas)
         mini = nil; playButton = nil; timeline = nil
     }
-    @MainActor func close() { mini?.close(); timer?.invalidate() }
-    @MainActor func toggleFullscreen() { host.window?.toggleFullScreen(nil) }
+    @MainActor func exitPresentation() { if fullscreen { window?.toggleFullScreen(nil) } else { mini?.close() } }
+    @MainActor func close() { if let window=delegatedWindow, window.delegate === closeDelegate {window.delegate=closeDelegate?.previous};closeDelegate=nil;delegatedWindow=nil;singleClick?.invalidate(); if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor) }; pointerMonitor = nil; mini?.close(); timer?.invalidate(); notifications.forEach { NotificationCenter.default.removeObserver($0) }; notifications.removeAll() }
+    @MainActor func toggleFullscreen() {
+        if !fullscreen, preferences["fullscreenScreen"] == "Main screen", let screen = NSScreen.screens.first { window?.setFrameOrigin(screen.visibleFrame.origin) }
+        window?.toggleFullScreen(nil)
+    }
     var miniature: Bool { mini != nil }
 }

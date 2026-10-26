@@ -24,11 +24,13 @@ android {
         applicationId = "com.example.study_stream"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = maxOf(24, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
+
+    packaging { jniLibs.pickFirsts += "**/libc++_shared.so" }
 
     buildTypes {
         release {

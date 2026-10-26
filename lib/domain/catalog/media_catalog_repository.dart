@@ -292,26 +292,31 @@ class MediaCatalogRepository {
           }
         }
       });
-  Future<void> setFavorite(Item item, bool value) async {
+  Future<void> setFavorite(Item item, bool value) => db.transaction(() async {
     final old = (await record('organization:${item.id}'))?.data ?? {};
     await save('organization:${item.id}', 'organization', item.libraryId, {
       ...old,
       'favorite': value,
     }, itemId: item.id);
-  }
+  });
 
-  Future<void> setTags(Item item, List<String> tags) async {
-    final old = (await record('organization:${item.id}'))?.data ?? {};
-    await save('organization:${item.id}', 'organization', item.libraryId, {
-      ...old,
-      'tags': tags
-          .map((t) => t.trim())
-          .where((t) => t.isNotEmpty)
-          .toSet()
-          .take(100)
-          .toList(),
-    }, itemId: item.id);
-  }
+  Future<void> setTags(Item item, List<String> tags) =>
+      db.transaction(() async {
+        final unique = <String, String>{};
+        for (final raw in tags) {
+          final tag = raw.trim();
+          if (tag.isNotEmpty) unique.putIfAbsent(tag.toLowerCase(), () => tag);
+        }
+        if (unique.length > 100 || unique.values.any((t) => t.length > 200))
+          throw const FormatException(
+            'Use at most 100 tags of up to 200 characters.',
+          );
+        final old = (await record('organization:${item.id}'))?.data ?? {};
+        await save('organization:${item.id}', 'organization', item.libraryId, {
+          ...old,
+          'tags': unique.values.toList(),
+        }, itemId: item.id);
+      });
 
   Future<void> saveCollection(
     String libraryId,
@@ -320,6 +325,12 @@ class MediaCatalogRepository {
     String? id,
     String type = 'collection',
   }) => db.transaction(() async {
+    if (itemIds.length > 1000 ||
+        title.trim().isEmpty ||
+        title.trim().length > 200)
+      throw const FormatException(
+        'Collections require a name of up to 200 characters and at most 1,000 members.',
+      );
     if (!{'collection', 'album', 'playlist'}.contains(type))
       throw const FormatException('Invalid collection type');
     final valid = <String>[];

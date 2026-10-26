@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'package:path/path.dart' as path;
 import 'package:drift/drift.dart';
 import '../../data/db/app_database.dart';
 import 'media_catalog_repository.dart';
+import 'browse_options.dart';
 
 enum ShelfStatus { all, inProgress, unread, completed }
 
@@ -15,6 +17,9 @@ class CategoryScope {
     this.query = '',
     this.status = ShelfStatus.all,
     this.units = ReadingUnits.all,
+    this.sort = BrowseSort.natural,
+    this.favorites = false,
+    this.tag,
   });
   final LibraryKind kind;
   final String? libraryId;
@@ -24,7 +29,14 @@ class CategoryScope {
   final String query;
   final ShelfStatus status;
   final ReadingUnits units;
-  bool get reading => {LibraryKind.books, LibraryKind.comics}.contains(kind);
+  final BrowseSort sort;
+  final bool favorites;
+  final String? tag;
+  bool get reading => {
+    LibraryKind.books,
+    LibraryKind.comics,
+    LibraryKind.documents,
+  }.contains(kind);
 }
 
 class CategoryGroup {
@@ -87,12 +99,16 @@ class CategoryBrowseRepository {
     'album',
     'author',
     'series',
+    'month',
+    'folder',
+    'format',
   };
   static String facet(String field) {
     if (!{
       ...groupingFields,
       'episode',
       'episodeEnd',
+      'airDate',
       'disc',
       'track',
       'volume',
@@ -118,6 +134,9 @@ class CategoryBrowseRepository {
       clauses.add('${facet(filter.key)}=?');
       values.add(Variable(filter.value));
     }
+    final org = organizationWhere(favorites: scope.favorites, tag: scope.tag);
+    clauses.addAll(org.sql);
+    values.addAll(org.values);
     final query = scope.query.trim();
     if (query.isNotEmpty) {
       final terms = query
@@ -159,9 +178,16 @@ class CategoryBrowseRepository {
   static String _number(String field) =>
       "COALESCE(NULLIF(${facet(field)},''),999999)";
   String _order(CategoryScope scope) {
+    if (scope.sort != BrowseSort.natural) return browseItemOrder(scope.sort);
     const title = 'COALESCE(s.title,i.user_title,i.title)';
     if (scope.kind == LibraryKind.television)
       return "printf('%08d:%08d:',${_number('season')},${_number('episode')}) || lower($title)";
+    if (scope.kind == LibraryKind.audiobooks)
+      return "lower(${facet('author')}) || char(1) || lower(${facet('series')}) || printf('%08d:%08d:',${_number('disc')},${_number('track')}) || lower($title)";
+    if (scope.kind == LibraryKind.podcasts)
+      return "CASE WHEN ${facet('airDate')}='' THEN '1:' ELSE '0:' END || printf('%020d',99999999-CAST(replace(${facet('airDate')},'-','') AS INTEGER)) || printf('%08d:',${_number('track')}) || lower($title)";
+    if ({LibraryKind.photos, LibraryKind.homeVideos}.contains(scope.kind))
+      return "printf('%020d',9999999999999-COALESCE(i.modified_at,i.created_at)) || lower($title)";
     if (scope.kind == LibraryKind.music)
       return "lower(${facet('artist')}) || char(1) || lower(${facet('album')}) || char(1) || printf('%08d:%08d:',${_number('disc')},${_number('track')}) || lower($title)";
     if (scope.filters.containsKey('series'))
@@ -184,16 +210,43 @@ class CategoryBrowseRepository {
     if (group != null) {
       if (!groupingFields.contains(group))
         throw const FormatException('Unsupported category group');
+      final bookRoot =
+          group == 'series' &&
+          scope.kind == LibraryKind.audiobooks &&
+          !scope.filters.containsKey('author');
+      final folderRoot = group == 'folder' && scope.libraryId == null;
       final albumRoot =
           group == 'album' && !scope.filters.containsKey('artist');
-      final value = albumRoot
+      final value = folderRoot
+          ? "json_array(i.library_id,${facet('folder')})"
+          : bookRoot
+          ? "json_array(${facet('author')},${facet('series')})"
+          : albumRoot
           ? "json_array(${facet('artist')},${facet('album')})"
           : facet(group);
-      final sort = group == 'season'
+      final naturalSort = folderRoot
+          ? "lower(${facet('folder')}) || char(1) || i.library_id"
+          : group == 'month'
+          ? "CASE WHEN $value='' THEN '' ELSE $value END"
+          : group == 'season'
           ? "CASE WHEN $value='' THEN '99999999' ELSE printf('%08d',CAST($value AS INTEGER)) END"
+          : bookRoot
+          ? "CASE WHEN ${facet('series')}='' THEN '1:' ELSE '0:' END || lower(${facet('series')}) || char(1) || lower(${facet('author')})"
           : albumRoot
           ? "CASE WHEN ${facet('album')}='' THEN '1:' ELSE '0:' END || lower(${facet('album')}) || char(1) || lower(${facet('artist')})"
           : "CASE WHEN $value='' THEN '1:' ELSE '0:' END || lower($value)";
+      final sort = switch (scope.sort) {
+        BrowseSort.natural => naturalSort,
+        BrowseSort.title ||
+        BrowseSort.titleDescending => 'lower(${facet(group)})',
+        BrowseSort.newest => "printf('%020d',9999999999999-MAX(i.created_at))",
+        BrowseSort.oldest => "printf('%020d',MIN(i.created_at))",
+        BrowseSort.recent =>
+          "printf('%020d',9999999999999-MAX(MAX(COALESCE(p.last_opened_at,0),COALESCE(r.last_opened_at,0))))",
+      };
+      final descending =
+          scope.sort == BrowseSort.titleDescending ||
+          scope.sort == BrowseSort.natural && group == 'month';
       final rows = await db
           .customSelect(
             '''WITH grouped_titles AS (
@@ -201,8 +254,8 @@ class CategoryBrowseRepository {
         SUM($done) AS completed,SUM(CASE WHEN $done=0 AND $percent>0 THEN 1 ELSE 0 END) AS in_progress,
         SUM(i.unavailable) AS unavailable_count,
         MIN(i.id) AS cover_id $_joins WHERE ${where.sql} GROUP BY $value)
-        SELECT * FROM grouped_titles ${after == null ? '' : 'WHERE sort_key>? OR (sort_key=? AND group_value>?)'}
-        ORDER BY sort_key,group_value LIMIT ${pageSize + 1}''',
+        SELECT * FROM grouped_titles ${after == null ? '' : "WHERE sort_key${descending ? '<' : '>'}? OR (sort_key=? AND group_value${descending ? '<' : '>'}?)"}
+        ORDER BY sort_key ${descending ? 'DESC' : 'ASC'},group_value ${descending ? 'DESC' : 'ASC'} LIMIT ${pageSize + 1}''',
             variables: [
               ...where.values,
               if (after != null) ...[
@@ -230,18 +283,51 @@ class CategoryBrowseRepository {
         final item = representative == null
             ? null
             : db.items.map(representative.data);
-        final pair = albumRoot
+        final pair = (albumRoot || bookRoot || folderRoot)
             ? (jsonDecode(row.data['group_value'] as String) as List)
                   .cast<String>()
             : null;
+        String? folderLabel;
+        if (item != null && group == 'folder') {
+          final raw = folderRoot ? pair![1] : row.data['group_value'] as String;
+          final sources = await MediaCatalogRepository(
+            db,
+          ).sources(item.libraryId);
+          final source = sources
+              .where(
+                (s) =>
+                    s.namespace.isNotEmpty &&
+                    (raw == s.namespace || raw.startsWith('${s.namespace}/')),
+              )
+              .firstOrNull;
+          if (source != null) {
+            final relative = raw
+                .substring(source.namespace.length)
+                .replaceFirst(RegExp(r'^/'), '');
+            folderLabel =
+                '${path.basename(source.root)}${relative.isEmpty ? '' : ' / $relative'}';
+          }
+        }
+        String? libraryLabel;
+        if (item != null && folderRoot) {
+          libraryLabel =
+              (await db
+                          .customSelect(
+                            'SELECT title FROM libraries WHERE id=?',
+                            variables: [Variable(item.libraryId)],
+                          )
+                          .getSingle())
+                      .data['title']
+                  as String;
+        }
         if (item != null)
           groups.add(
             CategoryGroup(
               value: row.data['group_value'] as String,
               sort: row.data['sort_key'] as String,
               count: row.data['total'] as int,
-              label: pair?[1],
-              qualifier: pair?[0],
+              label: folderLabel ?? pair?[1],
+              qualifier: folderRoot ? libraryLabel : pair?[0],
               completed: row.data['completed'] as int,
               inProgress: row.data['in_progress'] as int,
               unavailable: row.data['unavailable_count'] as int,
@@ -256,13 +342,14 @@ class CategoryBrowseRepository {
       );
     }
     final sort = _order(scope);
+    final descending = scope.sort == BrowseSort.titleDescending;
     final rows = await db
         .customSelect(
           '''WITH titles AS (
       SELECT i.*,l.title AS library_title,$sort AS sort_key,$done AS is_complete,$percent AS progress
       $_joins WHERE ${where.sql}) SELECT * FROM titles
-      ${after == null ? '' : 'WHERE sort_key>? OR (sort_key=? AND id>?)'}
-      ORDER BY sort_key,id LIMIT ${pageSize + 1}''',
+      ${after == null ? '' : "WHERE sort_key${descending ? '<' : '>'}? OR (sort_key=? AND id${descending ? '<' : '>'}?)"}
+      ORDER BY sort_key ${descending ? 'DESC' : 'ASC'},id ${descending ? 'DESC' : 'ASC'} LIMIT ${pageSize + 1}''',
           variables: [
             ...where.values,
             if (after != null) ...[
@@ -299,6 +386,36 @@ class CategoryBrowseRepository {
     );
   }
 
+  Future<Item?> photo(
+    CategoryScope scope, {
+    Item? current,
+    bool forward = true,
+    String? initialId,
+  }) async {
+    final where = _where(scope), sort = _order(scope);
+    final ascending = forward != (scope.sort == BrowseSort.titleDescending);
+    final rows = await db
+        .customSelect(
+          '''WITH photos AS (
+      SELECT i.*,$sort AS sort_key $_joins WHERE ${where.sql} AND i.item_type='image' AND i.unavailable=0)
+      SELECT * FROM photos ${initialId != null
+              ? 'WHERE id=?'
+              : current == null
+              ? ''
+              : "WHERE (sort_key,id) ${ascending ? '>' : '<'} (SELECT sort_key,id FROM photos WHERE id=?)"}
+      ORDER BY sort_key ${ascending ? 'ASC' : 'DESC'},id ${ascending ? 'ASC' : 'DESC'} LIMIT 1''',
+          variables: [
+            ...where.values,
+            if (initialId != null)
+              Variable(initialId)
+            else if (current != null)
+              Variable(current.id),
+          ],
+        )
+        .getSingleOrNull();
+    return rows == null ? null : db.items.map(rows.data);
+  }
+
   /// Scope queue, not just the visible page. Refuse oversized queues explicitly.
   Future<List<String>> queue(
     CategoryScope scope, {
@@ -307,13 +424,13 @@ class CategoryBrowseRepository {
     final where = _where(scope), sort = _order(scope);
     final rows = await db
         .customSelect(
-          'SELECT i.id $_joins WHERE ${where.sql} AND i.unavailable=0 AND i.item_type IN (\'audio\',\'video\') ${unfinishedOnly ? 'AND COALESCE(p.completed,0)=0' : ''} ORDER BY $sort,i.id LIMIT 10001',
+          'SELECT i.id $_joins WHERE ${where.sql} AND i.unavailable=0 AND i.item_type IN (\'audio\',\'video\') AND NOT EXISTS(SELECT 1 FROM catalog_facets x WHERE x.item_id=i.id AND x.field=\'extra\' AND x.value=\'true\') AND NOT EXISTS(SELECT 1 FROM media_extras e WHERE e.item_id=i.id AND e.deleted=0) ${unfinishedOnly ? 'AND COALESCE(p.completed,0)=0' : ''} ORDER BY $sort ${scope.sort == BrowseSort.titleDescending ? 'DESC' : 'ASC'},i.id ${scope.sort == BrowseSort.titleDescending ? 'DESC' : 'ASC'} LIMIT 10001',
           variables: where.values,
         )
         .get();
     if (rows.length > 10000)
       throw const FormatException(
-        'This selection exceeds 10,000 tracks. Choose an artist, album or narrower search.',
+        'This selection exceeds 10,000 files. Choose a narrower group or search.',
       );
     return [for (final row in rows) row.data['id'] as String];
   }

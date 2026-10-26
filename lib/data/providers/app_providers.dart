@@ -12,6 +12,13 @@ import '../indexer/library_indexer.dart';
 import '../indexer/library_watcher.dart';
 import '../sync/lan_sync_server.dart';
 import '../sync/lan_sync_client.dart';
+import '../../domain/catalog/library_processing.dart';
+
+final libraryProcessingProvider = Provider<LibraryProcessingService>((ref) {
+  final service = LibraryProcessingService(ref.watch(appDatabaseProvider));
+  ref.onDispose(service.dispose);
+  return service;
+});
 
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
   final database = AppDatabase();

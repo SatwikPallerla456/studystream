@@ -101,7 +101,10 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
   CatalogProvider? get _activeProvider =>
       _source == 'local-json' ? _provider : OnlineCatalogProvider(_source);
   List<String> get _sources => [
-    if ({LibraryKind.movies, LibraryKind.television}.contains(_kind)) 'tmdb',
+    if ({LibraryKind.movies, LibraryKind.television}.contains(_kind)) ...[
+      'tvdb',
+      'tmdb',
+    ],
     if (_kind == LibraryKind.television) 'tvmaze',
     if ({
       LibraryKind.books,
@@ -138,7 +141,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
         );
       }
       _hasCatalogArtwork = metadata['artworkUrl'] is String;
-      _source = _kind == LibraryKind.television ? 'tvmaze' : _sources.first;
+      _source = _sources.first;
       _season.text = '${metadata['season'] ?? ''}';
       _episode.text = '${metadata['episode'] ?? ''}';
       _episodeEnd.text = '${metadata['episodeEnd'] ?? ''}';
@@ -538,7 +541,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                           Text(widget.item.filename),
                           const SizedBox(height: 16),
                           const Text(
-                            'Search for candidates, review their details and choose the correct match. Nothing is applied automatically.',
+                            'Manual search: review candidates and choose the correct match. Automatic library identification keeps your selection and any cleared match.',
                           ),
                           const SizedBox(height: 16),
                           DropdownButtonFormField<String>(

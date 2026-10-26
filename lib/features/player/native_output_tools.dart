@@ -6,7 +6,8 @@ import '../../data/playback/playback_engine.dart';
 import '../../shared/widgets/study_ui.dart';
 
 class NativeOutputTools extends StatefulWidget {
-  const NativeOutputTools({super.key, required this.engine});
+  const NativeOutputTools({super.key, required this.engine, this.onSnapshot});
+  final Future<void> Function()? onSnapshot;
   final NativeVlcEngine engine;
   @override
   State<NativeOutputTools> createState() => _NativeOutputToolsState();
@@ -78,204 +79,227 @@ class _NativeOutputToolsState extends State<NativeOutputTools> {
             Wrap(
               spacing: 8,
               children: [
-                OutlinedButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(widget.engine.toggleMini),
-                  icon: const Icon(Icons.picture_in_picture_alt),
-                  label: const Text('Mini-player'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(widget.engine.toggleFullscreen),
-                  icon: const Icon(Icons.fullscreen),
-                  label: const Text('Fullscreen'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(() async {
-                          await widget.engine.snapshot();
-                        }),
-                  icon: const Icon(Icons.photo_camera),
-                  label: const Text('Snapshot'),
-                ),
+                if (widget.engine.supports('mini'))
+                  OutlinedButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(widget.engine.toggleMini),
+                    icon: const Icon(Icons.picture_in_picture_alt),
+                    label: const Text('Mini-player'),
+                  ),
+                if (widget.engine.supports('fullscreen'))
+                  OutlinedButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(widget.engine.toggleFullscreen),
+                    icon: const Icon(Icons.fullscreen),
+                    label: const Text('Fullscreen'),
+                  ),
+                if (widget.engine.supports('snapshot'))
+                  OutlinedButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(() async {
+                            if (widget.onSnapshot != null)
+                              await widget.onSnapshot!();
+                            else
+                              await widget.engine.snapshot();
+                          }),
+                    icon: const Icon(Icons.photo_camera),
+                    label: const Text('Snapshot'),
+                  ),
               ],
             ),
-            const Divider(),
-            DropdownButtonFormField<String>(
-              initialValue: _format,
-              decoration: const InputDecoration(labelText: 'Output format'),
-              items: [
-                for (final entry in const {
-                  'mp4': 'MP4 · H.264/AAC',
-                  'webm': 'WebM · VP8/Vorbis',
-                  'mp3': 'MP3 audio',
-                  'flac': 'FLAC audio',
-                  'ts': 'Original streams · MPEG-TS',
-                }.entries)
-                  DropdownMenuItem(value: entry.key, child: Text(entry.value)),
-              ],
-              onChanged: (value) => setState(() => _format = value!),
-            ),
-            Wrap(
-              spacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(() async {
-                          await widget.engine.startOutput(
-                            mode: 'convert',
-                            format: _format,
-                          );
-                        }),
-                  icon: const Icon(Icons.transform),
-                  label: const Text('Convert / save'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(() async {
-                          await widget.engine.startOutput(
-                            mode: 'record',
-                            format: _format,
-                          );
-                        }),
-                  icon: const Icon(Icons.fiber_manual_record),
-                  label: const Text('Record from current position'),
-                ),
-              ],
-            ),
-            const Text(
-              'Start playback before recording. Pause also pauses the recording; seeking or closing the player finalizes it. Keep the player open while outputs run.',
-            ),
-            const Divider(),
-            const Text(
-              'HTTP stream output',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            TextField(
-              controller: _host,
-              decoration: const InputDecoration(
-                labelText: 'Bind address (127.0.0.1 keeps it on this Mac)',
+            if (widget.engine.supports('outputs')) ...[
+              const Divider(),
+              DropdownButtonFormField<String>(
+                initialValue: _format,
+                decoration: const InputDecoration(labelText: 'Output format'),
+                items: [
+                  for (final entry in const {
+                    'mp4': 'MP4 · H.264/AAC',
+                    'webm': 'WebM · VP8/Vorbis',
+                    'mp3': 'MP3 audio',
+                    'flac': 'FLAC audio',
+                    'ts': 'Original streams · MPEG-TS',
+                  }.entries)
+                    DropdownMenuItem(
+                      value: entry.key,
+                      child: Text(entry.value),
+                    ),
+                ],
+                onChanged: (value) => setState(() => _format = value!),
               ),
-            ),
-            TextField(
-              controller: _port,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Port (1024–65535)'),
-            ),
-            Wrap(
-              children: [
-                FilterChip(
-                  label: const Text('Audio'),
-                  selected: _audio,
-                  onSelected: (v) => setState(() => _audio = v),
+              Wrap(
+                spacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(() async {
+                            await widget.engine.startOutput(
+                              mode: 'convert',
+                              format: _format,
+                            );
+                          }),
+                    icon: const Icon(Icons.transform),
+                    label: const Text('Convert / save'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(() async {
+                            await widget.engine.startOutput(
+                              mode: 'record',
+                              format: _format,
+                            );
+                          }),
+                    icon: const Icon(Icons.fiber_manual_record),
+                    label: const Text('Record from current position'),
+                  ),
+                ],
+              ),
+              const Text(
+                'Start playback before recording. Pause also pauses the recording; seeking or closing the player finalizes it. Keep the player open while outputs run.',
+              ),
+              const Divider(),
+              const Text(
+                'HTTP stream output',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              TextField(
+                controller: _host,
+                decoration: const InputDecoration(
+                  labelText: 'Bind address (127.0.0.1 keeps it on this Mac)',
                 ),
-                FilterChip(
-                  label: const Text('Video'),
-                  selected: _video,
-                  onSelected: (v) => setState(() => _video = v),
+              ),
+              TextField(
+                controller: _port,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Port (1024–65535)',
                 ),
-                FilterChip(
-                  label: const Text('Subtitle overlay'),
-                  selected: _subtitles,
-                  onSelected: (v) => setState(() => _subtitles = v),
-                ),
-              ],
-            ),
-            const Text(
-              'This MPEG-TS output is unencrypted and has no pairing authentication. A LAN bind address makes it available to other devices on that network.',
-            ),
-            OutlinedButton(
-              onPressed: _busy
-                  ? null
-                  : () => _run(() async {
-                      final port = int.tryParse(_port.text);
-                      if (port == null ||
-                          port < 1024 ||
-                          port > 65535 ||
-                          _host.text.trim().isEmpty ||
-                          !(_audio || _video)) {
-                        throw const FormatException();
-                      }
-                      await widget.engine.startOutput(
-                        mode: 'stream',
-                        host: _host.text.trim(),
-                        port: port,
-                        audio: _audio,
-                        video: _video,
-                        subtitles: _subtitles,
-                      );
-                    }),
-              child: const Text('Start stream output'),
-            ),
-            for (final job in jobs)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text('${job['title']} · ${job['state']}'),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (job['finished'] != true)
-                      LinearProgressIndicator(
-                        value: (job['progress'] as num?)?.toDouble().clamp(
-                          0,
-                          1,
-                        ),
-                      ),
-                    if ((job['path'] as String? ?? '').isNotEmpty)
-                      SelectableText(job['path'] as String),
-                    if ((job['error'] as String? ?? '').isNotEmpty)
-                      Text(job['error'] as String),
-                  ],
-                ),
-                trailing: job['finished'] == true
+              ),
+              Wrap(
+                children: [
+                  FilterChip(
+                    label: const Text('Audio'),
+                    selected: _audio,
+                    onSelected: (v) => setState(() => _audio = v),
+                  ),
+                  FilterChip(
+                    label: const Text('Video'),
+                    selected: _video,
+                    onSelected: (v) => setState(() => _video = v),
+                  ),
+                  FilterChip(
+                    label: const Text('Subtitle overlay'),
+                    selected: _subtitles,
+                    onSelected: (v) => setState(() => _subtitles = v),
+                  ),
+                ],
+              ),
+              const Text(
+                'This MPEG-TS output is unencrypted and has no pairing authentication. A LAN bind address makes it available to other devices on that network.',
+              ),
+              OutlinedButton(
+                onPressed: _busy
                     ? null
-                    : IconButton(
-                        tooltip: 'Finish output',
-                        icon: const Icon(Icons.stop),
-                        onPressed: () => _run(
-                          () => widget.engine.finishOutput(job['id'] as String),
-                        ),
-                      ),
+                    : () => _run(() async {
+                        final port = int.tryParse(_port.text);
+                        if (port == null ||
+                            port < 1024 ||
+                            port > 65535 ||
+                            _host.text.trim().isEmpty ||
+                            !(_audio || _video)) {
+                          throw const FormatException();
+                        }
+                        await widget.engine.startOutput(
+                          mode: 'stream',
+                          host: _host.text.trim(),
+                          port: port,
+                          audio: _audio,
+                          video: _video,
+                          subtitles: _subtitles,
+                        );
+                      }),
+                child: const Text('Start stream output'),
               ),
-            const Divider(),
-            const Text('Cast', style: TextStyle(fontWeight: FontWeight.bold)),
-            Text(
-              widget.engine.diagnostics['castStatus'] as String? ??
-                  'Not scanning',
-            ),
-            Wrap(
-              spacing: 8,
-              children: [
-                TextButton(
-                  onPressed: _busy ? null : () => _run(widget.engine.scanCast),
-                  child: const Text('Find receivers'),
-                ),
-                TextButton(
-                  onPressed: _busy
+              for (final job in jobs)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('${job['title']} · ${job['state']}'),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (job['finished'] != true)
+                        LinearProgressIndicator(
+                          value: (job['progress'] as num?)?.toDouble().clamp(
+                            0,
+                            1,
+                          ),
+                        ),
+                      if ((job['path'] as String? ?? '').isNotEmpty)
+                        SelectableText(job['path'] as String),
+                      if ((job['error'] as String? ?? '').isNotEmpty)
+                        Text(job['error'] as String),
+                    ],
+                  ),
+                  trailing: job['finished'] == true
                       ? null
-                      : () => _run(widget.engine.stopCastScan),
-                  child: const Text('Stop discovery'),
+                      : IconButton(
+                          tooltip: 'Finish output',
+                          icon: const Icon(Icons.stop),
+                          onPressed: () => _run(
+                            () =>
+                                widget.engine.finishOutput(job['id'] as String),
+                          ),
+                        ),
                 ),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(() => widget.engine.selectCast(null)),
-                  child: const Text('Play on this Mac'),
+            ],
+            if (widget.engine.supports('cast')) ...[
+              const Divider(),
+              const Text('Cast', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text(
+                widget.engine.diagnostics['castStatus'] as String? ??
+                    'Not scanning',
+              ),
+              Wrap(
+                spacing: 8,
+                children: [
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(widget.engine.scanCast),
+                    child: const Text('Find receivers'),
+                  ),
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(widget.engine.stopCastScan),
+                    child: const Text('Stop discovery'),
+                  ),
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(() => widget.engine.selectCast(null)),
+                    child: const Text('Play on this Mac'),
+                  ),
+                ],
+              ),
+              for (final device in devices)
+                ListTile(
+                  title: Text(device['name'] as String),
+                  leading: const Icon(Icons.cast),
+                  onTap: () => _run(
+                    () => widget.engine.selectCast(device['id'] as String),
+                  ),
                 ),
-              ],
-            ),
-            for (final device in devices)
-              ListTile(
-                title: Text(device['name'] as String),
-                leading: const Icon(Icons.cast),
-                onTap: () => _run(
-                  () => widget.engine.selectCast(device['id'] as String),
-                ),
+            ],
+            if (!widget.engine.supports('outputs') &&
+                !widget.engine.supports('cast'))
+              const Text(
+                'Recording, conversion and receiver discovery are not exposed by this platform backend.',
               ),
           ],
         ),

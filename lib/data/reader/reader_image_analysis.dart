@@ -22,6 +22,10 @@ abstract final class ReaderImageAnalysis {
   static bool get available =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
+  static String get supportDescription => available
+      ? 'On-device image text recognition uses Apple Vision on macOS. No page images are uploaded.'
+      : 'Raster OCR is currently available on macOS through Apple Vision. iOS, Android, Windows, Linux and browser OCR engines are not integrated. EPUB text search and PDF native text selection/search work independently of OCR; scanned images have no searchable text until OCR is added.';
+
   static Future<Uint8List> raster(
     Uint8List encoded,
     ReaderCancellation token,

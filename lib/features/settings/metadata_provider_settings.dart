@@ -13,6 +13,36 @@ class MetadataProviderSettings extends StatefulWidget {
 
 class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
   final _token = TextEditingController();
+  final _tvdb = TextEditingController();
+  bool _tvdbSaved = false;
+
+  Future<void> _saveTvdb({bool remove = false}) async {
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    try {
+      await CatalogCredentials.saveTvdb(remove ? '' : _tvdb.text);
+      if (mounted)
+        setState(() {
+          _tvdbSaved = !remove;
+          _tvdb.clear();
+          _message = remove
+              ? 'TheTVDB key removed from this device.'
+              : 'TheTVDB project key saved securely. Return to Find match to search.';
+        });
+    } catch (error) {
+      if (mounted)
+        setState(
+          () => _message = error is FormatException
+              ? error.message.toString()
+              : 'Could not save the key. Check access to the device keychain.',
+        );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   bool _saved = false, _busy = true;
   String? _message;
   @override
@@ -23,6 +53,8 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
 
   Future<void> _load() async {
     try {
+      final tvdb = await CatalogCredentials.readTvdb();
+      if (mounted) setState(() => _tvdbSaved = tvdb?.isNotEmpty == true);
       final saved = await CatalogCredentials.read();
       if (mounted) setState(() => _saved = saved?.isNotEmpty == true);
     } catch (_) {
@@ -66,6 +98,7 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
   @override
   void dispose() {
     _token.dispose();
+    _tvdb.dispose();
     super.dispose();
   }
 
@@ -93,9 +126,71 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
       padding: const EdgeInsets.all(24),
       children: [
         const Text(
-          'Search sends only the title and optional year or episode numbers you enter to the selected provider. Your files, paths, notes and playback history are not sent. Nothing is matched automatically.',
+          'Manual search and automatic movie/TV identification send only titles, years and episode information to the provider. Control automatic identification in each library’s Identify titles or Processing screen. Files, paths, notes and playback history are not sent.',
         ),
         const SizedBox(height: 24),
+        Text(
+          'TheTVDB · movies and TV',
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        Text(
+          CatalogCredentials.hasBundledTvdbKey
+              ? 'Included with Tangerine · no setup required'
+              : _tvdbSaved
+              ? 'Project key saved on this device'
+              : 'Add the Tangerine project API key',
+        ),
+        const Text(
+          'Default provider for new movie and TV matches. Episode matching uses official aired order.',
+        ),
+        const SizedBox(height: 12),
+        if (!CatalogCredentials.hasBundledTvdbKey) ...[
+          TextField(
+            controller: _tvdb,
+            obscureText: true,
+            enabled: !_busy,
+            enableSuggestions: false,
+            autocorrect: false,
+            decoration: InputDecoration(
+              labelText: _tvdbSaved
+                  ? 'Replacement TheTVDB project API key'
+                  : 'TheTVDB project API key',
+              helperText:
+                  'Stored in the device keychain; excluded from backups and library sync.',
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          Wrap(
+            spacing: 12,
+            children: [
+              FilledButton(
+                onPressed: _busy || _tvdb.text.trim().isEmpty
+                    ? null
+                    : () => _saveTvdb(),
+                child: const Text('Save TheTVDB key'),
+              ),
+              if (_tvdbSaved)
+                TextButton(
+                  onPressed: _busy ? null : () => _saveTvdb(remove: true),
+                  child: const Text('Remove TheTVDB key'),
+                ),
+              _link(
+                'TheTVDB project dashboard',
+                'https://thetvdb.com/dashboard',
+              ),
+            ],
+          ),
+        ],
+        if (_message != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Text(_message!),
+          ),
+        const Divider(height: 32),
+        Text(
+          'Optional providers',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
         Text(
           'TMDB · movies and TV',
           style: Theme.of(context).textTheme.titleLarge,
@@ -167,6 +262,7 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
           ),
           Text(OnlineCatalogProvider.attribution(id)),
           _link('Provider information', switch (id) {
+            'tvdb' => 'https://thetvdb.com',
             'tmdb' => 'https://www.themoviedb.org',
             'tvmaze' => 'https://www.tvmaze.com/api',
             'open-library' => 'https://openlibrary.org/developers/api',

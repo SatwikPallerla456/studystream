@@ -14,8 +14,9 @@ import '../../shared/widgets/study_ui.dart';
 
 /// One file remains the owner of its progress, even when it belongs to a title.
 class TitleFilesScreen extends ConsumerStatefulWidget {
-  const TitleFilesScreen({super.key, required this.item});
+  const TitleFilesScreen({super.key, required this.item, this.suggestedExtra});
   final Item item;
+  final Item? suggestedExtra;
   @override
   ConsumerState<TitleFilesScreen> createState() => _TitleFilesState();
 }
@@ -71,6 +72,19 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
           ..addAll(files.extras);
         _error = null;
         _dirty = false;
+        final suggested = widget.suggestedExtra;
+        if (suggested != null &&
+            suggested.id != widget.item.id &&
+            !_extras.any((e) => e.item.id == suggested.id) &&
+            !_parts.any((p) => p.item.id == suggested.id)) {
+          _extras.add(
+            CatalogExtra(
+              item: suggested,
+              kind: CatalogHints.extraKind(suggested.relativePath) ?? 'extra',
+            ),
+          );
+          _dirty = true;
+        }
         _position = 0;
       });
     } on Object {
@@ -460,17 +474,36 @@ String _time(double seconds) {
   return '${value ~/ 3600}:${((value ~/ 60) % 60).toString().padLeft(2, '0')}:${(value % 60).toString().padLeft(2, '0')}';
 }
 
+/// Shared bounded picker for manual associations; no automatic parent selection.
+Future<Item?> chooseLibraryParent(
+  BuildContext context, {
+  required String libraryId,
+  required String extraId,
+}) => showModalBottomSheet<Item>(
+  context: context,
+  isScrollControlled: true,
+  showDragHandle: true,
+  builder: (_) => _LibraryFilePicker(
+    libraryId: libraryId,
+    excluded: {extraId},
+    needsDuration: false,
+    itemType: 'video',
+    title: 'Choose the parent title',
+  ),
+);
+
 class _LibraryFilePicker extends ConsumerStatefulWidget {
   const _LibraryFilePicker({
     required this.libraryId,
     required this.excluded,
     required this.needsDuration,
     this.itemType,
+    this.title,
   });
   final String libraryId;
   final Set<String> excluded;
   final bool needsDuration;
-  final String? itemType;
+  final String? itemType, title;
   @override
   ConsumerState<_LibraryFilePicker> createState() => _LibraryFilePickerState();
 }
@@ -491,6 +524,7 @@ class _LibraryFilePickerState extends ConsumerState<_LibraryFilePicker> {
     final rows = await db
         .customSelect(
           '''SELECT i.* FROM items i WHERE i.library_id=? AND i.unavailable=0
+      ${widget.title == null ? '' : "AND NOT EXISTS(SELECT 1 FROM media_extras e WHERE e.item_id=i.id) AND NOT EXISTS(SELECT 1 FROM catalog_facets f WHERE f.item_id=i.id AND f.field='extra' AND f.value='true')"}
       AND (? IS NULL OR i.item_type=?) AND (i.title LIKE ? ESCAPE '\\' OR i.filename LIKE ? ESCAPE '\\')
       AND (? IS NULL OR i.id>?) ORDER BY i.id LIMIT 41''',
           variables: [
@@ -520,7 +554,8 @@ class _LibraryFilePickerState extends ConsumerState<_LibraryFilePicker> {
         child: Column(
           children: [
             Text(
-              widget.needsDuration ? 'Choose a part' : 'Choose an extra',
+              widget.title ??
+                  (widget.needsDuration ? 'Choose a part' : 'Choose an extra'),
               style: Theme.of(context).textTheme.titleLarge,
             ),
             TextField(

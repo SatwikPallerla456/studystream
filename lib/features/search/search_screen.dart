@@ -9,6 +9,10 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
+import '../../domain/catalog/catalog_discovery_repository.dart';
+import '../../domain/catalog/media_catalog_repository.dart';
+import '../../shared/widgets/catalog_browse_controls.dart';
+import '../../shared/widgets/item_artwork.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/study_ui.dart';
 
@@ -26,16 +30,50 @@ class SearchScreen extends ConsumerStatefulWidget {
 class _SearchScreenState extends ConsumerState<SearchScreen> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
-  Timer? _debounce;
+  Timer? _debounce, _refresh;
+  StreamSubscription<dynamic>? _changes;
   List<GlobalSearchEntry> _results = const [];
   bool _searching = false;
   _SearchFilter _filter = _SearchFilter.all;
   _SearchSort _sort = _SearchSort.recent;
   bool _failed = false;
   int _request = 0;
+  String? _category, _libraryId, _tag;
+  bool _favorites = false, _more = false;
+  (String, String)? _after, _next;
+  final _history = <(String, String)?>[];
+
+  @override
+  void initState() {
+    super.initState();
+    final db = ref.read(appDatabaseProvider);
+    _changes = db
+        .customSelect(
+          'SELECT COUNT(*) AS total FROM items',
+          readsFrom: {
+            db.items,
+            db.libraries,
+            db.notes,
+            db.bookmarks,
+            db.appSettings,
+            db.playbackProgress,
+            db.readingProgress,
+          },
+        )
+        .watch()
+        .listen((_) {
+          _refresh?.cancel();
+          _refresh = Timer(const Duration(milliseconds: 300), () {
+            if (mounted && _controller.text.trim().isNotEmpty)
+              unawaited(_search(_controller.text, reset: false));
+          });
+        });
+  }
 
   @override
   void dispose() {
+    _changes?.cancel();
+    _refresh?.cancel();
     _debounce?.cancel();
     _controller.dispose();
     _focusNode.dispose();
@@ -44,7 +82,12 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
   void _changed(String value) {
     _request++;
-    setState(() {});
+    setState(() {
+      _results = const [];
+      _more = false;
+      _searching = value.trim().isNotEmpty;
+      _failed = false;
+    });
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 240), () => _search(value));
   }
@@ -57,24 +100,46 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
       _results = const [];
       _searching = false;
       _failed = false;
+      _after = null;
+      _next = null;
+      _more = false;
+      _history.clear();
     });
   }
 
-  Future<void> _search(String query) async {
+  Future<void> _search(String query, {bool reset = true}) async {
     if (query.trim().isEmpty) {
       if (mounted) _clear();
       return;
     }
     final request = ++_request;
+    if (reset) {
+      _after = null;
+      _history.clear();
+    }
     setState(() {
       _searching = true;
       _failed = false;
     });
     try {
-      final results = await ref.read(appDatabaseProvider).searchAll(query);
+      final page =
+          await CatalogDiscoveryRepository(
+            ref.read(appDatabaseProvider),
+          ).search(
+            query,
+            kind: _filter.name,
+            category: _category,
+            libraryId: _libraryId,
+            byTitle: _sort == _SearchSort.title,
+            favorites: _favorites,
+            tag: _tag,
+            after: _after,
+          );
       if (!mounted || request != _request || query != _controller.text) return;
       setState(() {
-        _results = results;
+        _results = page.entries;
+        _more = page.more;
+        _next = page.cursor;
         _searching = false;
       });
     } catch (_) {
@@ -89,53 +154,44 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   void _open(GlobalSearchEntry entry) {
     final item = entry.item;
     if (item == null) {
-      if (entry.libraryId != null) context.push('/library/${entry.libraryId}');
+      if (entry.libraryId != null)
+        context.push('/library/${Uri.encodeComponent(entry.libraryId!)}');
       return;
     }
     final path = switch (item.itemType) {
       'video' || 'audio' => Uri(
-        path: '/player/${item.id}',
+        pathSegments: ['', 'player', item.id],
         queryParameters: entry.positionSeconds == null
             ? null
             : {'position': entry.positionSeconds.toString()},
       ).toString(),
       'epub' || 'cbz' => Uri(
-        path: '/book/${Uri.encodeComponent(item.id)}',
-        queryParameters: entry.pageNumber == null
-            ? null
-            : {'page': entry.pageNumber.toString()},
+        pathSegments: ['', 'book', item.id],
+        queryParameters: {
+          if (entry.pageNumber != null) 'page': entry.pageNumber.toString(),
+          if (entry.referenceId != null &&
+              {'note', 'bookmark'}.contains(entry.kind))
+            'study': '${entry.kind}:${entry.referenceId}',
+        },
       ).toString(),
       'pdf' => Uri(
-        path: '/pdf/${item.id}',
-        queryParameters: entry.pageNumber == null
-            ? null
-            : {'page': entry.pageNumber.toString()},
+        pathSegments: ['', 'pdf', item.id],
+        queryParameters: {
+          if (entry.pageNumber != null) 'page': entry.pageNumber.toString(),
+          if (entry.referenceId != null &&
+              {'note', 'bookmark'}.contains(entry.kind))
+            'study': '${entry.kind}:${entry.referenceId}',
+        },
       ).toString(),
-      _ => '/resource/${item.id}',
+      'image' => '/photo/${Uri.encodeComponent(item.id)}',
+      _ => '/resource/${Uri.encodeComponent(item.id)}',
     };
     context.push(path);
   }
 
-  List<GlobalSearchEntry> get _visibleResults {
-    final visible = _filter == _SearchFilter.all
-        ? [..._results]
-        : _results
-              .where((entry) => entry.kind == _filter.name)
-              .toList(growable: true);
-    switch (_sort) {
-      case _SearchSort.recent:
-        visible.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-      case _SearchSort.title:
-        visible.sort(
-          (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-        );
-    }
-    return visible;
-  }
-
   @override
   Widget build(BuildContext context) {
-    final results = _visibleResults;
+    final results = _results;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.slash): () {
@@ -155,14 +211,16 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
               const SizedBox(height: AppSpace.lg),
               Semantics(
                 textField: true,
-                label: 'Search titles, notes, and bookmarks',
+                label:
+                    'Search catalog titles, creators, tags, notes and bookmarks',
                 child: StudySearchField(
                   controller: _controller,
                   focusNode: _focusNode,
                   autofocus:
                       MediaQuery.sizeOf(context).width >=
                       AppBreakpoints.expanded,
-                  hintText: 'Search titles, notes, and bookmarks',
+                  hintText:
+                      'Search titles, creators, tags, notes and bookmarks',
                   onChanged: _changed,
                   onSubmitted: _search,
                 ),
@@ -173,8 +231,70 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                 sort: _sort,
                 resultCount: results.length,
                 hasQuery: _controller.text.trim().isNotEmpty,
-                onFilter: (value) => setState(() => _filter = value),
-                onSort: (value) => setState(() => _sort = value),
+                onFilter: (value) {
+                  setState(() => _filter = value);
+                  unawaited(_search(_controller.text));
+                },
+                onSort: (value) {
+                  setState(() => _sort = value);
+                  unawaited(_search(_controller.text));
+                },
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 220,
+                    child: DropdownButtonFormField<String>(
+                      initialValue: _category ?? '',
+                      decoration: const InputDecoration(labelText: 'Category'),
+                      items: [
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('All categories'),
+                        ),
+                        for (final kind in LibraryKind.values.where(
+                          (k) => k != LibraryKind.mixed,
+                        ))
+                          DropdownMenuItem(
+                            value: kind.name,
+                            child: Text(kind.label),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        setState(() => _category = value == '' ? null : value);
+                        unawaited(_search(_controller.text));
+                      },
+                    ),
+                  ),
+                  CatalogLibraryFilter(
+                    value: _libraryId,
+                    onChanged: (value) {
+                      setState(() => _libraryId = value);
+                      unawaited(_search(_controller.text));
+                    },
+                  ),
+                  FilterChip(
+                    label: const Text('Favorites'),
+                    selected: _favorites,
+                    onSelected: (value) {
+                      setState(() => _favorites = value);
+                      unawaited(_search(_controller.text));
+                    },
+                  ),
+                  CatalogTagFilter(
+                    value: _tag,
+                    category: _category,
+                    libraryId: _libraryId,
+                    onChanged: (value) {
+                      setState(() => _tag = value);
+                      unawaited(_search(_controller.text));
+                    },
+                  ),
+                ],
               ),
               if (_searching) ...[
                 const SizedBox(height: AppSpace.sm),
@@ -184,6 +304,37 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
               ],
               const SizedBox(height: AppSpace.lg),
               Expanded(child: _body(results)),
+              if (_history.isNotEmpty || _more)
+                Wrap(
+                  spacing: 12,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text('Page ${_history.length + 1}'),
+                    TextButton(
+                      onPressed: _searching || _history.isEmpty
+                          ? null
+                          : () {
+                              _after = _history.removeLast();
+                              unawaited(
+                                _search(_controller.text, reset: false),
+                              );
+                            },
+                      child: const Text('Previous page'),
+                    ),
+                    TextButton(
+                      onPressed: _searching || !_more || _next == null
+                          ? null
+                          : () {
+                              _history.add(_after);
+                              _after = _next;
+                              unawaited(
+                                _search(_controller.text, reset: false),
+                              );
+                            },
+                      child: const Text('Next page'),
+                    ),
+                  ],
+                ),
             ],
           ),
         ),
@@ -195,6 +346,8 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
     if (_controller.text.trim().isEmpty) {
       return const _SearchStartState();
     }
+    if (_searching)
+      return const ContentLoadingState(label: 'Searching your libraries');
     if (_failed) {
       return ContentState(
         icon: Icons.cloud_off_rounded,
@@ -359,7 +512,7 @@ class _SearchStartState extends StatelessWidget {
                 ),
                 const SizedBox(height: AppSpace.xs),
                 Text(
-                  'Find titles, filenames, notes, and saved locations.',
+                  'Find catalog titles, creators, tags, filenames, notes and saved locations. Narrow results by category or named library.',
                   style: Theme.of(context).textTheme.bodyLarge,
                   textAlign: TextAlign.center,
                 ),
@@ -412,12 +565,15 @@ class _SearchResultRow extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              StudyArtwork(
-                path: entry.item?.thumbnailPath,
-                kind: entry.item?.itemType ?? entry.kind,
-                unavailable: entry.item?.unavailable ?? false,
-                size: 56,
-              ),
+              if (entry.item != null)
+                ItemArtwork(item: entry.item!, size: 56)
+              else
+                StudyArtwork(
+                  path: null,
+                  kind: entry.item?.itemType ?? entry.kind,
+                  unavailable: entry.item?.unavailable ?? false,
+                  size: 56,
+                ),
               const SizedBox(width: AppSpace.md),
               Expanded(
                 child: Column(

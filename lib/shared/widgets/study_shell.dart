@@ -185,6 +185,7 @@ class _RailShell extends StatelessWidget {
               right: false,
               child: NavigationRail(
                 minWidth: 80,
+                scrollable: true,
                 labelType: NavigationRailLabelType.all,
                 selectedIndex: index,
                 onDestinationSelected: onDestinationSelected,

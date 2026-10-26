@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +11,7 @@ import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/media_categories.dart';
 import '../../shared/widgets/study_ui.dart';
 import '../media/catalog_editor_screen.dart';
+import 'automatic_identification_controls.dart';
 
 class LibraryIdentificationScreen extends ConsumerStatefulWidget {
   const LibraryIdentificationScreen({super.key, required this.libraryId});
@@ -20,6 +22,19 @@ class LibraryIdentificationScreen extends ConsumerStatefulWidget {
 }
 
 class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
+  StreamSubscription<dynamic>? _updates;
+  @override
+  void initState() {
+    super.initState();
+    _updates = ref
+        .read(libraryProcessingProvider)
+        .store
+        .watchSummary(widget.libraryId)
+        .listen((_) {
+          if (mounted) _reload();
+        }, onError: (Object _) {});
+  }
+
   final _search = TextEditingController();
   String? _after;
   final _history = <String?>[];
@@ -30,7 +45,7 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
     final db = ref.read(appDatabaseProvider);
     final rows = await db
         .customSelect(
-          'SELECT * FROM items WHERE library_id=? AND id>? AND (filename LIKE ? OR title LIKE ?) ORDER BY id LIMIT 41',
+          "SELECT i.*,j.state AS identification_state,j.error_code AS identification_reason,m.origin AS match_origin FROM items i LEFT JOIN library_processing_jobs j ON j.item_id=i.id AND j.kind='identify' LEFT JOIN match_decisions m ON m.item_id=i.id WHERE i.library_id=? AND i.id>? AND (i.filename LIKE ? OR i.title LIKE ?) ORDER BY i.id LIMIT 41",
           variables: [
             drift.Variable(widget.libraryId),
             drift.Variable(_after ?? ''),
@@ -44,12 +59,19 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
       for (final row in rows)
         (
           item: db.items.map(row.data),
-          data: await catalog.metadata(db.items.map(row.data)),
+          data: {
+            ...await catalog.metadata(db.items.map(row.data)),
+            '_identificationState': row.data['identification_state'],
+            '_identificationReason': row.data['identification_reason'],
+            '_matchOrigin': row.data['match_origin'],
+          },
         ),
     ];
   }
 
-  void _reload() => setState(() => _page = _load());
+  void _reload() => setState(() {
+    _page = _load();
+  });
   Future<void> _reidentify() async {
     setState(() {
       _busy = true;
@@ -78,7 +100,10 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
         if (mounted)
           setState(() => _message = '$count files identified locally');
       }
-      if (mounted) setState(() => _page = _load());
+      if (mounted)
+        setState(() {
+          _page = _load();
+        });
     } catch (_) {
       if (mounted)
         setState(
@@ -92,6 +117,7 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
 
   @override
   void dispose() {
+    _updates?.cancel();
     _search.dispose();
     super.dispose();
   }
@@ -116,7 +142,11 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
             ],
           ),
           const Text(
-            'Review detected titles and categories. Use Find match for online descriptions and artwork, or keep local filename identification.',
+            'Confident movie and TV matches receive metadata automatically. Review uncertain titles or use Find match to choose or correct any match.',
+          ),
+          AutomaticIdentificationControls(
+            libraryId: widget.libraryId,
+            onQueued: _reload,
           ),
           const SizedBox(height: 16),
           if (_message != null) Text(_message!),
@@ -165,7 +195,17 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
                             Text(
                               [
                                 row.data['matchState'] == 'matched'
-                                    ? 'Catalog matched'
+                                    ? row.data['_matchOrigin'] == 'automatic'
+                                          ? 'Automatically matched · TheTVDB'
+                                          : 'Catalog matched'
+                                    : row.data['_identificationState'] ==
+                                          'review'
+                                    ? 'Needs review · use Find match'
+                                    : row.data['_identificationState'] ==
+                                              'queued' ||
+                                          row.data['_identificationState'] ==
+                                              'running'
+                                    ? 'Identification queued'
                                     : 'Local filename hints',
                                 if (row.data['year'] != null)
                                   '${row.data['year']}',

@@ -6,14 +6,36 @@ import 'dart:typed_data';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'catalog_provider.dart';
+import 'catalog_match_policy.dart';
 import 'catalog_online_policy.dart';
 
-/// Device-local secret: never written to catalog snapshots, backups or sync.
+/// Provider credentials stay outside catalog snapshots, backups and sync.
 abstract final class CatalogCredentials {
   static const _storage = FlutterSecureStorage(
     mOptions: MacOsOptions(usesDataProtectionKeychain: false),
   );
   static const _key = 'tangerine.metadata.tmdb.readToken';
+  static const _tvdbKey = 'tangerine.metadata.tvdb.apiKey';
+  // Supplied by the release/run wrapper; project key is embedded in the binary.
+  static const bundledTvdbKey = String.fromEnvironment('THETVDB_API_KEY');
+  static bool get hasBundledTvdbKey => bundledTvdbKey.isNotEmpty;
+  static Future<String?> readTvdb() async =>
+      hasBundledTvdbKey ? bundledTvdbKey : await _storage.read(key: _tvdbKey);
+  static Future<void> saveTvdb(String key) async {
+    final value = key.trim();
+    if (value.isEmpty) {
+      await _storage.delete(key: _tvdbKey);
+    } else {
+      if (value.length > 4096 || value.contains(RegExp(r'\s'))) {
+        throw const FormatException(
+          'Enter the TheTVDB project API key without spaces.',
+        );
+      }
+      await _storage.write(key: _tvdbKey, value: value);
+    }
+    TvdbCatalogSession.clear();
+  }
+
   static Future<String?> read() => _storage.read(key: _key);
   static Future<void> save(String token) async {
     final value = token.trim();
@@ -35,6 +57,7 @@ class CatalogHttp {
   static final _blockedUntil = <String, DateTime>{};
   static const apiHosts = {
     'api.themoviedb.org',
+    'api4.thetvdb.com',
     'api.tvmaze.com',
     'openlibrary.org',
     'musicbrainz.org',
@@ -44,6 +67,7 @@ class CatalogHttp {
     Uri uri, {
     String? token,
     bool image = false,
+    Map<String, String>? postBody,
     int maxBytes = 2 * 1024 * 1024,
   }) {
     final host = uri.host;
@@ -72,6 +96,7 @@ class CatalogHttp {
           token: token,
           image: image,
           maxBytes: maxBytes,
+          postBody: postBody,
         ).timeout(const Duration(seconds: 15));
       } on TimeoutException {
         throw const FormatException('The provider timed out. Try again.');
@@ -93,6 +118,7 @@ class CatalogHttp {
     String? token,
     required bool image,
     required int maxBytes,
+    Map<String, String>? postBody,
   }) async {
     for (var redirect = 0; redirect <= 4; redirect++) {
       if (image
@@ -105,7 +131,18 @@ class CatalogHttp {
           'The provider returned an unsupported address.',
         );
       }
-      final request = await client.getUrl(uri);
+      if (postBody != null &&
+          (image ||
+              uri.host != 'api4.thetvdb.com' ||
+              uri.path != '/v4/login')) {
+        throw const FormatException(
+          'Unsupported provider authentication endpoint.',
+        );
+      }
+      final request = await client.openUrl(
+        postBody == null ? 'GET' : 'POST',
+        uri,
+      );
       request.followRedirects = false;
       request.persistentConnection = false;
       request.headers.set(
@@ -116,13 +153,21 @@ class CatalogHttp {
         HttpHeaders.acceptHeader,
         image ? 'image/*' : 'application/json',
       );
-      if (token != null && uri.host == 'api.themoviedb.org') {
+      if (token != null &&
+          {'api.themoviedb.org', 'api4.thetvdb.com'}.contains(uri.host)) {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
+      if (postBody != null) {
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode(postBody));
       }
       final response = await request.close();
       if ({301, 302, 303, 307, 308}.contains(response.statusCode)) {
         final location = response.headers.value(HttpHeaders.locationHeader);
-        if (location == null || redirect == 4 || token != null) {
+        if (location == null ||
+            redirect == 4 ||
+            token != null ||
+            postBody != null) {
           throw const FormatException(
             'The provider returned an unsupported redirect.',
           );
@@ -142,8 +187,9 @@ class CatalogHttp {
         continue;
       }
       if (response.statusCode == 401 || response.statusCode == 403) {
+        if (uri.host == 'api4.thetvdb.com') TvdbCatalogSession.clear();
         throw const FormatException(
-          'Provider access was refused. Check the TMDB token or try another provider.',
+          'Provider access was refused. Check credentials in Provider setup, then retry.',
         );
       }
       if (response.statusCode == 429 || response.statusCode == 503) {
@@ -253,6 +299,7 @@ class OnlineCatalogProvider implements CatalogProvider {
   @override
   final String id;
   static const labels = {
+    'tvdb': 'TheTVDB',
     'tmdb': 'TMDB',
     'tvmaze': 'TVmaze',
     'open-library': 'Open Library',
@@ -279,6 +326,8 @@ class OnlineCatalogProvider implements CatalogProvider {
   }
 
   static String attribution(String id) => switch (id) {
+    'tvdb' =>
+      'Metadata provided by TheTVDB. Please consider adding missing information or subscribing.',
     'tmdb' =>
       'This product uses the TMDB API but is not endorsed or certified by TMDB.',
     'tvmaze' => 'TVmaze · CC BY-SA. Provider data retains its source licence.',
@@ -323,6 +372,13 @@ class OnlineCatalogProvider implements CatalogProvider {
     if (year != null && (year < 1000 || year > 9999)) {
       throw const FormatException(
         'For online search, enter a year from 1000 to 9999 or leave it empty.',
+      );
+    }
+    if (id == 'tvdb') {
+      return TvdbCatalogSession.search(
+        query,
+        year: year,
+        television: type == 'episode',
       );
     }
     if (id == 'tmdb') {
@@ -465,6 +521,14 @@ class OnlineCatalogProvider implements CatalogProvider {
     int? episode,
     int? episodeEnd,
   }) async {
+    if (id == 'tvdb') {
+      return TvdbCatalogSession.details(
+        candidate,
+        season: season,
+        episode: episode,
+        episodeEnd: episodeEnd,
+      );
+    }
     var result = Map<String, dynamic>.from(candidate);
     final remote = candidate['id'] as String;
     if (id == 'tmdb') {
@@ -611,6 +675,328 @@ class OnlineCatalogProvider implements CatalogProvider {
     if (episodeEnd != null && episode != null && episodeEnd > episode) {
       result['_detailNote'] =
           'Description is for the first episode in this shared file.';
+    }
+    return result;
+  }
+}
+
+/// Application authentication stays separate from persisted provider metadata.
+/// Tokens live only in memory and are renewed before the documented month ends.
+abstract final class TvdbCatalogSession {
+  static String? _token;
+  static DateTime? _expires;
+  static Future<String>? _pending;
+  static int _generation = 0;
+
+  static void clear() {
+    _generation++;
+    _token = null;
+    _expires = null;
+    _pending = null;
+  }
+
+  static Future<String> token() async {
+    if (_token != null && (_expires?.isAfter(DateTime.now()) ?? false))
+      return _token!;
+    if (_pending != null) return _pending!;
+    final generation = _generation;
+    final future = _login(generation);
+    _pending = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_pending, future)) _pending = null;
+    }
+  }
+
+  static Future<String> _login(int generation) async {
+    final key = await CatalogCredentials.readTvdb();
+    if (key == null || key.isEmpty) {
+      throw const FormatException(
+        'Add the TheTVDB project API key in Provider setup, then search again.',
+      );
+    }
+    final response = _map(
+      jsonDecode(
+        utf8.decode(
+          await CatalogHttp.bytes(
+            Uri.https('api4.thetvdb.com', '/v4/login'),
+            postBody: {'apikey': key},
+          ),
+        ),
+      ),
+    );
+    final value = _map(response['data'])['token'];
+    if (response['status'] != 'success' ||
+        value is! String ||
+        value.isEmpty ||
+        value.length > 16000 ||
+        value.contains(RegExp(r'\s'))) {
+      throw const FormatException(
+        'TheTVDB did not issue an access token. Check the project key.',
+      );
+    }
+    if (generation != _generation)
+      throw const FormatException(
+        'Provider credentials changed. Search again.',
+      );
+    _token = value;
+    _expires = DateTime.now().add(const Duration(days: 27));
+    return value;
+  }
+
+  static Future<dynamic> _get(
+    String path, [
+    Map<String, String> query = const {},
+  ]) async {
+    final response = _map(
+      await CatalogHttp.json(
+        'api4.thetvdb.com',
+        '/v4$path',
+        query,
+        await token(),
+      ),
+    );
+    if (response['status'] != 'success' || response['data'] == null) {
+      throw const FormatException(
+        'TheTVDB returned incomplete metadata. Try again later.',
+      );
+    }
+    return response['data'];
+  }
+
+  static String? _artwork(dynamic value) {
+    if (value is! String || value.isEmpty) return null;
+    final uri = value.startsWith('https://')
+        ? value
+        : value.startsWith('banners/')
+        ? 'https://artworks.thetvdb.com/$value'
+        : null;
+    return uri != null && CatalogOnlinePolicy.artwork(uri) ? uri : null;
+  }
+
+  static Map<String, dynamic> _record(
+    Map<String, dynamic> row,
+    String kind,
+    String remote,
+  ) {
+    final english = _list(
+      _map(row['translations'])['overviewTranslations'],
+    ).whereType<Map>().where((v) => v['language'] == 'eng').firstOrNull;
+    final synopsis =
+        english?['overview'] ??
+        _map(row['overviews'])['eng'] ??
+        row['overview'];
+    final image = _artwork(
+      row['image'] ?? row['image_url'] ?? row['thumbnail'],
+    );
+    return {
+      'id': '$kind/$remote',
+      '_providerId': 'tvdb',
+      'title': _text(row['name'] ?? row['title'], 500),
+      'type': kind == 'series' ? 'episode' : 'movie',
+      if (kind == 'series') 'show': _text(row['name'], 500),
+      'year': _year(
+        row['year'] ?? row['firstAired'] ?? _map(row['first_release'])['date'],
+      ),
+      'synopsis': _text(synopsis),
+      'genres': _list(row['genres'])
+          .take(20)
+          .map((v) => _text(v is Map ? v['name'] : v, 100))
+          .where((v) => v.isNotEmpty)
+          .join(', '),
+      if (image != null) 'artworkUrl': image,
+      'sourceUrl': 'https://thetvdb.com/dereferrer/$kind/$remote',
+      'attribution': OnlineCatalogProvider.attribution('tvdb'),
+    };
+  }
+
+  static Future<List<Map<String, dynamic>>> search(
+    String query, {
+    int? year,
+    required bool television,
+  }) async {
+    final kind = television ? 'series' : 'movie';
+    final found = <String, Map<String, dynamic>>{};
+    final queries = CatalogMatchPolicy.queries(query);
+    if (queries.isEmpty) return [];
+    var calls = 0;
+    var truncated = false;
+    // Try the original with year, then relaxed queries. Never match a shortened
+    // fallback against itself: confidence always uses the original title/year.
+    final requests = [
+      (queries.first, year),
+      if (year != null) (queries.first, null),
+      for (final q in queries.skip(1)) (q, null),
+    ];
+    for (final request in requests) {
+      if (++calls > 4) break;
+      final rows = _list(
+        await _get('/search', {
+          'query': request.$1,
+          'type': kind,
+          'limit': '20',
+          if (request.$2 != null) 'year': '${request.$2}',
+        }),
+      );
+      if (rows.length >= 20) truncated = true;
+      for (final row in rows.whereType<Map>().take(20)) {
+        if (row['type'] != kind ||
+            !RegExp(r'^[1-9][0-9]*$').hasMatch('${row['tvdb_id']}') ||
+            _text(row['name']).isEmpty)
+          continue;
+        final candidate = _record(_map(row), kind, '${row['tvdb_id']}');
+        candidate['_titles'] = [
+          ..._list(row['aliases']).whereType<String>(),
+          ..._map(row['translations']).values.whereType<String>(),
+          if (row['name_translated'] is String) row['name_translated'],
+        ].take(50).toList();
+        final exact = CatalogMatchPolicy.exactTitle(query, candidate);
+        candidate['_matchReason'] =
+            '${exact ? 'Title matches' : 'Broader title result'}${year == null
+                ? ''
+                : candidate['year'] == year
+                ? ' · year matches'
+                : ' · check year'}';
+        found[candidate['id'] as String] = candidate;
+      }
+      if (found.values.any(
+        (c) =>
+            CatalogMatchPolicy.exactTitle(query, c) &&
+            (year == null || c['year'] == year),
+      ))
+        break;
+    }
+    for (final candidate in found.values)
+      candidate['_searchTruncated'] = truncated;
+    final result = found.values.toList()
+      ..sort((a, b) {
+        final score = CatalogMatchPolicy.score(
+          query,
+          year,
+          b,
+        ).compareTo(CatalogMatchPolicy.score(query, year, a));
+        return score != 0 ? score : '${a['id']}'.compareTo('${b['id']}');
+      });
+    return result.take(20).toList();
+  }
+
+  /// Narrow adjacent-year sets only; never infer release compatibility from a
+  /// premiere year or a broad/truncated search page.
+  static Future<List<Map<String, dynamic>>?> adjacentMovieCandidates(
+    String query,
+    int year,
+  ) async {
+    final found = <String, Map<String, dynamic>>{};
+    for (final adjacent in [year - 1, year + 1]) {
+      if (adjacent < 1000 || adjacent > 9999) continue;
+      final rows = _list(
+        await _get('/search', {
+          'query': query,
+          'type': 'movie',
+          'year': '$adjacent',
+          'limit': '20',
+        }),
+      );
+      if (rows.length >= 20) return null;
+      for (final row in rows.whereType<Map>()) {
+        if (row['type'] != 'movie' ||
+            !RegExp(r'^[1-9][0-9]*$').hasMatch('${row['tvdb_id']}'))
+          continue;
+        final candidate = _record(_map(row), 'movie', '${row['tvdb_id']}');
+        candidate['_titles'] = [
+          ..._list(row['aliases']).whereType<String>(),
+          ..._map(row['translations']).values.whereType<String>(),
+        ];
+        if (candidate['year'] == adjacent &&
+            CatalogMatchPolicy.exactTitle(query, candidate))
+          found[candidate['id'] as String] = candidate;
+      }
+    }
+    // A crowded title is manual review, not an unbounded detail-fetch loop.
+    return found.length <= 3 ? found.values.toList() : null;
+  }
+
+  static Future<Map<String, dynamic>> details(
+    Map<String, dynamic> candidate, {
+    int? season,
+    int? episode,
+    int? episodeEnd,
+  }) async {
+    final remote = '${candidate['id']}';
+    final match = RegExp(r'^(movie|series)/([1-9][0-9]*)$').firstMatch(remote);
+    if (match == null) throw const FormatException('Invalid TheTVDB identity.');
+    final kind = match[1]!, number = match[2]!;
+    final path = kind == 'movie' ? 'movies' : 'series';
+    final row = _map(
+      await _get('/$path/$number/extended', {'meta': 'translations'}),
+    );
+    if ('${row['id']}' != number || _text(row['name']).isEmpty) {
+      throw const FormatException(
+        'TheTVDB returned an unexpected title. Retry this selection.',
+      );
+    }
+    final result = {...candidate, ..._record(row, kind, number)};
+    if (kind == 'movie')
+      result['_releaseYears'] = {
+        for (final release in _list(row['releases']).whereType<Map>())
+          if (_year(release['date']) != null) _year(release['date'])!,
+        if (_year(_map(row['first_release'])['date']) != null)
+          _year(_map(row['first_release'])['date'])!,
+      }.toList();
+    result['credits'] = _list(row['characters'])
+        .whereType<Map>()
+        .take(20)
+        .map((c) => _text(c['personName'], 200))
+        .where((v) => v.isNotEmpty)
+        .toSet()
+        .join(', ');
+    if (kind == 'series' && (season != null || episode != null)) {
+      if (season == null ||
+          episode == null ||
+          season < 0 ||
+          episode < 0 ||
+          (episodeEnd != null &&
+              (episodeEnd < episode || episodeEnd - episode >= 32))) {
+        throw const FormatException(
+          'Supply a valid season and episode, with at most 32 episodes per file.',
+        );
+      }
+      final data = _map(
+        await _get('/series/$number/episodes/official', {
+          'page': '0',
+          'season': '$season',
+          'episodeNumber': '$episode',
+        }),
+      );
+      final ep = _list(data['episodes'])
+          .whereType<Map>()
+          .where(
+            (v) =>
+                v['seasonNumber'] == season &&
+                v['number'] == episode &&
+                '${v['seriesId']}' == number,
+          )
+          .firstOrNull;
+      if (ep == null || ep['id'] is! int || _text(ep['name']).isEmpty) {
+        throw const FormatException(
+          'TheTVDB has no matching episode in official aired order. Check the season and episode.',
+        );
+      }
+      result.addAll({
+        'id':
+            '$remote/official/$season/$episode${episodeEnd != null && episodeEnd > episode ? '-$episodeEnd' : ''}',
+        'title': _text(ep['name'], 500),
+        'season': season,
+        'episode': episode,
+        if (episodeEnd != null) 'episodeEnd': episodeEnd,
+        'year': _year(ep['aired']),
+        'airDate': _text(ep['aired'], 10),
+        'synopsis': _text(ep['overview']),
+        'sourceUrl': 'https://thetvdb.com/dereferrer/episode/${ep['id']}',
+        '_detailNote':
+            'Official aired episode order.${episodeEnd != null && episodeEnd > episode ? ' Description is for the first episode in this shared file.' : ''}',
+      });
     }
     return result;
   }

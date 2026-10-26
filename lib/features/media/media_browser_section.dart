@@ -8,6 +8,8 @@ import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
+import '../../domain/catalog/browse_options.dart';
+import '../../shared/widgets/catalog_browse_controls.dart';
 import '../../shared/widgets/item_artwork.dart';
 import '../../shared/widgets/cinematic_media.dart';
 
@@ -17,69 +19,84 @@ typedef MediaFilter = ({
   String? libraryId,
   String? afterTitle,
   String? afterId,
+  BrowseSort sort,
+  bool favorites,
+  String? tag,
 });
 const _pageSize = 60;
 
-final mediaCatalogueProvider = StreamProvider.autoDispose.family<List<Item>, MediaFilter>((
-  ref,
-  filter,
-) {
-  final db = ref.watch(appDatabaseProvider);
-  final clauses = <String>['i.unavailable=0'];
-  final values = <drift.Variable>[];
-  if (filter.libraryId != null) {
-    clauses.add('i.library_id=?');
-    values.add(drift.Variable(filter.libraryId!));
-  }
-  if (filter.kind == 'server') {
-    clauses.add("i.file_path LIKE 'remote:%'");
-  } else if (filter.kind != 'all') {
-    clauses.add(
-      "EXISTS(SELECT 1 FROM catalog_facets category WHERE category.item_id=i.id AND category.field='category' AND category.value=?)",
-    );
-    values.add(drift.Variable(filter.kind));
-  }
-  if (filter.query.isNotEmpty) {
-    // Quote tokens as literals, never accept FTS operators from user input.
-    final terms = filter.query
-        .trim()
-        .split(RegExp(r'\s+'))
-        .take(8)
-        .map((term) => '"${term.replaceAll('"', '""')}"*')
-        .join(' AND ');
-    clauses.add(
-      'i.id IN (SELECT item_id FROM catalog_search WHERE catalog_search MATCH ?)',
-    );
-    values.add(drift.Variable(terms));
-  }
-  if (filter.afterTitle != null && filter.afterId != null) {
-    clauses.add(
-      '(COALESCE(s.title,i.title)>? OR (COALESCE(s.title,i.title)=? AND i.id>?))',
-    );
-    values.addAll([
-      drift.Variable(filter.afterTitle!),
-      drift.Variable(filter.afterTitle!),
-      drift.Variable(filter.afterId!),
-    ]);
-  }
-  return db
-      .customSelect(
-        'SELECT i.*, COALESCE(s.title,i.title) AS catalog_title FROM items i LEFT JOIN catalog_search s ON s.item_id=i.id WHERE ${clauses.join(' AND ')} ORDER BY COALESCE(s.title,i.title),i.id LIMIT ${_pageSize + 1}',
-        variables: values,
-        readsFrom: {db.items, db.libraries},
-      )
-      .watch()
-      .map(
-        (rows) => rows
-            .map(
-              (row) => db.items.map({
-                ...row.data,
-                'title': row.data['catalog_title'],
-              }),
-            )
-            .toList(),
+final mediaCatalogueProvider = StreamProvider.autoDispose
+    .family<List<({Item item, String sortKey})>, MediaFilter>((ref, filter) {
+      final db = ref.watch(appDatabaseProvider);
+      final clauses = <String>['i.unavailable=0'];
+      final values = <drift.Variable>[];
+      if (filter.libraryId != null) {
+        clauses.add('i.library_id=?');
+        values.add(drift.Variable(filter.libraryId!));
+      }
+      if (filter.kind == 'server') {
+        clauses.add("i.file_path LIKE 'remote:%'");
+      } else if (filter.kind != 'all') {
+        clauses.add(
+          "EXISTS(SELECT 1 FROM catalog_facets category WHERE category.item_id=i.id AND category.field='category' AND category.value=?)",
+        );
+        values.add(drift.Variable(filter.kind));
+      }
+      if (filter.query.isNotEmpty) {
+        // Quote tokens as literals, never accept FTS operators from user input.
+        final terms = filter.query
+            .trim()
+            .split(RegExp(r'\s+'))
+            .take(8)
+            .map((term) => '"${term.replaceAll('"', '""')}"*')
+            .join(' AND ');
+        clauses.add(
+          'i.id IN (SELECT item_id FROM catalog_search WHERE catalog_search MATCH ?)',
+        );
+        values.add(drift.Variable(terms));
+      }
+      final org = organizationWhere(
+        favorites: filter.favorites,
+        tag: filter.tag,
       );
-});
+      clauses.addAll(org.sql);
+      values.addAll(org.values);
+      final sort = browseItemOrder(filter.sort);
+      final descending = filter.sort == BrowseSort.titleDescending;
+      if (filter.afterTitle != null && filter.afterId != null) {
+        clauses.add('($sort,i.id)${descending ? '<' : '>'}(?,?)');
+        values.addAll([
+          drift.Variable(filter.afterTitle!),
+          drift.Variable(filter.afterId!),
+        ]);
+      }
+      return db
+          .customSelect(
+            'SELECT i.*, COALESCE(s.title,i.user_title,i.title) AS catalog_title,$sort AS sort_key FROM items i LEFT JOIN catalog_search s ON s.item_id=i.id LEFT JOIN playback_progress p ON p.item_id=i.id LEFT JOIN reading_progress r ON r.item_id=i.id WHERE ${clauses.join(' AND ')} ORDER BY $sort ${descending ? 'DESC' : 'ASC'},i.id ${descending ? 'DESC' : 'ASC'} LIMIT ${_pageSize + 1}',
+            variables: values,
+            readsFrom: {
+              db.items,
+              db.libraries,
+              db.appSettings,
+              db.playbackProgress,
+              db.readingProgress,
+            },
+          )
+          .watch()
+          .map(
+            (rows) => rows
+                .map(
+                  (row) => (
+                    item: db.items.map({
+                      ...row.data,
+                      'title': row.data['catalog_title'],
+                    }),
+                    sortKey: row.data['sort_key'] as String,
+                  ),
+                )
+                .toList(),
+          );
+    });
 
 /// Tangerine's media-first browsing surface, shared by local and paired libraries.
 class MediaBrowserSection extends ConsumerStatefulWidget {
@@ -108,7 +125,9 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
   final _search = TextEditingController();
   late String _kind = widget.initialKind;
   late String? _libraryId = widget.initialLibraryId;
-  bool _grid = true;
+  bool _grid = true, _favorites = false;
+  BrowseSort _sort = BrowseSort.natural;
+  String? _tag;
   final _cursors = <(String, String)>[];
   void _reset() => _cursors.clear();
   void _details(Item item) =>
@@ -129,6 +148,9 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
         libraryId: _libraryId,
         afterTitle: _cursors.lastOrNull?.$1,
         afterId: _cursors.lastOrNull?.$2,
+        sort: _sort,
+        favorites: _favorites,
+        tag: _tag,
       )),
     );
     return Column(
@@ -168,37 +190,12 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
                     }),
                   ),
                 ),
-              SizedBox(
-                width: 230,
-                child: StreamBuilder<List<Library>>(
-                  stream: ref
-                      .watch(appDatabaseProvider)
-                      .select(ref.read(appDatabaseProvider).libraries)
-                      .watch(),
-                  builder: (context, snapshot) =>
-                      DropdownButtonFormField<String>(
-                        initialValue: _libraryId ?? '',
-                        decoration: const InputDecoration(labelText: 'Library'),
-                        items: [
-                          const DropdownMenuItem(
-                            value: '',
-                            child: Text('All libraries'),
-                          ),
-                          for (final library in snapshot.data ?? <Library>[])
-                            DropdownMenuItem(
-                              value: library.id,
-                              child: Text(
-                                library.title,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                        ],
-                        onChanged: (value) => setState(() {
-                          _libraryId = value == '' ? null : value;
-                          _reset();
-                        }),
-                      ),
-                ),
+              CatalogLibraryFilter(
+                value: _libraryId,
+                onChanged: (value) => setState(() {
+                  _libraryId = value;
+                  _reset();
+                }),
               ),
             ],
           ),
@@ -228,20 +225,29 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
                 ),
               ),
             ),
-            const SizedBox(width: AppSpace.xs),
-            IconButton(
-              tooltip: 'Media grid',
-              isSelected: _grid,
-              onPressed: () => setState(() => _grid = true),
-              icon: const Icon(Icons.grid_view_rounded),
-            ),
-            IconButton(
-              tooltip: 'Media list',
-              isSelected: !_grid,
-              onPressed: () => setState(() => _grid = false),
-              icon: const Icon(Icons.view_list_rounded),
-            ),
           ],
+        ),
+        const SizedBox(height: AppSpace.sm),
+        CatalogBrowseControls(
+          sort: _sort,
+          grid: _grid,
+          favorites: _favorites,
+          tag: _tag,
+          libraryId: _libraryId,
+          category: {'all', 'server'}.contains(_kind) ? null : _kind,
+          onSort: (value) => setState(() {
+            _sort = value;
+            _reset();
+          }),
+          onGrid: (value) => setState(() => _grid = value),
+          onFavorites: (value) => setState(() {
+            _favorites = value;
+            _reset();
+          }),
+          onTag: (value) => setState(() {
+            _tag = value;
+            _reset();
+          }),
         ),
         const SizedBox(height: AppSpace.md),
         catalogue.when(
@@ -253,7 +259,10 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
             'The media catalogue could not be loaded. Reopen the app to try again.',
           ),
           data: (page) {
-            final items = page.take(_pageSize).toList();
+            final items = page
+                .take(_pageSize)
+                .map((entry) => entry.item)
+                .toList();
             final hasMore = page.length > _pageSize;
             if (items.isEmpty && _cursors.isNotEmpty) {
               return TextButton(
@@ -263,7 +272,9 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
             }
             if (items.isEmpty &&
                 widget.emptyAction != null &&
-                _search.text.isEmpty) {
+                _search.text.isEmpty &&
+                !_favorites &&
+                _tag == null) {
               final name = LibraryKind.values
                   .firstWhere((kind) => kind.name == _kind)
                   .label
@@ -305,7 +316,9 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
                     const SizedBox(width: AppSpace.sm),
                     Expanded(
                       child: Text(
-                        _search.text.isNotEmpty
+                        _favorites || _tag != null
+                            ? 'No titles match these favorites/tag filters. Clear a filter or choose another tag.'
+                            : _search.text.isNotEmpty
                             ? 'No matching media. Try another title.'
                             : _kind == 'server'
                             ? 'Pair a server in Network to browse its media here.'
@@ -314,6 +327,15 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
                             : 'Add files, add a folder, or connect to a server to fill your library.',
                       ),
                     ),
+                    if (_favorites || _tag != null)
+                      TextButton(
+                        onPressed: () => setState(() {
+                          _favorites = false;
+                          _tag = null;
+                          _reset();
+                        }),
+                        child: const Text('Clear filters'),
+                      ),
                   ],
                 ),
               );
@@ -421,7 +443,7 @@ class _MediaBrowserSectionState extends ConsumerState<MediaBrowserSection> {
                             ? null
                             : () => setState(
                                 () => _cursors.add((
-                                  items.last.title,
+                                  page.take(_pageSize).last.sortKey,
                                   items.last.id,
                                 )),
                               ),

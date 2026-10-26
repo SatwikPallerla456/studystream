@@ -11,6 +11,7 @@ import 'features/server/network_screen.dart';
 import 'features/library/library_screen.dart';
 import 'features/library/library_sources_screen.dart';
 import 'features/library/media_category_screen.dart';
+import 'features/library/photo_slideshow_screen.dart';
 import 'features/library/library_identification_screen.dart';
 import 'features/study/study_screen.dart';
 import 'domain/catalog/media_catalog_repository.dart';
@@ -22,6 +23,7 @@ import 'features/reader/book_reader_screen.dart';
 import 'features/resource/resource_screen.dart';
 import 'features/playlists/playlists_screen.dart';
 import 'features/settings/player_controls_screen.dart';
+import 'features/player/advanced_player_screen.dart';
 
 final _router = GoRouter(
   initialLocation: '/',
@@ -52,6 +54,10 @@ final _router = GoRouter(
     GoRoute(
       path: '/mode',
       builder: (context, state) => const ModeSelectionScreen(),
+    ),
+    GoRoute(
+      path: '/advanced-player',
+      builder: (_, _) => const AdvancedPlayerScreen(),
     ),
     GoRoute(
       path: '/player-settings',
@@ -103,6 +109,7 @@ final _router = GoRouter(
       builder: (context, state) => BookReaderScreen(
         itemId: state.pathParameters['itemId']!,
         initialPage: int.tryParse(state.uri.queryParameters['page'] ?? ''),
+        initialStudyAnchor: state.uri.queryParameters['study'],
       ),
     ),
     GoRoute(
@@ -110,7 +117,13 @@ final _router = GoRouter(
       builder: (context, state) => PdfReaderScreen(
         itemId: state.pathParameters['itemId']!,
         initialPage: int.tryParse(state.uri.queryParameters['page'] ?? ''),
+        initialStudyAnchor: state.uri.queryParameters['study'],
       ),
+    ),
+    GoRoute(
+      path: '/photo/:itemId',
+      builder: (context, state) =>
+          PhotoSlideshowScreen(initialItemId: state.pathParameters['itemId']!),
     ),
     GoRoute(
       path: '/resource/:itemId',

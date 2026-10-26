@@ -16,10 +16,12 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/reader/reader_image_analysis.dart';
+import '../../data/reader/reader_thumbnail_store.dart';
 import '../../data/providers/app_providers.dart';
 import '../../data/sync/lan_sync_client.dart';
 import '../../domain/services/progress_writer.dart';
 import '../../domain/reader/reader_contract.dart';
+import '../../domain/reader/reader_study_destination.dart';
 import '../../domain/catalog/catalog_identity_store.dart';
 import '../../domain/reader/reader_session_store.dart';
 import '../../domain/reader/reader_background.dart';
@@ -31,12 +33,19 @@ import '../../shared/widgets/study_ui.dart';
 import 'reader_preferences_sheet.dart';
 import 'reader_text_analysis_sheet.dart';
 import 'reader_background_surface.dart';
+import 'reader_page_navigation.dart';
 
 class PdfReaderScreen extends ConsumerStatefulWidget {
-  const PdfReaderScreen({super.key, required this.itemId, this.initialPage});
+  const PdfReaderScreen({
+    super.key,
+    required this.itemId,
+    this.initialPage,
+    this.initialStudyAnchor,
+  });
 
   final String itemId;
   final int? initialPage;
+  final String? initialStudyAnchor;
 
   @override
   ConsumerState<PdfReaderScreen> createState() => _PdfReaderScreenState();
@@ -62,6 +71,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   ReaderEdgeColors? _edgeColors;
   final _sampleJobs = ReaderJobScheduler();
   ReaderLease<ReaderEdgeColors>? _sampleLease;
+  ReaderThumbnailStore? _thumbnails;
   String? _selectedText;
   ReaderTextAnchor? _selectionRange;
   int _selectionGeneration = 0;
@@ -80,9 +90,11 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   bool _focusMode = false;
   bool _interacting = false;
 
+  void Function()? _releaseLibraryProcessing;
   @override
   void initState() {
     super.initState();
+    _releaseLibraryProcessing = ref.read(libraryProcessingProvider).hold();
     WidgetsBinding.instance.addObserver(this);
     _database = ref.read(appDatabaseProvider);
     _controller.addListener(_viewChanged);
@@ -105,6 +117,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
         _remoteSource = await ref.read(lanSyncClientProvider).sourceFor(item);
       }
       _revision = await CatalogIdentityStore(_database).contentRevision(item);
+      _thumbnails = ReaderThumbnailStore('${item.id}:$_revision');
       _session = ReaderSessionStore(_database, item);
       final settings = await _session!.settings();
       _readerOptions = settings;
@@ -186,6 +199,19 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       }
       if (mounted) {
         _restoring = false;
+        if (widget.initialStudyAnchor != null && _item != null) {
+          final study = await ReaderStudyDestination.load(
+            _database,
+            _item!,
+            widget.initialStudyAnchor,
+          );
+          if (!mounted) return;
+          if (study?.passage != null)
+            await _goToTextAnchor(study!.passage!);
+          else if (study?.locator != null)
+            await _goToAnchor(study!.locator!);
+        }
+        if (!mounted) return;
         _sampleBackground();
         setState(() {});
       }
@@ -758,6 +784,42 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     }
   }
 
+  Future<void> _pageBrowser() async {
+    if (!_ready || !_controller.isReady || _thumbnails == null) return;
+    await _saveProgress();
+    if (!mounted) return;
+    final page = await showReaderPages(
+      context: context,
+      source: PdfThumbnailSource(_controller.document),
+      revision: _revision,
+      jobs: _sampleJobs,
+      store: _thumbnails!,
+      currentPage: _currentPage,
+      rtl: _rtl && _layoutMode != 'vertical',
+    );
+    if (page != null && mounted) await _jumpToPage(page);
+  }
+
+  Future<void> _pageTextTools() async {
+    if (ReaderImageAnalysis.available) {
+      await _recognizePage();
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Image text recognition'),
+        content: Text(ReaderImageAnalysis.supportDescription),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _recognizePage() async {
     if (!_ready || !_controller.isReady) return;
     final number = _currentPage,
@@ -839,6 +901,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     _sampleLease = null;
     _sampleJobs.releaseSpeculative();
     _edgeColors = null;
+    _thumbnails?.clearMemory();
   }
 
   @override
@@ -848,10 +911,12 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
 
   @override
   void dispose() {
+    _releaseLibraryProcessing?.call();
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
     _sampleLease?.release();
     _sampleJobs.dispose();
+    _thumbnails?.dispose();
     _controller.removeListener(_viewChanged);
     _searcher?.removeListener(_searchChanged);
     _searcher?.dispose();
@@ -887,38 +952,47 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
               onBack: _back,
               actions: [
                 IconButton(
-                  tooltip: 'Reading preferences',
-                  onPressed: _ready ? _readerSettings : null,
-                  icon: const Icon(Icons.tune),
+                  tooltip: 'Page thumbnails',
+                  onPressed: _ready ? _pageBrowser : null,
+                  icon: const Icon(Icons.grid_view),
                 ),
-                IconButton(
-                  tooltip: 'Previous reading cell',
-                  onPressed: _ready ? () => _advanceCell(false) : null,
-                  icon: const Icon(Icons.chevron_left),
-                ),
-                IconButton(
-                  tooltip: 'Next reading cell',
-                  onPressed: _ready ? () => _advanceCell(true) : null,
-                  icon: const Icon(Icons.chevron_right),
-                ),
-                PopupMenuButton<bool>(
-                  tooltip: 'Fit document',
-                  onSelected: _fit,
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: true, child: Text('Fit width')),
-                    PopupMenuItem(value: false, child: Text('Fit page')),
-                  ],
-                ),
+                if (!compact) ...[
+                  IconButton(
+                    tooltip: 'Reading preferences',
+                    onPressed: _ready ? _readerSettings : null,
+                    icon: const Icon(Icons.tune),
+                  ),
+                  IconButton(
+                    tooltip: 'Previous reading cell',
+                    onPressed: _ready ? () => _advanceCell(false) : null,
+                    icon: const Icon(Icons.chevron_left),
+                  ),
+                  IconButton(
+                    tooltip: 'Next reading cell',
+                    onPressed: _ready ? () => _advanceCell(true) : null,
+                    icon: const Icon(Icons.chevron_right),
+                  ),
+                  PopupMenuButton<bool>(
+                    tooltip: 'Fit document',
+                    onSelected: _fit,
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: true, child: Text('Fit width')),
+                      PopupMenuItem(value: false, child: Text('Fit page')),
+                    ],
+                  ),
+                ],
                 if (_ready && !compact)
                   TextButton.icon(
                     onPressed: _jumpToPage,
                     icon: const Icon(Icons.find_in_page_outlined),
                     label: Text('$_currentPage / $_totalPages'),
                   ),
-                if (ReaderImageAnalysis.available)
+                if (!compact)
                   IconButton(
-                    tooltip: 'Recognize page text',
-                    onPressed: _ready ? _recognizePage : null,
+                    tooltip: ReaderImageAnalysis.available
+                        ? 'Recognize page text'
+                        : 'OCR availability',
+                    onPressed: _ready ? _pageTextTools : null,
                     icon: const Icon(Icons.document_scanner_outlined),
                   ),
                 if (!compact) ...[
@@ -956,10 +1030,52 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
                     if (value == 'focus') {
                       setState(() => _focusMode = true);
                     }
+                    if (value == 'settings') _readerSettings();
+                    if (value == 'ocr') _pageTextTools();
+                    if (value == 'previous') _advanceCell(false);
+                    if (value == 'next') _advanceCell(true);
+                    if (value == 'fitWidth') _fit(true);
+                    if (value == 'fitPage') _fit(false);
                     if (value == 'complete') _setCompleted(true);
                     if (value == 'incomplete') _setCompleted(false);
                   },
                   itemBuilder: (_) => [
+                    if (compact) ...[
+                      PopupMenuItem(
+                        enabled: _ready,
+                        value: 'settings',
+                        child: const Text('Reading preferences'),
+                      ),
+                      PopupMenuItem(
+                        enabled: _ready,
+                        value: 'ocr',
+                        child: Text(
+                          ReaderImageAnalysis.available
+                              ? 'Image text recognition'
+                              : 'OCR availability',
+                        ),
+                      ),
+                      PopupMenuItem(
+                        enabled: _ready,
+                        value: 'previous',
+                        child: const Text('Previous reading cell'),
+                      ),
+                      PopupMenuItem(
+                        enabled: _ready,
+                        value: 'next',
+                        child: const Text('Next reading cell'),
+                      ),
+                      PopupMenuItem(
+                        enabled: _ready,
+                        value: 'fitWidth',
+                        child: const Text('Fit width'),
+                      ),
+                      PopupMenuItem(
+                        enabled: _ready,
+                        value: 'fitPage',
+                        child: const Text('Fit page'),
+                      ),
+                    ],
                     if (compact)
                       const PopupMenuItem(
                         value: 'focus',

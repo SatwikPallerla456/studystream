@@ -21,14 +21,17 @@ class NamedMediaPlaylist {
     required this.id,
     required this.title,
     required this.itemIds,
+    this.artwork,
   });
   final String id;
   final String title;
   final List<String> itemIds;
+  final String? artwork;
   Map<String, Object?> toJson() => {
     'id': id,
     'title': title,
     'itemIds': itemIds,
+    if (artwork != null) 'artwork': artwork,
   };
 }
 
@@ -97,6 +100,7 @@ class PlayerLibraryState {
               id: row['id'] as String,
               title: row['title'] as String,
               itemIds: (row['itemIds'] as List).cast<String>(),
+              artwork: row['artwork'] as String?,
             ),
           )
           .toList(),
@@ -114,7 +118,8 @@ class PlaylistImportPreview {
 /// Local playback organization. Item IDs remain the sole history identity.
 /// These non-secret settings participate in the existing backup transaction.
 class PlayerLibraryRepository {
-  const PlayerLibraryRepository(this.database);
+  const PlayerLibraryRepository(this.database, {this.queueNamespace});
+  final String? queueNamespace;
   final AppDatabase database;
   static const settingKey = 'player.library.v1';
 
@@ -126,6 +131,18 @@ class PlayerLibraryRepository {
     final legacy = await database.getSetting('myvlc.playlists');
     if (legacy != null) {
       for (final row in (jsonDecode(legacy) as Map).values) {
+        final oldIndex = state.playlists.indexWhere((p) => p.id == row['id']);
+        if (oldIndex >= 0 &&
+            state.playlists[oldIndex].artwork == null &&
+            row['artwork'] is String) {
+          final old = state.playlists[oldIndex];
+          state.playlists[oldIndex] = NamedMediaPlaylist(
+            id: old.id,
+            title: old.title,
+            itemIds: old.itemIds,
+            artwork: row['artwork'] as String,
+          );
+        }
         if (state.deletedPlaylistIds.contains(row['id']) ||
             state.playlists.any((value) => value.id == row['id'])) {
           continue;
@@ -135,6 +152,7 @@ class PlayerLibraryRepository {
             id: row['id'] as String,
             title: row['title'] as String,
             itemIds: (row['itemIds'] as List).cast<String>(),
+            artwork: row['artwork'] as String?,
           ),
         );
       }
@@ -153,6 +171,27 @@ class PlayerLibraryRepository {
         state.legacyQueueImported = true;
       }
     }
+    if (queueNamespace != null) {
+      final rawQueue = await database.getSetting(
+        'player.window.queue:$queueNamespace',
+      );
+      final queue = rawQueue == null
+          ? <String, dynamic>{
+              'queue': [],
+              'playOrder': [],
+              'currentEntryId': null,
+              'shuffle': false,
+              'repeat': 'off',
+            }
+          : jsonDecode(rawQueue) as Map;
+      return PlayerLibraryState.fromJson({
+        ...state.toJson(),
+        ...queue,
+        'playlists': state.playlists.map((p) => p.toJson()).toList(),
+        'deletedPlaylistIds': state.deletedPlaylistIds,
+        'legacyQueueImported': true,
+      });
+    }
     return state;
   }
 
@@ -160,9 +199,32 @@ class PlayerLibraryRepository {
       database.select(database.appSettings).watch().asyncMap((_) => load());
   Future<T> _update<T>(Future<T> Function(PlayerLibraryState) change) =>
       database.transaction(() async {
+        // Acquire the WAL writer before reading a cross-engine queue snapshot.
+        // busy_timeout can wait here; a deferred read-to-write upgrade cannot.
+        await database.customStatement(
+          'UPDATE app_settings SET value = value WHERE key = ?',
+          [settingKey],
+        );
         final state = await load();
         final result = await change(state);
-        await database.setSetting(settingKey, jsonEncode(state.toJson()));
+        if (queueNamespace == null) {
+          await database.setSetting(settingKey, jsonEncode(state.toJson()));
+        } else {
+          final raw = await database.getSetting(settingKey);
+          final global = raw == null
+              ? PlayerLibraryState().toJson()
+              : Map<String, dynamic>.from(jsonDecode(raw) as Map);
+          global['playlists'] = state.playlists.map((p) => p.toJson()).toList();
+          global['deletedPlaylistIds'] = state.deletedPlaylistIds;
+          await database.setSetting(settingKey, jsonEncode(global));
+          final queue = Map<String, dynamic>.from(state.toJson())
+            ..remove('playlists')
+            ..remove('deletedPlaylistIds');
+          await database.setSetting(
+            'player.window.queue:$queueNamespace',
+            jsonEncode(queue),
+          );
+        }
         return result;
       });
 
@@ -197,6 +259,7 @@ class PlayerLibraryRepository {
       id: id,
       title: title.trim(),
       itemIds: List.of(ids),
+      artwork: index < 0 ? null : state.playlists[index].artwork,
     );
     if (index < 0) {
       state.playlists.add(playlist);
@@ -397,6 +460,24 @@ class PlayerLibraryRepository {
       ids,
       unmatched,
     );
+  }
+
+  Future<String> exportPls(NamedMediaPlaylist playlist) async {
+    final lines = ['[playlist]', 'NumberOfEntries=${playlist.itemIds.length}'];
+    for (final entry in playlist.itemIds.indexed) {
+      final item = await database.getItemById(entry.$2);
+      if (item == null || !p.isAbsolute(item.filePath))
+        throw const FormatException(
+          'Export requires local files; remote credentials are never exported.',
+        );
+      final n = entry.$1 + 1;
+      lines.addAll([
+        'File$n=${Uri.file(item.filePath)}',
+        'Title$n=${(item.userTitle ?? item.title).replaceAll(RegExp(r'[\r\n]'), ' ')}',
+        'Length$n=${item.durationSeconds?.round() ?? -1}',
+      ]);
+    }
+    return '${[...lines, 'Version=2'].join('\n')}\n';
   }
 
   Future<String> exportM3u(NamedMediaPlaylist playlist) async {

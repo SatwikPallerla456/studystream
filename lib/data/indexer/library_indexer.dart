@@ -12,9 +12,9 @@ import '../../core/utils/id_utils.dart';
 import '../../core/utils/sort_utils.dart';
 import '../db/app_database.dart';
 import 'library_source_store.dart';
-import 'embedded_audio_tags.dart';
 import '../../domain/catalog/catalog_identity_store.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
+import '../../domain/catalog/library_processing.dart';
 
 typedef ScanProgressCallback = void Function(ScanProgress progress);
 
@@ -477,19 +477,6 @@ class LibraryIndexer {
     }
 
     await LibrarySourceStore(db).stage(sessionId, itemRows);
-    final audioTags = <String, Map<String, dynamic>>{};
-    for (final row in itemRows) {
-      token.throwIfCancelled();
-      if (row.itemType.value == 'audio') {
-        try {
-          audioTags[row.id.value] = await EmbeddedAudioTags.read(
-            File(row.filePath.value),
-          );
-        } on FileSystemException {
-          /* Metadata is optional; retain the successfully indexed asset. */
-        }
-      }
-    }
     await db.transaction(() async {
       token.throwIfCancelled();
       await db.upsertLibrary(
@@ -538,22 +525,6 @@ class LibraryIndexer {
           now,
         ],
       );
-      for (final entry in audioTags.entries) {
-        final item = await db.getItemById(entry.key);
-        if (item == null) continue;
-        await db.customStatement(
-          'INSERT INTO embedded_tags(id,library_id,item_id,content_revision,payload,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content_revision=excluded.content_revision,payload=excluded.payload,updated_at=excluded.updated_at',
-          [
-            item.id,
-            item.libraryId,
-            item.id,
-            item.fingerprint ?? 'legacy',
-            jsonEncode(entry.value),
-            DateTime.now().millisecondsSinceEpoch,
-          ],
-        );
-        await CatalogIdentityStore(db).reindex(item);
-      }
       await CatalogIdentityStore(db).backfill();
       for (final row in itemRows) {
         final item = await db.getItemById(row.id.value);
@@ -563,6 +534,7 @@ class LibraryIndexer {
             source?.id ?? 'legacy:$libraryId',
             p.relative(row.filePath.value, from: rootDir.path),
           );
+        if (item != null) await LibraryProcessingStore(db).enqueue(item);
       }
     });
     if (source != null) await catalog.setSourceAvailability(source, false);

@@ -89,7 +89,7 @@ class LanSyncClient {
     return uri.replace(path: '');
   }
 
-  Future<void> restore() async {
+  Future<void> restore({bool synchronize = true}) async {
     final generation = _generation;
     try {
       final value = await credentials.read();
@@ -104,7 +104,7 @@ class LanSyncClient {
         address: _address.toString(),
         lastSyncAt: lastSync,
       );
-      await sync();
+      if (synchronize) await sync();
     } catch (_) {
       if (!_disposed && _address == null) {
         _emit(

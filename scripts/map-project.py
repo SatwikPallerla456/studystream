@@ -35,7 +35,10 @@ def inventory_and_adapters(ast: dict) -> tuple[dict, dict]:
     files = {}
     for n in ast['nodes']:
         src = n.get('source_file')
-        if src and n.get('source_location') is None:
+        # Reuse AST file IDs, including extension-qualified IDs for .h/.m
+        # siblings. Inventing a stem-only inventory ID drops channel edges when
+        # Graphify reconciles those two real files during graph construction.
+        if src and (n.get('source_location') is None or n.get('label') == Path(src).name):
             files.setdefault((ROOT / src).resolve(), n['id'])
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     candidates = {ROOT / name for name in tracked if name}
@@ -114,7 +117,7 @@ def inventory_and_adapters(ast: dict) -> tuple[dict, dict]:
 
     channels = defaultdict(list)
     for path, fid in list(files.items()):
-        if path.suffix not in {'.dart', '.swift', '.kt', '.cpp', '.cc', '.h', '.py', '.sh'}:
+        if path.suffix not in {'.dart', '.swift', '.kt', '.cpp', '.cc', '.h', '.m', '.mm', '.py', '.sh'}:
             continue
         text = path.read_text(errors='replace')
         if path.suffix == '.dart':

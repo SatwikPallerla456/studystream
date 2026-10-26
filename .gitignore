@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Device-local TheTVDB project credential
+/.env.tvdb.local

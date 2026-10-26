@@ -7,13 +7,18 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../data/reader/book_page_source.dart';
+import '../../data/reader/publication_content.dart';
+import '../../data/reader/publication_server.dart';
+import '../../data/reader/reader_thumbnail_store.dart';
 import '../../data/reader/reader_image_analysis.dart';
 import '../../domain/reader/reader_background.dart';
 import '../../domain/reader/reader_contract.dart';
+import '../../domain/reader/reader_study_destination.dart';
 import '../../domain/catalog/catalog_identity_store.dart';
 import '../../domain/reader/reader_jobs.dart';
 import '../../domain/reader/reader_session_store.dart';
@@ -24,12 +29,20 @@ import 'reader_image_page.dart';
 import 'reader_text_analysis_sheet.dart';
 import 'reader_background_surface.dart';
 import 'publication_view.dart';
+import 'publication_search_sheet.dart';
+import 'reader_page_navigation.dart';
 import 'reader_preferences_sheet.dart';
 
 class BookReaderScreen extends ConsumerStatefulWidget {
-  const BookReaderScreen({super.key, required this.itemId, this.initialPage});
+  const BookReaderScreen({
+    super.key,
+    required this.itemId,
+    this.initialPage,
+    this.initialStudyAnchor,
+  });
   final String itemId;
   final int? initialPage;
+  final String? initialStudyAnchor;
   @override
   ConsumerState<BookReaderScreen> createState() => _BookReaderState();
 }
@@ -44,6 +57,14 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   ReadingProgressWriter? _writer;
   final _jobs = ReaderJobScheduler();
   final _cancel = ReaderCancellation();
+  final _publicationHandle = PublicationHandle();
+  final _geometryKnown = <int>{}, _geometryPending = <int>{};
+  final _pageCache = ReaderByteCache<DecodedReaderPage>(
+    48 * 1024 * 1024,
+    onEvict: (page) => page.image.dispose(),
+    maxEntries: 8,
+  );
+  ReaderThumbnailStore? _thumbnails;
   final _scroll = ScrollController();
   final _pageSurface = GlobalKey();
   final _visited = <int>{};
@@ -60,16 +81,19 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   Future<void> _saveTail = Future.value();
   String? _error;
   String _revision = '';
-  int _page = 1, _generation = 0, _geometryLoaded = 0;
+  int _page = 1, _generation = 0;
   double _zoom = 1, _pointY = 0, _pointX = 0;
   String? _selectedText;
   int? _textOffset;
+  String? _textQuote, _fragment;
+  double _textBias = .2;
   ReaderTextAnchor? _selectedRange, _restoreSelection;
   bool _closing = false, _restoring = true, _chrome = true, _navigating = false;
   final _touches = <int>{};
   Offset? _swipeStart;
   int _swipeStartedAt = 0;
   bool _canSwipe = false;
+  bool _allowPop = false, _leaving = false;
   bool _canTrackpad = false;
   Offset _trackpadPan = Offset.zero;
   double _wheelPan = 0;
@@ -85,9 +109,11 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       !_source!.publicationPage(_page);
   String get _mode => _options['mode'] as String;
   String get _background => _options['background'] as String;
+  void Function()? _releaseLibraryProcessing;
   @override
   void initState() {
     super.initState();
+    _releaseLibraryProcessing = ref.read(libraryProcessingProvider).hold();
     _db = ref.read(appDatabaseProvider);
     WidgetsBinding.instance.addObserver(this);
     _load();
@@ -159,19 +185,88 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
           if (source.locator(i) == _restored!.pageKey) _page = i;
         }
         _textOffset = _restored!.textOffset;
+        _textQuote = _restored!.textQuote;
+        _textBias = _restored!.textBias;
         _zoom = _restored!.zoom;
         _viewState = ReaderViewportState.decode(_restored!.viewState);
         _pointY = _restored!.point.dy;
         _pointX = _restored!.point.dx;
       }
-      // Only geometry is retained. Image buffers are released on every iteration.
-      // No speculative decoded renders are enabled before budget measurement.
-      for (var i = 1; i <= source.pageCount; i++) {
-        _cancel.check();
-        final geometry = await source.geometry(i, cancellation: _cancel);
-        _pages.add(CanonicalPage(i, source.locator(i), geometry));
-        if (i % 20 == 0 && mounted) setState(() => _geometryLoaded = i);
+      final study = await ReaderStudyDestination.load(
+        _db,
+        item,
+        widget.initialStudyAnchor,
+      );
+      final passage = study?.passage, anchor = study?.locator;
+      if (passage != null &&
+          passage.compatible(item.id, _revision) &&
+          passage.unit == 'domUtf16' &&
+          passage.startPage == passage.endPage &&
+          passage.startPage <= source.pageCount &&
+          source.locator(passage.startPage) == passage.startKey &&
+          source.publicationPage(passage.startPage)) {
+        _page = passage.startPage;
+        _restoreSelection = passage;
+        _selectedRange = passage;
+        _selectedText = passage.quote;
+        _textOffset = passage.startOffset;
+        _textQuote = passage.quote.substring(
+          0,
+          passage.quote.length.clamp(0, 120),
+        );
+        _pointX = 0;
+        _pointY = 0;
+        _zoom = 1;
+        _viewState = null;
+      } else if (anchor != null &&
+          anchor.compatible(item.id, _revision) &&
+          anchor.page <= source.pageCount &&
+          source.locator(anchor.page) == anchor.pageKey) {
+        _page = anchor.page;
+        _textOffset = anchor.textOffset;
+        _textQuote = anchor.textQuote;
+        _textBias = anchor.textBias;
+        _pointX = anchor.point.dx;
+        _pointY = anchor.point.dy;
+        _zoom = anchor.zoom;
+        _viewState = ReaderViewportState.decode(anchor.viewState);
+      } else if (study != null && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted)
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'The saved passage belongs to an earlier revision. Its original reference is retained.',
+                ),
+              ),
+            );
+        });
       }
+      // Canonical metadata is cheap; archive reads are restricted to the visible
+      // neighborhood. Unknown pages retain explicit placeholder geometry.
+      _pages = List.generate(
+        source.pageCount,
+        (i) =>
+            CanonicalPage(i + 1, source.locator(i + 1), const Size(100, 200)),
+      );
+      for (final i in {
+        _page,
+        if (_page > 1) _page - 1,
+        if (_page < source.pageCount) _page + 1,
+      }) {
+        _cancel.check();
+        try {
+          final size = await source.geometry(i, cancellation: _cancel);
+          _pages[i - 1] = CanonicalPage(i, source.locator(i), size);
+          _geometryKnown.add(i);
+        } on ReaderCancelled {
+          rethrow;
+        } on Object {
+          /* A corrupt neighbor must not block this book. */
+        }
+      }
+      _cancel.check();
+      _thumbnails = ReaderThumbnailStore('${item.id}:$_revision');
       _source = source;
       _pendingSource = null;
       _visited.add(_page);
@@ -197,9 +292,12 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     fit: _options['fit'] as String,
     zoom: _zoom,
     textOffset: _textOffset,
+    textQuote: _textQuote,
+    textBias: _textBias,
     viewState: _viewState?.toJson(),
   );
-  Future<void> _save() {
+  Future<void> _save() async {
+    await _publicationHandle.capture();
     if (_restoring || _item == null || _source == null) return _saveTail;
     final locator = _locator();
     final writer = _writer!
@@ -243,6 +341,9 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
         _selectedRange = null;
         _restoreSelection = null;
         _textOffset = null;
+        _textQuote = null;
+        _textBias = .2;
+        _fragment = null;
         _pointY = 0;
         _pointX = 0;
         _zoom = 1;
@@ -285,6 +386,9 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       _zoom = locator.zoom;
       _viewState = ReaderViewportState.decode(locator.viewState);
       _textOffset = locator.textOffset;
+      _textQuote = locator.textQuote;
+      _textBias = locator.textBias;
+      _fragment = null;
       _restoreSelection = null;
       _selectedRange = null;
       _selectedText = null;
@@ -318,6 +422,10 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       _selectedRange = anchor;
       _selectedText = anchor.quote;
       _textOffset = anchor.startOffset;
+      _textQuote = anchor.quote.length <= 120
+          ? anchor.quote
+          : anchor.quote.substring(0, 120);
+      _fragment = null;
       _generation++;
       _restoring = true;
     });
@@ -335,10 +443,32 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     if (!mounted) return;
     setState(() {
       _options = {..._options, key: value};
+      _restoreSelection = null;
+      _fragment = null;
       _generation++;
       _restoring = true;
     });
     await _session?.write(changes: {key: value});
+  }
+
+  Future<void> _pageTextTools() async {
+    if (ReaderImageAnalysis.available) {
+      await _recognizePage();
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Image text recognition'),
+        content: Text(ReaderImageAnalysis.supportDescription),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _recognizePage() async {
@@ -363,18 +493,22 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     _study();
   }
 
-  void _study() => showLessonToolsSheet(
-    context: context,
-    database: _db,
-    item: _item!,
-    currentPage: _page,
-    anchor: _locator(),
-    onJumpToAnchor: _goToAnchor,
-    selectedText: _selectedText,
-    textAnchor: _selectedRange,
-    onJumpToTextAnchor: _goToTextAnchor,
-    onJumpToPage: _go,
-  );
+  Future<void> _study() async {
+    await _save();
+    if (!mounted) return;
+    await showLessonToolsSheet(
+      context: context,
+      database: _db,
+      item: _item!,
+      currentPage: _page,
+      anchor: _locator(),
+      onJumpToAnchor: _goToAnchor,
+      selectedText: _selectedText,
+      textAnchor: _selectedRange,
+      onJumpToTextAnchor: _goToTextAnchor,
+      onJumpToPage: _go,
+    );
+  }
 
   void _tapAction(Offset point, Size viewport) {
     if (_restoring || _navigating || _zoom > 1.05 || _selectedRange != null)
@@ -449,6 +583,8 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
         if (mounted)
           setState(() {
             _options = resolved;
+            _restoreSelection = null;
+            _fragment = null;
             _generation++;
             _restoring = true;
           });
@@ -456,36 +592,213 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     );
   }
 
-  Future<void> _contents() => showModalBottomSheet<void>(
-    context: context,
-    builder: (context) => ListView.builder(
-      itemCount: _source!.pageCount,
-      itemBuilder: (context, index) => ListTile(
-        leading: Text('${index + 1}'),
-        title: Text(_source!.titles[index]),
-        selected: index + 1 == _page,
-        onTap: () {
-          Navigator.pop(context);
-          _go(index + 1);
-        },
-        trailing: PopupMenuButton<String>(
-          tooltip: 'Pairing for this page',
-          onSelected: (value) async {
-            final key = value == 'single' ? 'singlePages' : 'pairingStarts';
-            final pages = List<int>.from(_options[key] as List? ?? []);
-            pages.contains(index + 1)
-                ? pages.remove(index + 1)
-                : pages.add(index + 1);
-            await _setting(key, pages);
-          },
-          itemBuilder: (_) => const [
-            PopupMenuItem(value: 'single', child: Text('Toggle single page')),
-            PopupMenuItem(value: 'pair', child: Text('Toggle pairing start')),
+  Future<void> _contents() async {
+    final source = _source;
+    if (source is ArchiveBookSource && source.contents.isNotEmpty) {
+      final destination = await showModalBottomSheet<PublicationDestination>(
+        context: context,
+        useSafeArea: true,
+        builder: (context) => Column(
+          children: [
+            ListTile(
+              title: const Text('Contents'),
+              trailing: IconButton(
+                tooltip: 'Close contents',
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: source.contents.length,
+                itemBuilder: (context, index) {
+                  final entry = source.contents[index];
+                  return ListTile(
+                    contentPadding: EdgeInsets.only(
+                      left: 16 + entry.depth * 16.0,
+                      right: 16,
+                    ),
+                    title: Text(entry.title),
+                    trailing: Text('${entry.page}'),
+                    selected: entry.page == _page,
+                    onTap: () => Navigator.pop(context, entry),
+                  );
+                },
+              ),
+            ),
           ],
         ),
+      );
+      if (destination != null && mounted)
+        await _destination(destination.page, destination.fragment);
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => ListView.builder(
+        itemCount: _source!.pageCount,
+        itemBuilder: (context, index) => ListTile(
+          leading: Text('${index + 1}'),
+          title: Text(_source!.titles[index]),
+          selected: index + 1 == _page,
+          onTap: () {
+            Navigator.pop(context);
+            _go(index + 1);
+          },
+          trailing: PopupMenuButton<String>(
+            tooltip: 'Pairing for this page',
+            onSelected: (value) async {
+              final key = value == 'single' ? 'singlePages' : 'pairingStarts';
+              final pages = List<int>.from(_options[key] as List? ?? []);
+              pages.contains(index + 1)
+                  ? pages.remove(index + 1)
+                  : pages.add(index + 1);
+              await _setting(key, pages);
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'single', child: Text('Toggle single page')),
+              PopupMenuItem(value: 'pair', child: Text('Toggle pairing start')),
+            ],
+          ),
+        ),
       ),
-    ),
-  );
+    );
+  }
+
+  Future<void> _destination(int page, String fragment) async {
+    await _save();
+    await _go(page);
+    if (!mounted) return;
+    setState(() {
+      _fragment = fragment;
+      _restoreSelection = null;
+      _selectedRange = null;
+      _selectedText = null;
+      _textOffset = null;
+      _textQuote = null;
+      _pointY = 0;
+      _restoring = true;
+      _generation++;
+    });
+  }
+
+  Future<void> _publicationLink(int page, String href) async {
+    final source = _source;
+    if (source is! ArchiveBookSource) return;
+    try {
+      final uri = Uri.parse(href);
+      if (uri.hasScheme || uri.hasAuthority)
+        throw const FormatException('External link');
+      final path = uri.path.isEmpty
+          ? source.locator(page)
+          : PublicationServer.resolve(source.locator(page), href);
+      final index = source.paths.indexOf(path);
+      if (index < 0)
+        throw const FormatException(
+          'Destination is outside this reading order',
+        );
+      await _destination(index + 1, uri.fragment);
+    } on FormatException {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'This link has no readable destination in this book.',
+            ),
+          ),
+        );
+    }
+  }
+
+  Future<void> _searchBook() async {
+    final source = _source;
+    if (source is! ArchiveBookSource) return;
+    await _save();
+    if (!mounted) return;
+    final hit = await showPublicationSearch(
+      context: context,
+      source: source,
+      revision: _revision,
+      jobs: _jobs,
+    );
+    if (hit == null || !mounted) return;
+    await _goToTextAnchor(
+      ReaderTextAnchor(
+        resourceId: _item!.id,
+        revision: _revision,
+        startKey: source.locator(hit.page),
+        endKey: source.locator(hit.page),
+        startPage: hit.page,
+        endPage: hit.page,
+        startOffset: hit.start,
+        endOffset: hit.end,
+        unit: 'domUtf16',
+        quote: hit.quote,
+      ),
+    );
+  }
+
+  Future<void> _pageBrowser() async {
+    if (_source == null || _thumbnails == null) return;
+    await _save();
+    if (!mounted) return;
+    final page = await showReaderPages(
+      context: context,
+      source: _source!,
+      revision: _revision,
+      jobs: _jobs,
+      store: _thumbnails!,
+      currentPage: _page,
+      rtl: _reverse,
+    );
+    if (page != null && mounted) await _go(page);
+  }
+
+  void _ensureGeometry(int page) {
+    if (_geometryKnown.contains(page) ||
+        !_geometryPending.add(page) ||
+        _closing)
+      return;
+    final source = _source!;
+    final lease = _jobs.request<Size>(
+      key: 'geometry:$_revision:${source.locator(page)}',
+      priority: ReaderPriority.geometry,
+      estimatedBytes: 16 * 1024 * 1024,
+      run: (token) => source.geometry(page, cancellation: token),
+    );
+    unawaited(
+      lease.future
+          .then((size) => _receivedGeometry(page, size))
+          .catchError((Object _) {
+            // Keep fallback geometry for this session; malformed neighbors never block readiness.
+            _geometryKnown.add(page);
+          })
+          .whenComplete(() {
+            _geometryPending.remove(page);
+            lease.release();
+          }),
+    );
+  }
+
+  void _receivedGeometry(int page, Size size) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _closing ||
+          size.isEmpty ||
+          !size.width.isFinite ||
+          !size.height.isFinite)
+        return;
+      _geometryKnown.add(page);
+      if ((_pages[page - 1].size.width - size.width).abs() < .5 &&
+          (_pages[page - 1].size.height - size.height).abs() < .5)
+        return;
+      setState(() {
+        _pages[page - 1] = CanonicalPage(page, _source!.locator(page), size);
+        // Recompute continuous offsets around the same canonical page/fraction.
+        if (_mode == 'vertical' && !_source!.reflowable) _restoring = true;
+      });
+    });
+  }
 
   void _receivedColors(int page, ReaderEdgeColors colors) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -501,10 +814,32 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   }
 
   Widget _pageWidget(int page, double width, {bool vertical = false}) {
+    _ensureGeometry(page);
     if (_source!.publicationPage(page) && _source is ArchiveBookSource) {
       return PublicationView(
         key: ValueKey('publication:$page:$_generation'),
         source: _source! as ArchiveBookSource,
+        jobs: _jobs,
+        handle: page == _page ? _publicationHandle : null,
+        initialTextOffset: page == _page ? _textOffset : null,
+        initialTextQuote: page == _page ? _textQuote : null,
+        initialTextBias: _textBias,
+        fragment: page == _page ? _fragment : null,
+        onChooseSection: _contents,
+        onLink: (href) => unawaited(_publicationLink(page, href)),
+        onGeometry: (size) => _receivedGeometry(page, size),
+        onTextPosition: (offset, quote, bias) {
+          if (page != _page) return;
+          if (_textOffset == offset &&
+              _textQuote == quote &&
+              (_textBias - bias).abs() < .005)
+            return;
+          _textOffset = offset;
+          _textQuote = quote;
+          _textBias = bias;
+          _fragment = null;
+          _schedule();
+        },
         page: page,
         revision: _revision,
         geometry: _pages[page - 1].size,
@@ -515,13 +850,22 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
         initialSelection: page == _page ? _restoreSelection : null,
         onTap: (point) => _tapAction(point, const Size(1, 1)),
         onPosition: (x, y) {
+          if (page != _page || vertical) return;
+          if ((_pointX - x).abs() < .0001 && (_pointY - y).abs() < .0001)
+            return;
+          _pointX = x;
           _pointY = y;
           _schedule();
         },
         onSelection: (text, offset, end) {
+          if (text.isEmpty && page != _page) return;
+          if (text.isNotEmpty && page != _page)
+            setState(() {
+              _page = page;
+              _visited.add(page);
+            });
           _restoreSelection = null;
           _selectedText = text.isEmpty ? null : text;
-          _textOffset = text.isEmpty ? null : offset;
           _selectedRange = text.isEmpty
               ? null
               : ReaderTextAnchor(
@@ -545,6 +889,8 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       page: page,
       revision: _revision,
       jobs: _jobs,
+      cache: _pageCache,
+      onGeometry: (size) => _receivedGeometry(page, size),
       fit: _options['fit'] as String,
       targetWidth: (width * MediaQuery.devicePixelRatioOf(context)).ceil(),
       vertical: vertical,
@@ -709,6 +1055,34 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       );
     },
   );
+  Future<void> _leave({bool home = false}) async {
+    if (_leaving) return;
+    _leaving = true;
+    try {
+      await _save();
+      await _session?.flushed;
+      if (!mounted) return;
+      if (home || !context.canPop()) {
+        context.go('/?tab=home');
+        return;
+      }
+      setState(() => _allowPop = true);
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) context.pop();
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The reading position could not be saved. Please try again.',
+            ),
+          ),
+        );
+    } finally {
+      _leaving = false;
+    }
+  }
+
   @override
   Future<AppExitResponse> didRequestAppExit() async {
     await _save();
@@ -720,6 +1094,10 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   void didHaveMemoryPressure() {
     _jobs.releaseSpeculative();
     _colors.clear();
+    _pageCache.clear();
+    _thumbnails?.clearMemory();
+    if (_source case final ArchiveBookSource source)
+      source.clearRegenerableCaches();
   }
 
   @override
@@ -729,6 +1107,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
 
   @override
   void dispose() {
+    _releaseLibraryProcessing?.call();
     _closing = true;
     _cancel.cancel();
     _settle?.cancel();
@@ -736,10 +1115,13 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
     WidgetsBinding.instance.removeObserver(this);
     final save = _save();
     _jobs.dispose();
+    _pageCache.clear();
+    _thumbnails?.dispose();
     unawaited(
       save.catchError((Object _) {}).whenComplete(() async {
         await _writer?.dispose();
         await _session?.flushed;
+        await _jobs.settled;
         await _source?.dispose();
         await _pendingSource?.dispose();
         await _temporary?.delete(recursive: true);
@@ -750,142 +1132,203 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
   }
 
   @override
-  Widget build(BuildContext context) => CallbackShortcuts(
-    bindings: {
-      const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
-          _advance(_reverse),
-      const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-          _advance(!_reverse),
-      const SingleActivator(LogicalKeyboardKey.pageDown): () => _advance(true),
-      const SingleActivator(LogicalKeyboardKey.pageUp): () => _advance(false),
-      const SingleActivator(LogicalKeyboardKey.home): () => _go(1),
-      const SingleActivator(LogicalKeyboardKey.end): () =>
-          _go(_source?.pageCount ?? 1),
+  Widget build(BuildContext context) => PopScope(
+    canPop: _allowPop,
+    onPopInvokedWithResult: (didPop, result) {
+      if (!didPop) unawaited(_leave());
     },
-    child: Focus(
-      autofocus: true,
-      child: Scaffold(
-        appBar: _chrome
-            ? AppTopBar(
-                title: _item?.userTitle ?? _item?.title ?? 'Reader',
-                showBack: true,
-                actions: [
-                  if (_source != null) ...[
-                    IconButton(
-                      tooltip: 'Contents / pages',
-                      onPressed: _contents,
-                      icon: const Icon(Icons.view_list),
-                    ),
-                    IconButton(
-                      tooltip: 'Reading preferences',
-                      onPressed: _settings,
-                      icon: const Icon(Icons.tune),
-                    ),
-                    if (ReaderImageAnalysis.available &&
-                        !_source!.publicationPage(_page))
+    child: CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+            _advance(_reverse),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+            _advance(!_reverse),
+        const SingleActivator(LogicalKeyboardKey.pageDown): () =>
+            _advance(true),
+        const SingleActivator(LogicalKeyboardKey.pageUp): () => _advance(false),
+        const SingleActivator(LogicalKeyboardKey.home): () => _go(1),
+        const SingleActivator(LogicalKeyboardKey.end): () =>
+            _go(_source?.pageCount ?? 1),
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          appBar: _chrome
+              ? AppTopBar(
+                  title: _item?.userTitle ?? _item?.title ?? 'Reader',
+                  showBack: true,
+                  onBack: () => unawaited(_leave()),
+                  onHome: () => unawaited(_leave(home: true)),
+                  actions: [
+                    if (_source != null) ...[
                       IconButton(
-                        tooltip: 'Recognize page text',
-                        onPressed: _recognizePage,
-                        icon: const Icon(Icons.document_scanner_outlined),
+                        tooltip: 'Contents / pages',
+                        onPressed: _contents,
+                        icon: const Icon(Icons.view_list),
                       ),
-                    IconButton(
-                      tooltip: 'Notes and bookmarks',
-                      onPressed: _study,
-                      icon: const Icon(Icons.bookmark_outline),
-                    ),
+                      if (MediaQuery.sizeOf(context).width >= 700) ...[
+                        IconButton(
+                          tooltip: 'Page thumbnails',
+                          onPressed: _pageBrowser,
+                          icon: const Icon(Icons.grid_view),
+                        ),
+                        if (_source!.capabilities.contains(
+                          ReaderCapability.textSearch,
+                        ))
+                          IconButton(
+                            tooltip: 'Search book text',
+                            onPressed: _searchBook,
+                            icon: const Icon(Icons.search),
+                          ),
+                        IconButton(
+                          tooltip: 'Reading preferences',
+                          onPressed: _settings,
+                          icon: const Icon(Icons.tune),
+                        ),
+                        if (!_source!.publicationPage(_page))
+                          IconButton(
+                            tooltip: ReaderImageAnalysis.available
+                                ? 'Recognize page text'
+                                : 'OCR availability',
+                            onPressed: _pageTextTools,
+                            icon: const Icon(Icons.document_scanner_outlined),
+                          ),
+                      ],
+                      IconButton(
+                        tooltip: 'Notes and bookmarks',
+                        onPressed: _study,
+                        icon: const Icon(Icons.bookmark_outline),
+                      ),
+                      if (MediaQuery.sizeOf(context).width < 700)
+                        PopupMenuButton<String>(
+                          tooltip: 'Reader tools',
+                          onSelected: (value) {
+                            switch (value) {
+                              case 'pages':
+                                unawaited(_pageBrowser());
+                              case 'search':
+                                unawaited(_searchBook());
+                              case 'settings':
+                                unawaited(_settings());
+                              case 'ocr':
+                                unawaited(_pageTextTools());
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'pages',
+                              child: Text('Page thumbnails'),
+                            ),
+                            if (_source!.capabilities.contains(
+                              ReaderCapability.textSearch,
+                            ))
+                              const PopupMenuItem(
+                                value: 'search',
+                                child: Text('Search book text'),
+                              ),
+                            const PopupMenuItem(
+                              value: 'settings',
+                              child: Text('Reading preferences'),
+                            ),
+                            if (!_source!.publicationPage(_page))
+                              PopupMenuItem(
+                                value: 'ocr',
+                                child: Text(
+                                  ReaderImageAnalysis.available
+                                      ? 'Image text recognition'
+                                      : 'OCR availability',
+                                ),
+                              ),
+                          ],
+                        ),
+                    ],
                   ],
-                ],
-              )
-            : null,
-        body: _error != null
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
+                )
+              : null,
+          body: _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_error!),
+                        const SizedBox(height: 12),
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('Back'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : _source == null
+              ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Text(
-                        'This book could not be opened. Check its file and try again.',
-                      ),
-                      const SizedBox(height: 12),
-                      TextButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: const Text('Back'),
-                      ),
+                      const CircularProgressIndicator(),
+                      const Text('Opening your book…'),
                     ],
                   ),
-                ),
-              )
-            : _source == null
-            ? Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const CircularProgressIndicator(),
-                    Text(
-                      _geometryLoaded > 0
-                          ? 'Preparing pages · $_geometryLoaded ready'
-                          : 'Opening your book…',
+                )
+              : _body(),
+          bottomNavigationBar: _source == null || !_chrome
+              ? null
+              : SafeArea(
+                  child: Directionality(
+                    textDirection: _reverse
+                        ? TextDirection.rtl
+                        : TextDirection.ltr,
+                    child: Row(
+                      children: [
+                        IconButton(
+                          tooltip: _source!.reflowable
+                              ? 'Previous chapter'
+                              : 'Previous page',
+                          onPressed: _canAdvance(false)
+                              ? () => _advance(false)
+                              : null,
+                          icon: Icon(
+                            _reverse ? Icons.skip_next : Icons.skip_previous,
+                          ),
+                        ),
+                        Expanded(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '${_source!.reflowable ? 'Chapter' : 'Page'} $_page / ${_source!.pageCount}',
+                              ),
+                              Slider(
+                                value: _page.toDouble(),
+                                min: 1,
+                                max: _source!.pageCount > 1
+                                    ? _source!.pageCount.toDouble()
+                                    : 2,
+                                onChanged: _source!.pageCount < 2
+                                    ? null
+                                    : (value) => _go(value.round()),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: _source!.reflowable
+                              ? 'Next chapter'
+                              : 'Next page',
+                          onPressed: _canAdvance(true)
+                              ? () => _advance(true)
+                              : null,
+                          icon: Icon(
+                            _reverse ? Icons.skip_previous : Icons.skip_next,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              )
-            : _body(),
-        bottomNavigationBar: _source == null || !_chrome
-            ? null
-            : SafeArea(
-                child: Directionality(
-                  textDirection: _reverse
-                      ? TextDirection.rtl
-                      : TextDirection.ltr,
-                  child: Row(
-                    children: [
-                      IconButton(
-                        tooltip: _source!.reflowable
-                            ? 'Previous chapter'
-                            : 'Previous page',
-                        onPressed: _canAdvance(false)
-                            ? () => _advance(false)
-                            : null,
-                        icon: Icon(
-                          _reverse ? Icons.skip_next : Icons.skip_previous,
-                        ),
-                      ),
-                      Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              '${_source!.reflowable ? 'Chapter' : 'Page'} $_page / ${_source!.pageCount}',
-                            ),
-                            Slider(
-                              value: _page.toDouble(),
-                              min: 1,
-                              max: _source!.pageCount > 1
-                                  ? _source!.pageCount.toDouble()
-                                  : 2,
-                              onChanged: _source!.pageCount < 2
-                                  ? null
-                                  : (value) => _go(value.round()),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: _source!.reflowable
-                            ? 'Next chapter'
-                            : 'Next page',
-                        onPressed: _canAdvance(true)
-                            ? () => _advance(true)
-                            : null,
-                        icon: Icon(
-                          _reverse ? Icons.skip_previous : Icons.skip_next,
-                        ),
-                      ),
-                    ],
                   ),
                 ),
-              ),
+        ),
       ),
     ),
   );

@@ -325,7 +325,8 @@ class CatalogIdentityStore {
           'provider': providerId,
           'candidate': remoteId,
           'selectedAt': now,
-          'method': 'explicit',
+          'method': origin == 'automatic' ? 'automatic' : 'explicit',
+          if (origin == 'automatic') 'reason': candidate['_matchReason'],
         }),
         now,
       ],
@@ -349,10 +350,11 @@ class CatalogIdentityStore {
       [item.id, item.libraryId, item.id, edition, jsonEncode(hints), now],
     );
     // A refresh can replace unlocked values; locked edits and explicit removals survive.
-    await db.customStatement(
-      'UPDATE catalog_overrides SET value=NULL,removed=0,revision=revision+1,updated_at=? WHERE item_id=? AND locked=0',
-      [now, item.id],
-    );
+    if (origin != 'automatic')
+      await db.customStatement(
+        'UPDATE catalog_overrides SET value=NULL,removed=0,revision=revision+1,updated_at=? WHERE item_id=? AND locked=0',
+        [now, item.id],
+      );
     await reindex(item);
   });
   Future<void> clear(
@@ -508,8 +510,13 @@ class CatalogIdentityStore {
     final choice = await decision(item.id);
     final embedded = await db
         .customSelect(
-          'SELECT payload FROM embedded_tags WHERE item_id=?',
-          variables: [Variable(item.id)],
+          'SELECT payload FROM embedded_tags WHERE item_id=? AND content_revision=?',
+          variables: [
+            Variable(item.id),
+            Variable(
+              item.fingerprint ?? 'legacy:${item.fileSize}:${item.modifiedAt}',
+            ),
+          ],
         )
         .getSingleOrNull();
     final inherited = Map<String, dynamic>.from(local);
@@ -537,6 +544,12 @@ class CatalogIdentityStore {
         ),
       ...inherited,
     };
+    if ({'audiobooks', 'podcasts'}.contains(result['category'])) {
+      if (result['author'] == null && result['artist'] != null)
+        result['author'] = result['artist'];
+      if (result['series'] == null && result['album'] != null)
+        result['series'] = result['album'];
+    }
     if (choice?['state'] == 'matched') {
       final row = await db
           .customSelect(
@@ -624,7 +637,7 @@ class CatalogIdentityStore {
         item.libraryId,
         item.userTitle ?? metadata['title'] ?? item.title,
         '${metadata['author'] ?? ''} ${metadata['artist'] ?? ''} ${metadata['credits'] ?? ''} ${metadata['album'] ?? ''} ${metadata['series'] ?? ''} ${metadata['show'] ?? ''}',
-        tags,
+        '$tags ${item.filename}',
       ],
     );
     await db.customStatement('DELETE FROM catalog_facets WHERE item_id=?', [
@@ -655,6 +668,16 @@ class CatalogIdentityStore {
         [item.id, item.libraryId, field, '$value', value is int ? value : 0],
       );
     }
+    final folder = p.posix.dirname(item.relativePath.replaceAll('\\', '/'));
+    for (final entry in {
+      'folder': folder == '.' ? '' : folder,
+      'format': p.extension(item.filename).replaceFirst('.', '').toUpperCase(),
+    }.entries) {
+      await db.customStatement(
+        'INSERT INTO catalog_facets(item_id,library_id,field,value,number) VALUES(?,?,?,?,0)',
+        [item.id, item.libraryId, entry.key, entry.value],
+      );
+    }
     final date = DateTime.fromMillisecondsSinceEpoch(
       item.modifiedAt ?? item.createdAt,
     );
@@ -664,7 +687,9 @@ class CatalogIdentityStore {
         item.id,
         item.libraryId,
         'month',
-        '${date.year}-${date.month.toString().padLeft(2, '0')}',
+        (item.modifiedAt ?? item.createdAt) <= 0
+            ? ''
+            : '${date.year}-${date.month.toString().padLeft(2, '0')}',
         0,
       ],
     );
@@ -682,19 +707,32 @@ class CatalogIdentityStore {
           .toList(),
   };
   Future<String> contentRevision(Item item) async =>
-      (await db
-                  .customSelect(
-                    'SELECT content_revision FROM technical_media WHERE item_id=?',
-                    variables: [Variable(item.id)],
-                  )
-                  .getSingleOrNull())
-              ?.data['content_revision']
-          as String? ??
-      item.fingerprint ??
-      'legacy:${item.fileSize}:${item.modifiedAt}';
+      !item.filePath.startsWith('remote:')
+      ? item.fingerprint ?? 'legacy:${item.fileSize}:${item.modifiedAt}'
+      : (await db
+                        .customSelect(
+                          'SELECT content_revision FROM technical_media WHERE item_id=?',
+                          variables: [Variable(item.id)],
+                        )
+                        .getSingleOrNull())
+                    ?.data['content_revision']
+                as String? ??
+            item.fingerprint ??
+            'legacy:${item.fileSize}:${item.modifiedAt}';
 
   static const _transportPayloads = {
-    'embedded_tags': {'title', 'artist', 'album', 'year', 'track', 'disc'},
+    'embedded_tags': {
+      'title',
+      'artist',
+      'album',
+      'year',
+      'track',
+      'disc',
+      'author',
+      'series',
+      'volume',
+      'chapter',
+    },
     'study_anchors': {'locator', 'kind', 'text', 'offset', 'textRange'},
     'catalog_works': {
       'title',
@@ -778,6 +816,7 @@ class CatalogIdentityStore {
       'videoOrientation',
       'analysisError',
       'streams',
+      'chapters',
     },
   };
   static Map<String, dynamic> transportRow(

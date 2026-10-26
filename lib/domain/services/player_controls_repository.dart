@@ -17,6 +17,14 @@ const playerShortcutDefaults = <String, String>{
   'fullscreen': 'F',
   'miniPlayer': 'Control+M',
   'nextFrame': 'E',
+  'stop': 'S',
+  'escape': 'Escape',
+  'position': 'T',
+  'hideUI': 'I',
+  'snapshot': 'Shift+S',
+  'record': 'Shift+R',
+  'nextChapter': 'Shift+N',
+  'previousChapter': 'Shift+P',
 };
 const playerActionTitles = <String, String>{
   'playPause': 'Play / pause',
@@ -30,6 +38,14 @@ const playerActionTitles = <String, String>{
   'fullscreen': 'Fullscreen',
   'miniPlayer': 'Mini-player',
   'nextFrame': 'Next frame',
+  'stop': 'Stop playback',
+  'escape': 'Exit fullscreen / show controls',
+  'position': 'Show playback time',
+  'hideUI': 'Show / hide controls',
+  'snapshot': 'Take snapshot',
+  'record': 'Start / stop recording',
+  'nextChapter': 'Next chapter',
+  'previousChapter': 'Previous chapter',
 };
 
 class PlayerControls {
@@ -38,21 +54,47 @@ class PlayerControls {
     Map<String, String>? global,
     this.skipSeconds = 10,
     this.volumeStep = 5,
+    this.veryShortSkip = 3,
+    this.mediumSkip = 60,
+    this.longSkip = 300,
+    this.singleClick = 'playPause',
+    this.doubleClick = 'fullscreen',
+    this.verticalScroll = 'volume',
+    this.horizontalScroll = 'seek',
+    this.reverseScroll = false,
   }) : local = {...playerShortcutDefaults, ...?local},
        global = global ?? {};
   final Map<String, String> local, global;
-  final int skipSeconds, volumeStep;
+  final int skipSeconds, volumeStep, veryShortSkip, mediumSkip, longSkip;
+  final String singleClick, doubleClick, verticalScroll, horizontalScroll;
+  final bool reverseScroll;
   Map<String, Object> toJson() => {
     'local': local,
     'global': global,
     'skipSeconds': skipSeconds,
     'volumeStep': volumeStep,
+    'veryShortSkip': veryShortSkip,
+    'mediumSkip': mediumSkip,
+    'longSkip': longSkip,
+    'singleClick': singleClick,
+    'doubleClick': doubleClick,
+    'verticalScroll': verticalScroll,
+    'horizontalScroll': horizontalScroll,
+    'reverseScroll': reverseScroll,
   };
   static PlayerControls fromJson(Map json) => PlayerControls(
     local: Map<String, String>.from(json['local'] as Map? ?? {}),
     global: Map<String, String>.from(json['global'] as Map? ?? {}),
     skipSeconds: (json['skipSeconds'] as int? ?? 10).clamp(1, 600),
     volumeStep: (json['volumeStep'] as int? ?? 5).clamp(1, 50),
+    veryShortSkip: (json['veryShortSkip'] as int? ?? 3).clamp(1, 30),
+    mediumSkip: (json['mediumSkip'] as int? ?? 60).clamp(1, 600),
+    longSkip: (json['longSkip'] as int? ?? 300).clamp(1, 1800),
+    singleClick: json['singleClick'] as String? ?? 'playPause',
+    doubleClick: json['doubleClick'] as String? ?? 'fullscreen',
+    verticalScroll: json['verticalScroll'] as String? ?? 'volume',
+    horizontalScroll: json['horizontalScroll'] as String? ?? 'seek',
+    reverseScroll: json['reverseScroll'] == true,
   );
   static SingleActivator? activator(String value) {
     if (value.trim().isEmpty) return null;
@@ -123,6 +165,18 @@ class PlayerControlsRepository {
   }
 
   Future<void> save(PlayerControls controls) async {
+    if (controls.veryShortSkip < 1 ||
+        controls.veryShortSkip > 30 ||
+        controls.mediumSkip < 1 ||
+        controls.mediumSkip > 600 ||
+        controls.longSkip < 1 ||
+        controls.longSkip > 1800)
+      throw const FormatException('Invalid modified seek amount');
+    if (!{'none', 'playPause', 'fullscreen'}.contains(controls.singleClick) ||
+        !{'none', 'playPause', 'fullscreen'}.contains(controls.doubleClick) ||
+        !{'none', 'volume', 'seek'}.contains(controls.verticalScroll) ||
+        !{'none', 'volume', 'seek'}.contains(controls.horizontalScroll))
+      throw const FormatException('Invalid mouse action');
     for (final bindings in [controls.local, controls.global]) {
       final seen = <String>{};
       for (final row in bindings.entries) {

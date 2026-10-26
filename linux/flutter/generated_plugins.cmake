@@ -3,9 +3,14 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  desktop_multi_window
+  flutter_inappwebview_forge_linux
   flutter_secure_storage_linux
+  local_notifier
   media_kit_libs_linux
   media_kit_video
+  tangerine_vlc
+  tray_manager
   url_launcher_linux
 )
 

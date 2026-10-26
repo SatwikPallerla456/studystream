@@ -43,6 +43,11 @@ dependencies:
   archive: 4.0.9
   xml: 6.6.1
   crypto: ^3.0.7
+  desktop_multi_window: 0.3.1
+  tray_manager: 0.5.2
+  local_notifier: 0.1.6
+  tangerine_vlc:
+    path: packages/tangerine_vlc
   media_kit: ^1.2.6
   media_kit_video: ^2.0.1
   # 2.4.5 fixes nullable cache access with the installed Dart SDK.
@@ -50,10 +55,16 @@ dependencies:
   media_kit_libs_video: ^1.0.7
   url_launcher: ^6.3.2
   flutter_html: ^3.0.0
+  flutter_inappwebview_forge: 2.1.77
   webview_flutter: 4.14.1
   wakelock_plus: ^1.5.1
   flutter_secure_storage: ^10.0.0
   flutter_svg: ^2.3.0
+
+dependency_overrides:
+  # Repository-owned Swift compatibility fixes; see the package PATCHES.md.
+  flutter_inappwebview_forge_macos:
+    path: packages/flutter_inappwebview_forge_macos
 
 dev_dependencies:
   flutter_test:
@@ -82,6 +93,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/brand/tangerine.png
+    - assets/brand/tangerine.ico
     - assets/brand/tmdb.svg
 
   # To add assets to your application, add an assets section, like this:

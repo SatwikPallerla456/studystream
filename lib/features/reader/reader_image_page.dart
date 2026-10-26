@@ -8,9 +8,10 @@ import '../../domain/reader/reader_jobs.dart';
 import '../../domain/reader/reader_contract.dart';
 
 class DecodedReaderPage {
-  DecodedReaderPage(this.image, this.colors);
+  DecodedReaderPage(this.image, this.colors, this.sourceSize);
   final ui.Image image;
   final ReaderEdgeColors colors;
+  final ui.Size sourceSize;
 }
 
 /// Owns a clone of the render result; framework ImageCache is bypassed so page
@@ -26,6 +27,8 @@ class ReaderImagePage extends StatefulWidget {
     required this.targetWidth,
     this.vertical = false,
     required this.onColors,
+    this.cache,
+    this.onGeometry,
     this.onSettled,
     this.initialZoom = 1,
     this.initialPoint = Offset.zero,
@@ -37,6 +40,8 @@ class ReaderImagePage extends StatefulWidget {
   final int page, targetWidth;
   final String revision, fit, layoutKey;
   final ReaderJobScheduler jobs;
+  final ReaderByteCache<DecodedReaderPage>? cache;
+  final ValueChanged<Size>? onGeometry;
   final bool vertical;
   final double initialZoom;
   final Offset initialPoint;
@@ -73,6 +78,13 @@ class _ReaderImagePageState extends State<ReaderImagePage> {
       estimatedBytes: 96 * 1024 * 1024,
       disposeResult: (result) => result.image.dispose(),
       run: (token) async {
+        final cached = widget.cache?.get(key);
+        if (cached != null)
+          return DecodedReaderPage(
+            cached.image.clone(),
+            cached.colors,
+            cached.sourceSize,
+          );
         final page = await widget.source.load(widget.page, cancellation: token);
         token.check();
         final bytes = page.image;
@@ -135,7 +147,17 @@ class _ReaderImagePageState extends State<ReaderImagePage> {
             } finally {
               sample.dispose();
             }
-            return DecodedReaderPage(result, colors);
+            token.check();
+            final size = ui.Size(
+              descriptor.width.toDouble(),
+              descriptor.height.toDouble(),
+            );
+            widget.cache?.put(
+              key,
+              DecodedReaderPage(result.clone(), colors, size),
+              result.width * result.height * 4,
+            );
+            return DecodedReaderPage(result, colors, size);
           } catch (_) {
             result.dispose();
             rethrow;
@@ -151,7 +173,10 @@ class _ReaderImagePageState extends State<ReaderImagePage> {
       if (!mounted) return;
       _image = result.image.clone();
       widget.onColors(result.colors);
+      widget.onGeometry?.call(result.sourceSize);
       setState(() {});
+      _lease?.release();
+      _lease = null;
     } catch (error) {
       if (mounted && error is! ReaderCancelled) setState(() => _error = error);
     }

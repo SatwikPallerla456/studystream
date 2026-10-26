@@ -50,10 +50,12 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
   bool _loading = true;
   bool _navigating = false;
   bool _focusMode = false;
+  VoidCallback? _releaseLibraryProcessing;
 
   @override
   void initState() {
     super.initState();
+    _releaseLibraryProcessing = ref.read(libraryProcessingProvider).hold();
     WidgetsBinding.instance.addObserver(this);
     _database = ref.read(appDatabaseProvider);
     _scrollController.addListener(_scrollChanged);
@@ -290,6 +292,7 @@ class _ResourceScreenState extends ConsumerState<ResourceScreen>
 
   @override
   void dispose() {
+    _releaseLibraryProcessing?.call();
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
     _scrollController
