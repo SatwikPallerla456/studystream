@@ -105,6 +105,14 @@ class TangerineVlcPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 val value = preferences[key] as? String
                 if (value != null && value.length <= 256 && !value.contains('\u0000')) options.add("--$option=$value")
             }
+            if (preferences["normalize"] == "true") {
+                options.add("--audio-filter=normvol"); options.add("--norm-max-level=2")
+            }
+            mapOf("subtitleSize" to "freetype-fontsize", "subtitleColor" to "freetype-color").forEach { (key, option) ->
+                val value = preferences[key] as? String
+                if (value != null && value.length <= 10 && value.matches(Regex("[0-9]+"))) options.add("--$option=$value")
+            }
+            if (preferences["hardware"] == "none") options.add("--avcodec-hw=none")
             vlc = LibVLC(context, options); vlcCreated=true
             player = MediaPlayer(vlc); playerCreated=true
             texture.surfaceTexture().setDefaultBufferSize(1280, 720)

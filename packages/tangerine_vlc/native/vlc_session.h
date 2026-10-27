@@ -33,6 +33,16 @@ class VlcSession {
       auto it=args.find("preferences."+entry.first);
       if(it!=args.end() && it->second.size()<=256 && it->second.find('\0')==std::string::npos) options.push_back("--"+entry.second+"="+it->second);
     }
+    auto normalize=args.find("preferences.normalize");
+    if(normalize!=args.end() && normalize->second=="true") {
+      options.push_back("--audio-filter=normvol"); options.push_back("--norm-max-level=2");
+    }
+    const std::map<std::string,std::string> subtitle_options={{"subtitleSize","freetype-fontsize"},{"subtitleColor","freetype-color"}};
+    for(const auto& entry:subtitle_options) {
+      auto it=args.find("preferences."+entry.first);
+      if(it!=args.end() && !it->second.empty() && it->second.size()<=10 && it->second.find_first_not_of("0123456789")==std::string::npos)
+        options.push_back("--"+entry.second+"="+it->second);
+    }
     std::vector<const char*> argv; for(auto& option:options) argv.push_back(option.c_str());
     instance_=libvlc_new(static_cast<int>(argv.size()),argv.data());
     if(!instance_) throw std::runtime_error("VideoLAN libVLC could not initialize. Check runtime/plugins.");

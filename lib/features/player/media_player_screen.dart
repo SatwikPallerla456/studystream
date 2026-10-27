@@ -13,6 +13,10 @@ import 'package:go_router/go_router.dart';
 import 'package:media_kit/media_kit.dart';
 import '../../data/playback/playback_engine.dart';
 import 'native_playback_tools.dart';
+import 'advanced_video_workbench.dart';
+import 'video_session_tools.dart';
+import 'video_subtitles.dart';
+import '../../domain/services/video_playback_workspace.dart';
 import 'native_output_tools.dart';
 import 'advanced_player_screen.dart';
 import 'custom_player_strip.dart';
@@ -61,6 +65,9 @@ class MediaPlayerScreen extends ConsumerStatefulWidget {
 class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     with WidgetsBindingObserver {
   late final AppDatabase _database;
+  late final VideoSessionTools _videoTools;
+  OverlayEntry? _videoPip;
+  final _surfaceKey = GlobalKey();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Item? _item;
   MediaExperience _experience = const MediaExperience(
@@ -227,14 +234,17 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     _releaseLibraryProcessing = ref.read(libraryProcessingProvider).hold();
     WidgetsBinding.instance.addObserver(this);
     _database = ref.read(appDatabaseProvider);
+    _videoTools = VideoSessionTools(_database, widget.itemId);
     _remoteController = ref.read(remotePlaybackControllerProvider);
     _load();
   }
 
-  Future<void> _load() async {
+  Future<void> _load({double? restorePosition, bool? playAfter}) async {
+    _closeVideoPip();
     PlaybackEngine? initializing;
     try {
       if (_player != null) {
+        await _videoTools.detach();
         for (final subscription in _subscriptions) {
           await subscription.cancel();
         }
@@ -259,7 +269,18 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           _database,
         ).adjacentPart(title, item.id, forward: true);
       }
-      final requestedPosition = widget.initialPositionSeconds;
+      try {
+        await _videoTools.load();
+      } catch (_) {
+        _videoTools.error =
+            'Saved video-tool preferences could not be restored. The video can still play.';
+      }
+      final videoProfile = await VideoPlaybackWorkspace(
+        _database,
+        item.id,
+      ).activeProfile();
+      final requestedPosition =
+          restorePosition ?? widget.initialPositionSeconds;
       if (requestedPosition != null &&
           (!requestedPosition.isFinite || requestedPosition < 0))
         throw const FormatException('Invalid playback position');
@@ -290,7 +311,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       _playerSkin = await AdvancedPlayerRepository(_database).skin();
       final controlRepository = PlayerControlsRepository(_database);
       _controls = await controlRepository.load();
-      _behavior = await controlRepository.nativePreferences();
+      _behavior = {
+        ...await controlRepository.nativePreferences(),
+        ...?videoProfile?.nativePreferences,
+      };
       if (DesktopPlaybackWindows.available &&
           !ref.read(independentPlaybackWindowProvider) &&
           _behavior['embeddedVideo'] == 'false') {
@@ -305,7 +329,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         return;
       }
       final player = initializing = await PlaybackEngine.create(
-        nativePreferences: await controlRepository.nativePreferences(),
+        nativePreferences: _behavior,
         globalShortcuts: _controls.global,
         nextSnapshotSequence: () => _database.transaction(() async {
           await _database.customStatement(
@@ -332,8 +356,12 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           }),
         );
       }
-      final speed = saved?.playbackSpeed ?? preferences.defaultPlaybackSpeed;
+      final speed =
+          videoProfile?.speed ??
+          saved?.playbackSpeed ??
+          preferences.defaultPlaybackSpeed;
       final exactPosition =
+          restorePosition ??
           widget.initialPositionSeconds ??
           (_behavior['resume'] == 'false' ||
                   _behavior['continue'] == 'Never' ||
@@ -427,12 +455,29 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             await player.setOutputDevice(device);
           } catch (_) {
             await player.setOutputDevice('');
+            if (mounted)
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'The saved audio route is unavailable. Using System default; choose another route in Advanced video → Audio.',
+                  ),
+                ),
+              );
           }
         }
         await (await NativePlaybackSettings.load(
           _database,
           item.id,
         )).apply(player);
+        if (videoProfile != null && player.supports('equalizer')) {
+          await player.setEqualizer(
+            enabled: videoProfile.dialogue,
+            preamp: videoProfile.dialogue ? -5 : 0,
+            bands: videoProfile.dialogue
+                ? [-2, -2, -1, 0, 2, 4, 3, 1, 0, -1]
+                : List.filled(10, 0),
+          );
+        }
       }
       final subtitle = await _database.getSetting('subtitle.${item.id}');
       if (subtitle != null && await File(subtitle).exists()) {
@@ -447,6 +492,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         } on FileSystemException {
           // A removed companion can be chosen again from the track picker.
         }
+      }
+      if (_videoTools.subtitles.primary != null &&
+          _videoTools.subtitles.enabled) {
+        await player.setSubtitleTrack(SubtitleTrack.no());
       }
       if (resume > 0) {
         await player.seek(Duration(milliseconds: (resume * 1000).round()));
@@ -553,7 +602,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         )
         ..add(
           player.stream.completed.listen((completed) {
-            if (completed && !_navigating && !_completionHandled) {
+            if (completed &&
+                !_videoTools.loopEnabled &&
+                !_navigating &&
+                !_completionHandled) {
               _completionHandled = true;
               unawaited(
                 _completedNaturally(autoAdvance: preferences.autoAdvance),
@@ -583,6 +635,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         _speed = speed;
         _loading = false;
       });
+      await _videoTools.attach(player, _seekTo);
       if (DesktopPlaybackWindows.available)
         DesktopPlaybackWindows.prepareExit = _exitPreparation;
       final remoteQueueNamespace = ref
@@ -732,8 +785,10 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
           player is NativeVlcEngine &&
           player.supports('fullscreen'))
         await player.toggleFullscreen();
-      if (widget.fromQueue || _behavior['startPlaying'] != 'false')
+      if (playAfter ??
+          (widget.fromQueue || _behavior['startPlaying'] != 'false')) {
         await player.play();
+      }
     } catch (error) {
       await initializing?.dispose();
       if (_player != null) {
@@ -1479,6 +1534,8 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
       DesktopPlaybackWindows.prepareExit = null;
     WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
+    _closeVideoPip(rebuild: false);
+    _videoTools.dispose();
     _chromeTimer?.cancel();
     _remoteController.detach(_remoteOwner);
     for (final subscription in _subscriptions) {
@@ -1534,6 +1591,12 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                   showHome: true,
                   onBack: _back,
                   actions: [
+                    if (_experience.video && _player != null && !_loading)
+                      IconButton(
+                        tooltip: 'Advanced video',
+                        icon: const Icon(Icons.movie_filter_outlined),
+                        onPressed: _openVideoWorkbench,
+                      ),
                     if (_player is NativeVlcEngine)
                       IconButton(
                         tooltip: 'Advanced player workflows',
@@ -1787,6 +1850,87 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     }
   }
 
+  Widget _videoStage() => KeyedSubtree(
+    key: _surfaceKey,
+    child: VideoSubtitleLayer(
+      player: _player!,
+      presentation: _videoTools.subtitles,
+      child: _player!.videoSurface(),
+    ),
+  );
+
+  void _closeVideoPip({bool rebuild = true}) {
+    final entry = _videoPip;
+    if (entry == null) return;
+    _videoPip = null;
+    entry.remove();
+    entry.dispose();
+    if (rebuild && mounted) setState(() {});
+  }
+
+  void _toggleVideoPip() {
+    if (_videoPip != null) {
+      _closeVideoPip();
+      return;
+    }
+    final player = _player;
+    if (player == null || !mounted) return;
+    final location = GoRouterState.of(context).uri.toString();
+    final entry = OverlayEntry(
+      builder: (_) => FloatingVideoOverlay(
+        surface: _videoStage(),
+        player: player,
+        onClose: () {
+          GoRouter.of(context).go(location);
+          _closeVideoPip();
+        },
+        onBrowse: ref.read(independentPlaybackWindowProvider)
+            ? null
+            : () => context.push(
+                '/library/${Uri.encodeComponent(_item!.libraryId)}',
+              ),
+      ),
+    );
+    setState(() => _videoPip = entry);
+    Overlay.of(context, rootOverlay: true).insert(entry);
+  }
+
+  Future<void> _openVideoWorkbench() async {
+    final player = _player, item = _item;
+    if (player == null || item == null) return;
+    _closeVideoPip();
+    final profile = await Navigator.push<VideoPlaybackProfile>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AdvancedVideoWorkbench(
+          player: player,
+          database: _database,
+          client: ref.read(lanSyncClientProvider),
+          item: item,
+          tools: _videoTools,
+          onSeek: _seekTo,
+          onCapture: _takeSnapshot,
+          onPip: _toggleVideoPip,
+          onPositionIntent: () => _progressWriter?.markPositionIntent(),
+        ),
+      ),
+    );
+    if (profile == null || !mounted) return;
+    final position = player.state.position.inMilliseconds / 1000,
+        playing = player.state.playing;
+    await _progressWriter?.flush();
+    await _database.setSetting('player.video.profile.${item.id}', profile.id);
+    _videoTools.subtitles.size = profile.subtitleSize;
+    _videoTools.subtitles.color = profile.subtitleColor;
+    await _videoTools.save();
+    if (!mounted) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    await _load(restorePosition: position, playAfter: playing);
+  }
+
   Widget _nativeTransport() => CustomPlayerStrip(
     key: ValueKey(_customizationVersion),
     player: _player!,
@@ -1888,7 +2032,15 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                   behavior: HitTestBehavior.opaque,
                   onTap: () => _mouseAction(_controls.singleClick),
                   onDoubleTap: () => _mouseAction(_controls.doubleClick),
-                  child: _player!.videoSurface(),
+                  child: _videoPip == null
+                      ? _videoStage()
+                      : Center(
+                          child: FilledButton.icon(
+                            onPressed: _closeVideoPip,
+                            icon: const Icon(Icons.open_in_full),
+                            label: const Text('Return from picture-in-picture'),
+                          ),
+                        ),
                 ),
               ),
             ),

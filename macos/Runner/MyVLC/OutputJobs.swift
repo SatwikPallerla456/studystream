@@ -45,10 +45,14 @@ final class OutputJob: ObservableObject, Identifiable {
     private var timer: Timer?
     private var startedAt = Date()
     private let realtime: Bool
+    private let rangeStart: Int64
+    private let rangeEnd: Int64?
 
-    init(source: URL, destination: URL?, format: OutputFormat, preferences: PlayerPreferences, start: Int64 = 0,
+    init(source: URL, destination: URL?, format: OutputFormat, preferences: PlayerPreferences, start: Int64 = 0, end: Int64? = nil,
          stream: String? = nil, realtime: Bool = false) throws {
         self.destination = destination; self.realtime = realtime
+        self.rangeStart = start; self.rangeEnd = end
+        guard start >= 0, end == nil || end! > start else { throw PlayerError.media }
         title = stream != nil ? "Stream output" : (realtime ? "Recording" : "Convert \(source.lastPathComponent)")
         engine = try VLCEngine(headless: true, preferences: preferences, extraArguments: ["--aout=dummy"])
         guard destination != nil || stream != nil else { throw PlayerError.media }
@@ -59,12 +63,14 @@ final class OutputJob: ObservableObject, Identifiable {
         var options = [":sout=\(chain)", ":no-sout-all", ":sout-keep"]
         if !realtime { options += [":no-sout-transcode-high-priority", ":no-sout-keep", ":no-sout-display"] }
         if start > 0 { options.append(":start-time=\(Double(start) / 1000)") }
+        if let end { options.append(":stop-time=\(Double(end) / 1000)") }
         if !realtime { options.append(":no-input-clock") }
         try engine.open(source, options: options)
         timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
     }
     private func poll() {
-        progress = engine.duration > 0 ? Double(engine.time) / Double(engine.duration) : 0
+        let end = rangeEnd ?? engine.duration
+        progress = end > rangeStart ? min(1, max(0, Double(engine.time - rangeStart) / Double(end - rangeStart))) : 0
         if engine.state == libvlc_Error { finish(error: "libVLC could not create the output. Check codec support, destination permissions, and network binding.") }
         else if engine.state == libvlc_Ended { finish() }
         else if engine.isPlaying { state = realtime ? "Recording / streaming" : "Converting…" }

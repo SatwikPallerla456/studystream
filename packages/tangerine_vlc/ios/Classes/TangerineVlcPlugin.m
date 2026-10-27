@@ -80,6 +80,14 @@
     NSDictionary *allowed=@{@"fileCache":@"file-caching",@"networkCache":@"network-caching",@"audioLanguage":@"audio-language",@"subtitleLanguage":@"sub-language",@"encoding":@"subsdec-encoding"};
     NSDictionary *prefs=a[@"preferences"];
     for(NSString *key in allowed) { NSString *v=prefs[key]; if([v isKindOfClass:NSString.class]&&v.length<=256&&[v rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location==NSNotFound) [options addObject:[NSString stringWithFormat:@"--%@=%@",allowed[key],v]]; }
+    if ([prefs[@"normalize"] isEqual:@"true"]) { [options addObject:@"--audio-filter=normvol"]; [options addObject:@"--norm-max-level=2"]; }
+    NSDictionary *subtitleOptions=@{@"subtitleSize":@"freetype-fontsize",@"subtitleColor":@"freetype-color"};
+    NSCharacterSet *notDigits=[NSCharacterSet.decimalDigitCharacterSet invertedSet];
+    for (NSString *key in subtitleOptions) {
+      NSString *value=prefs[key];
+      if ([value isKindOfClass:NSString.class] && value.length>0 && value.length<=10 && [value rangeOfCharacterFromSet:notDigits].location==NSNotFound)
+        [options addObject:[NSString stringWithFormat:@"--%@=%@",subtitleOptions[key],value]];
+    }
     s.player=[[VLCMediaPlayer alloc]initWithOptions:options];
     if(!s.player){result([FlutterError errorWithCode:@"LIBVLC_RUNTIME" message:@"VideoLAN could not initialize this player." details:nil]);return;}
     s.player.drawable=s.surface;

@@ -398,8 +398,11 @@ final class MyVLCBridge: NSObject, FlutterPlugin, FlutterPlatformViewFactory {
                         guard panel.runModal() == .OK, let selected = panel.url else { result(nil); return }
                         destination = selected
                     }
+                    let start = mode == "record" ? engine.time : ((args["startMs"] as? NSNumber)?.int64Value ?? 0)
+                    let end = (args["endMs"] as? NSNumber)?.int64Value
+                    guard start >= 0, end == nil || (mode == "convert" && end! > start && engine.duration > 0 && end! <= engine.duration) else { throw PlayerError.media }
                     let job = try OutputJob(source: source, destination: destination, format: format,
-                        preferences: PlayerPreferences(), start: mode == "record" ? engine.time : 0,
+                        preferences: PlayerPreferences(), start: start, end: end,
                         stream: stream, realtime: mode != "convert")
                     let previous = jobs[id] ?? []
                     jobs[id] = previous.filter { !$0.finished } + Array(previous.filter { $0.finished }.suffix(3)) + [job]

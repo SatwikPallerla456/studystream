@@ -207,6 +207,7 @@ class NativeVlcEngine extends PlaybackEngine {
         'fullscreen',
         'snapshot',
         'outputs',
+        'clipExport',
         'cast',
         'windowPreferences',
         'escape',
@@ -571,6 +572,19 @@ class NativeVlcEngine extends PlaybackEngine {
     return destination;
   }
 
+  Future<String?> exportClip(Duration start, Duration end) async {
+    if (!supports('clipExport'))
+      throw UnsupportedError(
+        'Video-range export is unavailable in this backend.',
+      );
+    if (start < Duration.zero || end <= start || end > state.duration) {
+      throw const FormatException(
+        'Choose a clip range inside this video timeline.',
+      );
+    }
+    return startOutput(mode: 'convert', start: start, end: end);
+  }
+
   Future<String?> startOutput({
     required String mode,
     String format = 'mp4',
@@ -580,6 +594,8 @@ class NativeVlcEngine extends PlaybackEngine {
     bool audio = true,
     bool video = true,
     bool subtitles = false,
+    Duration? start,
+    Duration? end,
   }) => _call<String>('output.start', {
     'mode': mode,
     'format': format,
@@ -589,6 +605,8 @@ class NativeVlcEngine extends PlaybackEngine {
     'audio': audio,
     'video': video,
     'subtitles': subtitles,
+    if (start != null) 'startMs': start.inMilliseconds,
+    if (end != null) 'endMs': end.inMilliseconds,
   });
   Future<void> finishOutput(String id, {bool cancel = false}) async {
     await _call<void>('output.finish', {'jobId': id, 'cancel': cancel});

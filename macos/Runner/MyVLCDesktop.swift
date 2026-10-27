@@ -100,7 +100,8 @@ final class MyVLCDesktop: NSObject, NSWindowDelegate {
     @MainActor func toggleMini() {
         if let mini { mini.close(); return }
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340), styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
-        panel.title = "Tangerine · Mini-player"; panel.level = .floating; panel.isReleasedWhenClosed = false; panel.delegate = self
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.title = "Tangerine · Picture-in-picture"; panel.level = .floating; panel.isReleasedWhenClosed = false; panel.delegate = self
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 340))
         let video = NSView(frame: NSRect(x: 0, y: 52, width: 520, height: 288)); video.autoresizingMask = [.width, .height]
         content.addSubview(video)
