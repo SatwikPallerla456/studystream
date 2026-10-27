@@ -78,6 +78,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   MediaProgressWriter? _progressWriter;
   String? _error;
   bool _loading = true;
+  bool _videoProfileSelected = false;
   bool _navigating = false;
   bool _completionHandled = false;
   double _speed = 1;
@@ -279,6 +280,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         _database,
         item.id,
       ).activeProfile();
+      _videoProfileSelected = videoProfile != null;
       final requestedPosition =
           restorePosition ?? widget.initialPositionSeconds;
       if (requestedPosition != null &&
@@ -1951,6 +1953,28 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     onCustomize: () => _advanced(tab: 3),
   );
 
+  Future<void> _resetVideoProfile() async {
+    try {
+      await _database.setSetting('player.video.profile.${widget.itemId}', '');
+      if (!mounted) return;
+      setState(() {
+        _videoProfileSelected = false;
+        _loading = true;
+        _error = null;
+      });
+      await _load();
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The profile could not be reset. Check available storage and try again.',
+            ),
+          ),
+        );
+    }
+  }
+
   Widget _body() {
     if (_loading) return const _PlayerLoadingState();
     if (_error != null) {
@@ -1965,16 +1989,29 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
             icon: const Icon(Icons.arrow_back_rounded),
             label: const Text('Back to library'),
           ),
-          secondaryAction: OutlinedButton.icon(
-            onPressed: () {
-              setState(() {
-                _loading = true;
-                _error = null;
-              });
-              _load();
-            },
-            icon: const Icon(Icons.refresh_rounded),
-            label: const Text('Try again'),
+          secondaryAction: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _loading = true;
+                    _error = null;
+                  });
+                  _load();
+                },
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Try again'),
+              ),
+              if (_videoProfileSelected)
+                TextButton(
+                  onPressed: _resetVideoProfile,
+                  child: const Text(
+                    'Reset this title’s playback profile and retry',
+                  ),
+                ),
+            ],
           ),
           tone: ContentStateTone.error,
         ),
