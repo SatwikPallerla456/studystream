@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
-import 'package:drift/drift.dart' as d;
 import 'package:media_kit/media_kit.dart';
 import 'package:uuid/uuid.dart';
 import '../db/app_database.dart';
+import 'audio_reactivity.dart';
 import '../sync/lan_sync_client.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../domain/music/music_models.dart';
@@ -83,6 +83,7 @@ class MusicSession extends ChangeNotifier {
   double energy = 0, beat = 0, grit = 0;
   final List<double> envelope = [];
   String? error, meterMessage;
+  final _audioAnalyzer = PcmAudioAnalyzer();
   bool _filtersDisabled = false, _filterRecoveryPending = false;
   String get effectiveNormalization =>
       _filtersDisabled && profile.normalization == 'dynamic'
@@ -239,11 +240,8 @@ class MusicSession extends ChangeNotifier {
 
   void _disableFilters() {
     _filtersDisabled = true;
-    energy = beat = grit = 0;
-    envelope.clear();
-    meterMessage = profile.normalization == 'dynamic'
-        ? 'Audio effects are unavailable. Playing without dynamic normalization or audio analysis.'
-        : 'Audio analysis is unavailable. Music plays with ambient artwork.';
+    meterMessage =
+        'Dynamic normalization is unavailable in this backend. Audio response remains active.';
   }
 
   void _deckError(_Deck deck, String message) {
@@ -297,10 +295,7 @@ class MusicSession extends ChangeNotifier {
     await native.command(['set', key, value]);
     final actual = await native.getProperty(key);
     if (key == 'af') {
-      if (value.isNotEmpty &&
-          (!actual.contains('tangerine-energy') ||
-              value.contains('tangerine-normalize') &&
-                  !actual.contains('tangerine-normalize')))
+      if (value.isNotEmpty && !actual.contains('tangerine-normalize'))
         throw const FormatException(
           'The requested audio filter is unavailable',
         );
@@ -334,9 +329,7 @@ class MusicSession extends ChangeNotifier {
     );
     await _property(p, 'replaygain-preamp', '${profile.preamp}');
     await _property(p, 'replaygain-clip', 'no');
-    final filters = <String>[
-      '@tangerine-energy:lavfi=[astats=metadata=1:reset=1]',
-    ];
+    final filters = <String>[];
     if (profile.normalization == 'dynamic')
       filters.add('@tangerine-normalize:lavfi=[loudnorm=I=-16:TP=-1.5:LRA=11]');
     if (_filtersDisabled) {
@@ -771,7 +764,7 @@ class MusicSession extends ChangeNotifier {
   }
 
   Future<void> _meter() async {
-    if (_closed || player == null || _filtersDisabled) return;
+    if (_closed || player == null) return;
     _meterBusy = true;
     try {
       final p = player!, native = p.platform;
@@ -784,26 +777,16 @@ class MusicSession extends ChangeNotifier {
         beat *= .8;
         return;
       }
-      final values = await Future.wait(
-        [
-          'Overall.RMS_level',
-          'Overall.Peak_level',
-          '1.Zero_crossings_rate',
-        ].map(
-          (key) => native.getProperty(
-            'af-metadata/tangerine-energy/lavfi.astats.$key',
-          ),
-        ),
-      );
-      final rms = double.tryParse(values[0]),
-          peak = double.tryParse(values[1]),
-          zcr = double.tryParse(values[2]) ?? 0;
-      if (rms == null || peak == null || !rms.isFinite || !peak.isFinite) {
+      final measured = _audioAnalyzer.sample(track!.media, p.state.position);
+      if (measured == null) {
         energy *= .9;
         beat *= .85;
-        meterMessage = 'Audio response is waiting for level data.';
+        meterMessage = _audioAnalyzer.message ?? 'Preparing audio response…';
         return;
       }
+      final rms = measured.rmsDb,
+          peak = measured.peakDb,
+          zcr = measured.zeroCrossingRate;
       final level = math.pow(10, rms / 35).toDouble().clamp(0.0, 1.0);
       final elapsed = _clock.elapsedMilliseconds;
       final onset =
@@ -1033,6 +1016,7 @@ class MusicSession extends ChangeNotifier {
         await _saveListen(_nextListen!, completed: false, skipped: false);
         _nextListen = null;
       }
+      await _audioAnalyzer.close();
       await _nextDeck?.player.dispose();
       await _deck?.player.dispose();
       _deck = null;
