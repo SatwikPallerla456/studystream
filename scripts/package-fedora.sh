@@ -10,7 +10,7 @@ trap 'rm -rf "$top"' EXIT
 mkdir -p "$top/BUILD" "$top/RPMS" "$top/SOURCES" "$top/SPECS" "$top/SRPMS" dist
 icon="$(pwd)/assets/brand/tangerine.png"
 # RPM uses ~ for prereleases so the final 1.0.0 upgrades this preview correctly.
-rpmversion="${version/-/~}"
+rpmversion="${version/-/\~}"
 cat > "$top/SPECS/tangerine.spec" <<SPEC
 %global debug_package %{nil}
 %global __os_install_post %{nil}
