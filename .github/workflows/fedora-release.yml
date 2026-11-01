@@ -13,7 +13,7 @@ jobs:
     steps:
       - name: Install native build dependencies
         run: |
-          dnf install -y git curl ca-certificates unzip xz jq clang cmake ninja-build pkgconf-pkg-config gcc-c++ gtk3-devel xz-devel libsecret-devel libnotify-devel libayatana-appindicator-gtk3-devel vlc-devel mpv-devel libepoxy-devel wayland-devel rpm-build
+          dnf install -y which git curl ca-certificates unzip xz jq clang cmake ninja-build pkgconf-pkg-config gcc-c++ gtk3-devel xz-devel libsecret-devel libnotify-devel libayatana-appindicator-gtk3-devel vlc-devel mpv-devel libepoxy-devel wayland-devel rpm-build
           curl -fL https://copr.fedorainfracloud.org/coprs/philn/wpewebkit/repo/fedora-44/philn-wpewebkit-fedora-44.repo -o /etc/yum.repos.d/wpewebkit.repo
           dnf install -y 'pkgconfig(wpe-webkit-2.0)' 'pkgconfig(wpe-1.0)'
       - uses: actions/checkout@v4
