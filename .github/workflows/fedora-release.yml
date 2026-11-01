@@ -4,6 +4,9 @@ on:
     branches: [codex/studystream-reliability]
     paths: ['.github/workflows/fedora-release.yml', 'scripts/package-fedora.sh', 'lib/**', 'packages/**', 'linux/**', 'pubspec.*']
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:

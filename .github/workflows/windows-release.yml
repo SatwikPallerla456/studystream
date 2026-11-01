@@ -4,11 +4,15 @@ on:
     branches: [codex/studystream-reliability]
     paths: ['.github/workflows/windows-release.yml', 'packaging/windows.iss', 'lib/**', 'packages/**', 'windows/**', 'pubspec.*']
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   windows:
     runs-on: windows-2022
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -17,16 +21,19 @@ jobs:
           channel: stable
           cache: true
       - name: Prepare VLC runtime and SDK
+        timeout-minutes: 6
         shell: pwsh
         run: |
-          Invoke-WebRequest https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.zip -OutFile "$env:RUNNER_TEMP/vlc.zip"
+          curl.exe -fL --max-time 180 https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.zip -o "$env:RUNNER_TEMP/vlc.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'VLC runtime download failed' }
           Expand-Archive "$env:RUNNER_TEMP/vlc.zip" "$env:RUNNER_TEMP/vlc"
           $root = "$env:RUNNER_TEMP/vlc/vlc-3.0.21"
-          Invoke-WebRequest https://download.videolan.org/pub/videolan/vlc/3.0.21/vlc-3.0.21.tar.xz -OutFile "$env:RUNNER_TEMP/vlc-source.tar.xz"
-          tar -xf "$env:RUNNER_TEMP/vlc-source.tar.xz" -C "$env:RUNNER_TEMP" vlc-3.0.21/include/vlc
-          if ($LASTEXITCODE -ne 0) { throw 'VLC headers could not be extracted' }
+          git clone --depth 1 --branch 3.0.21 --filter=blob:none --sparse https://github.com/videolan/vlc.git "$env:RUNNER_TEMP/vlc-headers"
+          if ($LASTEXITCODE -ne 0) { throw 'VLC header checkout failed' }
+          git -C "$env:RUNNER_TEMP/vlc-headers" sparse-checkout set include/vlc
+          if ($LASTEXITCODE -ne 0) { throw 'VLC header extraction failed' }
           New-Item "$root/sdk/include" -ItemType Directory -Force
-          Copy-Item "$env:RUNNER_TEMP/vlc-3.0.21/include/vlc" "$root/sdk/include/vlc" -Recurse
+          Copy-Item "$env:RUNNER_TEMP/vlc-headers/include/vlc" "$root/sdk/include/vlc" -Recurse
           if (!(Test-Path "$root/sdk/include/vlc/vlc.h")) { throw 'VLC SDK missing' }
           "VLC_ROOT=$root" >> $env:GITHUB_ENV
       - run: flutter pub get --enforce-lockfile
