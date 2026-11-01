@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:media_kit/media_kit.dart';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -10,6 +11,8 @@ import 'package:study_stream/features/music/music_art.dart';
 class _VisualSession extends ChangeNotifier implements MusicSession {
   @override
   MusicTrack? get track => null;
+  @override
+  Player? get player => null;
   @override
   double energy = .05, beat = 0, grit = 0;
   @override

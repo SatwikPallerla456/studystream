@@ -13,9 +13,9 @@ import '../../domain/music/music_repository.dart';
 import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/item_artwork.dart';
 import '../../shared/widgets/timed_word_text.dart';
-import '../../shared/widgets/lesson_tools_sheet.dart';
 import '../../shared/widgets/tangerine_controls.dart';
 import 'music_art.dart';
+import 'immersive_music_player.dart';
 import 'music_provider.dart';
 import 'music_library_screen.dart';
 
@@ -38,6 +38,7 @@ class MusicPlayerScreen extends ConsumerStatefulWidget {
 class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
     with WidgetsBindingObserver {
   String? _error;
+  bool _immersive = true;
   Future<void> _run(Future<void> Function() action) async {
     try {
       await action();
@@ -203,22 +204,6 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
     });
   }
 
-  Future<void> _notes(MusicSession session) async {
-    final track = session.track;
-    if (track == null) return;
-    await showLessonToolsSheet(
-      context: context,
-      database: ref.read(appDatabaseProvider),
-      item: track.item,
-      title: 'Listening notes & bookmarks',
-      currentPositionSeconds:
-          (session.player?.state.position.inMilliseconds ?? 0) / 1000,
-      onJumpToPosition: (seconds) => _run(
-        () => session.seek(Duration(milliseconds: (seconds * 1000).round())),
-      ),
-    );
-  }
-
   Future<void> _preferences(MusicSession session) async {
     var gapless = session.gapless,
         fade = session.crossfade,
@@ -337,6 +322,65 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
               ),
             ),
           );
+        if (_immersive)
+          return ImmersiveMusicPlayer(
+            session: session,
+            onPlay: ref.read(musicSessionProvider.notifier).resume,
+            error: _error,
+            run: _run,
+            onBack: () {
+              if (context.canPop()) {
+                context.pop();
+              } else {
+                context.go('/music');
+              }
+            },
+            onShuffle: () => _run(
+              () => ref
+                  .read(playerLibraryRepositoryProvider)
+                  .setShuffle(!session.shuffled),
+            ),
+            onRepeat: () => _run(
+              () => ref
+                  .read(playerLibraryRepositoryProvider)
+                  .setRepeat(
+                    session.repeatOne
+                        ? QueueRepeat.all
+                        : session.repeatAll
+                        ? QueueRepeat.off
+                        : QueueRepeat.one,
+                  ),
+            ),
+            onAction: (action) {
+              switch (action) {
+                case 'import':
+                  _import(session);
+                case 'edit':
+                  _edit(session);
+                case 'queue':
+                  context.push(
+                    '/playlists?current=${Uri.encodeComponent(track.item.id)}',
+                  );
+                case 'library':
+                  context.push('/music');
+                case 'settings':
+                  _preferences(session);
+                case 'outputs':
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => MusicLibraryScreen(initialTab: 3),
+                    ),
+                  );
+                case 'details':
+                  setState(() => _immersive = false);
+                case 'native':
+                  context.push(
+                    '/player/${Uri.encodeComponent(track.item.id)}?native=1',
+                  );
+              }
+            },
+          );
         final reduced =
             MediaQuery.disableAnimationsOf(context) ||
             session.visualStyle == 'off';
@@ -357,9 +401,9 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
               title: const Text('Now playing'),
               actions: [
                 IconButton(
-                  tooltip: 'Notes & bookmarks',
-                  onPressed: () => _notes(session),
-                  icon: const Icon(Icons.note_alt_outlined),
+                  tooltip: 'Immersive lyrics',
+                  icon: const Icon(Icons.lyrics_outlined),
+                  onPressed: () => setState(() => _immersive = true),
                 ),
                 IconButton(
                   tooltip: 'Queue & playlists',
@@ -677,11 +721,6 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                               onPressed: () => _import(session),
                               icon: const Icon(Icons.file_open_outlined),
                               label: const Text('Import lyrics / CUE'),
-                            ),
-                            TextButton.icon(
-                              onPressed: () => _notes(session),
-                              icon: const Icon(Icons.bookmark_outline),
-                              label: const Text('Notes & bookmarks'),
                             ),
                           ],
                         ),

@@ -14,11 +14,32 @@ class MusicSessionOwner extends Notifier<MusicSession?>
   Future<void> _pending = Future.value();
   MusicSession? _owned;
   Object? _remote;
+  VoidCallback? _releaseProcessing;
+  bool _disposed = false;
+
+  void _syncProcessing() {
+    if (_disposed) return;
+    if (_owned?.player?.state.playing == true) {
+      _releaseProcessing ??= ref.read(libraryProcessingProvider).hold();
+    } else {
+      _releaseProcessing?.call();
+      _releaseProcessing = null;
+    }
+  }
+
+  void _unbindProcessing(MusicSession? session) {
+    session?.removeListener(_syncProcessing);
+    _releaseProcessing?.call();
+    _releaseProcessing = null;
+  }
+
   @override
   MusicSession? build() {
     WidgetsBinding.instance.addObserver(this);
     ref.onDispose(() {
       WidgetsBinding.instance.removeObserver(this);
+      _disposed = true;
+      _unbindProcessing(_owned);
       _owned?.dispose();
     });
     return null;
@@ -121,6 +142,7 @@ class MusicSessionOwner extends Notifier<MusicSession?>
         return;
       }
       final previous = state;
+      _unbindProcessing(previous);
       state = null;
       _owned = null;
       await previous?.close();
@@ -132,10 +154,16 @@ class MusicSessionOwner extends Notifier<MusicSession?>
       );
       _owned = session;
       state = session;
+      _releaseProcessing = ref.read(libraryProcessingProvider).hold();
       try {
         await session.initialize(id, fromQueue: fromQueue, radio: radio);
-        if (identical(_owned, session)) _attach(session);
+        if (identical(_owned, session) && !_disposed) {
+          session.addListener(_syncProcessing);
+          _syncProcessing();
+          _attach(session);
+        }
       } catch (_) {
+        _unbindProcessing(session);
         state = null;
         _owned = null;
         await session.close();
@@ -149,6 +177,7 @@ class MusicSessionOwner extends Notifier<MusicSession?>
 
   Future<void> stop() async {
     final session = state;
+    _unbindProcessing(session);
     state = null;
     _owned = null;
     ref.read(remotePlaybackControllerProvider).detach(_remote);

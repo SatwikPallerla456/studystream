@@ -192,9 +192,14 @@ class StudyMediaPlayerApp extends ConsumerWidget {
                   ),
                 ),
               ),
-              if (!_router.routeInformationProvider.value.uri.path.startsWith(
+              if (!const [
                 '/listen/',
-              ))
+                '/player/',
+                '/book/',
+                '/pdf/',
+                '/photo/',
+                '/resource/',
+              ].any(_router.routeInformationProvider.value.uri.path.startsWith))
                 MusicDock(
                   onOpen: () {
                     final item = ref.read(musicSessionProvider)?.track?.item;

@@ -117,20 +117,20 @@ class _CompactShell extends StatelessWidget {
         titleSpacing: AppSpace.md,
         title: const _Brand(compact: true),
         actions: [
-          IconButton(
-            tooltip: 'Queue & playlists',
-            onPressed: () => context.push('/playlists'),
-            icon: const Icon(Icons.queue_music),
-          ),
-          IconButton(
-            tooltip: 'Network',
-            onPressed: () => context.push('/network'),
-            icon: const Icon(Icons.lan_outlined),
-          ),
-          IconButton(
-            tooltip: 'Player / Server mode',
-            onPressed: () => context.push('/mode'),
-            icon: const Icon(Icons.swap_horiz_rounded),
+          PopupMenuButton<String>(
+            tooltip: 'Application tools',
+            onSelected: (route) => context.push(route),
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: '/playlists',
+                child: Text('Queue & playlists'),
+              ),
+              PopupMenuItem(value: '/network', child: Text('Network')),
+              PopupMenuItem(
+                value: '/mode',
+                child: Text('Player / Server mode'),
+              ),
+            ],
           ),
         ],
       ),

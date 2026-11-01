@@ -23,7 +23,7 @@ class MusicAtmosphere extends ConsumerStatefulWidget {
 }
 
 class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   List<Color> _palette = const [
     Color(0xffb15d3c),
     Color(0xff515d7d),
@@ -34,6 +34,10 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
     vsync: this,
     duration: const Duration(milliseconds: 1200),
     value: 1,
+  );
+  late final _flow = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 36),
   );
   List<Color> get _currentPalette => [
     for (var i = 0; i < 3; i++)
@@ -46,6 +50,7 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
   @override
   void dispose() {
     _generation++;
+    _flow.dispose();
     _fade.dispose();
     super.dispose();
   }
@@ -110,7 +115,15 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
               _fromPalette = _currentPalette;
               _palette = [
                 ...colors,
-                for (var i = colors.length; i < 3; i++) colors.first,
+                for (var i = colors.length; i < 3; i++)
+                  HSLColor.fromColor(colors.first)
+                      .withHue(
+                        (HSLColor.fromColor(colors.first).hue +
+                                (i == 1 ? 14 : 350)) %
+                            360,
+                      )
+                      .withLightness(i == 1 ? .34 : .48)
+                      .toColor(),
               ];
             });
             _fade.forward(from: 0);
@@ -155,6 +168,12 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
       builder: (context, _) {
         final animated = !reduced && session.visualStyle != 'off';
         final strength = animated ? session.visualIntensity : 0.0;
+        final flowing =
+            animated &&
+            session.visualIntensity > 0 &&
+            session.player?.state.playing == true;
+        if (flowing && !_flow.isAnimating) _flow.repeat();
+        if (!flowing && _flow.isAnimating) _flow.stop();
         final rough = session.visualStyle == 'calm'
             ? 0.0
             : session.visualStyle == 'punchy'
@@ -169,7 +188,8 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
                 session.energy * strength,
                 session.beat * strength,
                 rough,
-                session.envelope,
+                () => animated ? _flow.value : 0,
+                _flow,
               ),
             ),
             DecoratedBox(
@@ -178,8 +198,8 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    Colors.black.withValues(alpha: .18),
-                    Colors.black.withValues(alpha: .65),
+                    Colors.black.withValues(alpha: .06),
+                    Colors.black.withValues(alpha: .22),
                   ],
                 ),
               ),
@@ -198,76 +218,51 @@ class _AtmospherePainter extends CustomPainter {
     this.energy,
     this.beat,
     this.grit,
-    this.samples,
-  );
+    this.phase,
+    Listenable motion,
+  ) : super(repaint: motion);
   final List<Color> colors;
-  final List<double> samples;
   final double energy, beat, grit;
+  final double Function() phase;
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(
-      Offset.zero & size,
-      Paint()..color = const Color(0xff11151c),
-    );
-    final push = energy * .08 + beat * .04 * (.4 + grit);
-    final positions = [
-      Offset(size.width * (.23 - push), size.height * .22),
-      Offset(size.width * (.8 + push), size.height * .47),
-      Offset(size.width * .4, size.height * (.92 - push)),
-    ];
-    for (var i = 0; i < 3; i++) {
-      final radius = size.longestSide * (.6 + energy * .05);
+    final t = phase() * math.pi * 2;
+    final base = HSLColor.fromColor(colors.first)
+        .withSaturation(
+          (HSLColor.fromColor(colors.first).saturation * .85).clamp(.25, .8),
+        )
+        .withLightness(.19 + energy * .025)
+        .toColor();
+    canvas.drawRect(Offset.zero & size, Paint()..color = base);
+    final force = .04 + energy * .11 + beat * .025;
+    for (var i = 0; i < 5; i++) {
+      final angle = t + i * 2.1;
+      final x = .5 + math.sin(angle * (i.isEven ? 1 : 2)) * (.34 + force);
+      final y =
+          .5 +
+          math.cos(angle + i) * (.36 + force) +
+          math.sin(angle * 3) * grit * .045;
+      final center = Offset(size.width * x, size.height * y);
+      final radius =
+          size.longestSide * (.65 + .07 * math.sin(angle) + energy * .1);
+      final source = HSLColor.fromColor(colors[i % 3]);
+      final color = source
+          .withLightness(
+            (source.lightness * .83 + .03 * math.sin(angle)).clamp(.25, .48),
+          )
+          .toColor();
       canvas.drawCircle(
-        positions[i],
+        center,
         radius,
         Paint()
           ..shader = RadialGradient(
             colors: [
-              colors[i].withValues(alpha: .28 + energy * .10 + beat * .07),
-              colors[i].withValues(alpha: 0),
+              color.withValues(alpha: .65 + energy * .12),
+              color.withValues(alpha: .22),
+              color.withValues(alpha: 0),
             ],
-            stops: const [0, 1],
-          ).createShader(Rect.fromCircle(center: positions[i], radius: radius)),
-      );
-    }
-    if (grit > .5 && beat > 0.01) {
-      final path = Path();
-      final center = Offset(size.width * .5, size.height * .42),
-          radius = size.shortestSide * (.3 + beat * .08);
-      for (var i = 0; i < 20; i++) {
-        final a = i * math.pi / 10;
-        final r = radius * (i.isEven ? 1 : 1 - grit * .07);
-        final point = center + Offset(math.cos(a) * r, math.sin(a) * r);
-        if (i == 0)
-          path.moveTo(point.dx, point.dy);
-        else
-          path.lineTo(point.dx, point.dy);
-      }
-      path.close();
-      canvas.drawPath(
-        path,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1 + beat * 2
-          ..color = colors[1].withValues(alpha: beat * .18),
-      );
-    }
-    if (samples.length > 1 && energy > 0) {
-      final path = Path();
-      for (var i = 0; i < samples.length; i++) {
-        final x = size.width * i / (samples.length - 1),
-            y = size.height - 16 - samples[i] * 32 * (.3 + grit);
-        if (i == 0)
-          path.moveTo(x, y);
-        else
-          path.lineTo(x, y);
-      }
-      canvas.drawPath(
-        path,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5
-          ..color = colors[0].withValues(alpha: .25),
+            stops: const [0, .48, 1],
+          ).createShader(Rect.fromCircle(center: center, radius: radius)),
       );
     }
   }
