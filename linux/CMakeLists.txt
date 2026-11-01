@@ -74,6 +74,19 @@ set_target_properties(${BINARY_NAME}
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# The pinned forge package still exports its pre-fork native target/header names.
+# Bridge those names without editing Flutter-generated files or the pub cache.
+if(TARGET flutter_inappwebview_linux_plugin AND NOT TARGET flutter_inappwebview_forge_linux_plugin)
+  add_library(flutter_inappwebview_forge_linux_plugin ALIAS flutter_inappwebview_linux_plugin)
+  set(WEBVIEW_COMPAT_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/webview_compat/include")
+  file(MAKE_DIRECTORY "${WEBVIEW_COMPAT_INCLUDE}/flutter_inappwebview_forge_linux")
+  file(WRITE "${WEBVIEW_COMPAT_INCLUDE}/flutter_inappwebview_forge_linux/flutter_inappwebview_linux_plugin.h"
+    "#include <flutter_inappwebview_linux/flutter_inappwebview_linux_plugin.h>\n")
+  target_include_directories(${BINARY_NAME} PRIVATE "${WEBVIEW_COMPAT_INCLUDE}")
+  # WPE runtime and dependencies are installed by the Debian package manager.
+endif()
+
+
 
 # === Installation ===
 # By default, "installing" just makes a relocatable bundle in the build

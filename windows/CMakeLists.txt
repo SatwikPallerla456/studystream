@@ -57,6 +57,19 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# The pinned forge package still exports its pre-fork native target/header names.
+# Bridge those names without editing Flutter-generated files or the pub cache.
+if(TARGET flutter_inappwebview_windows_plugin AND NOT TARGET flutter_inappwebview_forge_windows_plugin)
+  add_library(flutter_inappwebview_forge_windows_plugin ALIAS flutter_inappwebview_windows_plugin)
+  set(WEBVIEW_COMPAT_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/webview_compat/include")
+  file(MAKE_DIRECTORY "${WEBVIEW_COMPAT_INCLUDE}/flutter_inappwebview_forge_windows")
+  file(WRITE "${WEBVIEW_COMPAT_INCLUDE}/flutter_inappwebview_forge_windows/flutter_inappwebview_windows_plugin_c_api.h"
+    "#include <flutter_inappwebview_windows/flutter_inappwebview_windows_plugin_c_api.h>\n")
+  target_include_directories(${BINARY_NAME} PRIVATE "${WEBVIEW_COMPAT_INCLUDE}")
+  list(APPEND PLUGIN_BUNDLED_LIBRARIES ${flutter_inappwebview_windows_bundled_libraries})
+endif()
+
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can
