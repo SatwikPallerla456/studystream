@@ -1,0 +1,43 @@
+name: Windows installer
+on:
+  push:
+    branches: [codex/studystream-reliability]
+    paths: ['.github/workflows/windows-release.yml', 'packaging/windows.iss']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.6'
+          channel: stable
+          cache: true
+      - name: Prepare VLC runtime and SDK
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.zip -OutFile "$env:RUNNER_TEMP/vlc.zip"
+          Expand-Archive "$env:RUNNER_TEMP/vlc.zip" "$env:RUNNER_TEMP/vlc"
+          $root = "$env:RUNNER_TEMP/vlc/vlc-3.0.21"
+          if (!(Test-Path "$root/sdk/include/vlc/vlc.h")) { throw 'VLC SDK missing' }
+          "VLC_ROOT=$root" >> $env:GITHUB_ENV
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build windows --release
+      - name: Build installer
+        shell: pwsh
+        run: |
+          New-Item dist -ItemType Directory -Force
+          Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile dist/vc_redist.x64.exe
+          $signature = Get-AuthenticodeSignature dist/vc_redist.x64.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') { throw 'Invalid Microsoft runtime signature' }
+          & "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe" packaging/windows.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tangerine-windows-x64
+          path: dist/Tangerine-*-windows-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 14
