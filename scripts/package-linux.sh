@@ -3,6 +3,7 @@
 set -euo pipefail
 version="${1:?Pass the release version}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+~-][a-zA-Z0-9.]+)?$ ]] || { echo 'Invalid package version' >&2; exit 1; }
+debversion="${version/-/~}"
 bundle=build/linux/x64/release/bundle
 [[ -x "$bundle/study_stream" ]] || { echo 'Linux release bundle missing' >&2; exit 1; }
 stage=$(mktemp -d)
@@ -24,7 +25,7 @@ StartupNotify=true
 DESKTOP
 cat > "$stage/DEBIAN/control" <<CONTROL
 Package: tangerine
-Version: $version
+Version: $debversion
 Section: video
 Priority: optional
 Architecture: amd64
