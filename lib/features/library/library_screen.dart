@@ -20,6 +20,7 @@ import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/study_animated_list.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../shared/widgets/study_motion.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import 'typed_library_screen.dart';
@@ -764,26 +765,18 @@ class _CompactLibraryLayout extends StatelessWidget {
             0,
           ),
           sliver: SliverToBoxAdapter(
-            child: DropdownButtonFormField<String>(
-              initialValue: selected.section.id,
-              isExpanded: true,
-              decoration: const InputDecoration(
-                labelText: 'Section',
-                prefixIcon: Icon(Icons.segment_rounded),
-              ),
-              items: [
+            child: TangerineChoicePicker<String>(
+              label: 'Section',
+              value: selected.section.id,
+              choices: [
                 for (final entry in sections)
-                  DropdownMenuItem(
+                  TangerineChoice(
                     value: entry.section.id,
-                    child: Text(
-                      '${cleanDisplayTitle(entry.section.title)} · ${entry.completedItems}/${entry.totalItems}',
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    label:
+                        '${cleanDisplayTitle(entry.section.title)} · ${entry.completedItems}/${entry.totalItems}',
                   ),
               ],
-              onChanged: (value) {
-                if (value != null) onSelectSection(value);
-              },
+              onChanged: onSelectSection,
             ),
           ),
         ),
@@ -848,8 +841,8 @@ class _LibraryHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StudySurface(
-      emphasized: true,
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppSpace.md),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 700;
@@ -938,7 +931,7 @@ class _LibraryHero extends StatelessWidget {
                       label: const Text('Resume learning'),
                     ),
                   ),
-                  OutlinedButton.icon(
+                  TextButton.icon(
                     onPressed: onEdit,
                     icon: const Icon(Icons.edit_outlined),
                     label: const Text('Edit details'),

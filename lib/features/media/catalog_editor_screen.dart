@@ -16,6 +16,8 @@ import 'catalog_candidate_artwork.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
+import '../../core/theme/app_theme.dart';
 import '../../shared/widgets/item_artwork.dart' show catalogArtworkPathProvider;
 
 /// Matching changes descriptive identity; editing changes sparse user fields.
@@ -484,6 +486,7 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
   @override
   Widget build(BuildContext context) => DefaultTabController(
     length: 2,
+    animationDuration: AppMotion.resolve(context, AppMotion.standard),
     initialIndex: 0,
     child: Scaffold(
       appBar: AppTopBar(
@@ -523,242 +526,287 @@ class _CatalogEditorState extends ConsumerState<CatalogEditorScreen> {
                     ],
                   ),
                 if (_busy) const LinearProgressIndicator(),
-                const TabBar(
-                  tabs: [
-                    Tab(text: 'Find match'),
-                    Tab(text: 'Edit details'),
-                  ],
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 8,
+                  ),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: TabBar(
+                      isScrollable: true,
+                      splashBorderRadius: BorderRadius.circular(16),
+                      tabAlignment: TabAlignment.start,
+                      dividerColor: Colors.transparent,
+                      indicatorSize: TabBarIndicatorSize.tab,
+                      indicator: BoxDecoration(
+                        color: Theme.of(context).colorScheme.primaryContainer,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      labelColor: Theme.of(
+                        context,
+                      ).colorScheme.onPrimaryContainer,
+                      unselectedLabelColor: Theme.of(
+                        context,
+                      ).colorScheme.onSurfaceVariant,
+                      tabs: const [
+                        Tab(text: 'Find match'),
+                        Tab(text: 'Edit details'),
+                      ],
+                    ),
+                  ),
                 ),
                 Expanded(
                   child: TabBarView(
                     children: [
-                      ListView(
-                        padding: const EdgeInsets.all(24),
-                        children: [
-                          Text(
-                            'Current match: ${_decision?['state'] ?? 'unmatched'}${_decision?['provider_id'] == null ? '' : ' · ${OnlineCatalogProvider.label(_decision!['provider_id'] as String)}'}',
-                          ),
-                          Text(widget.item.filename),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'Manual search: review candidates and choose the correct match. Automatic library identification keeps your selection and any cleared match.',
-                          ),
-                          const SizedBox(height: 16),
-                          DropdownButtonFormField<String>(
-                            initialValue: _source,
-                            decoration: const InputDecoration(
-                              labelText: 'Metadata provider',
-                            ),
-                            items: [
-                              for (final source in _sources)
-                                DropdownMenuItem(
-                                  value: source,
-                                  child: Text(
-                                    source == 'local-json'
-                                        ? 'Offline JSON catalog'
-                                        : OnlineCatalogProvider.label(source),
+                      Align(
+                        alignment: Alignment.topCenter,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 860),
+                          child: ListView(
+                            padding: const EdgeInsets.all(24),
+                            children: [
+                              Text(
+                                'Current match: ${_decision?['state'] ?? 'unmatched'}${_decision?['provider_id'] == null ? '' : ' · ${OnlineCatalogProvider.label(_decision!['provider_id'] as String)}'}',
+                              ),
+                              Text(widget.item.filename),
+                              const SizedBox(height: 16),
+                              const Text(
+                                'Manual search: review candidates and choose the correct match. Automatic library identification keeps your selection and any cleared match.',
+                              ),
+                              const SizedBox(height: 16),
+                              TangerineChoicePicker<String>(
+                                value: _source,
+                                label: 'Provider',
+                                icon: Icons.manage_search_rounded,
+                                choices: [
+                                  for (final source in _sources)
+                                    TangerineChoice(
+                                      value: source,
+                                      label: source == 'local-json'
+                                          ? 'Offline JSON catalog'
+                                          : OnlineCatalogProvider.label(source),
+                                    ),
+                                ],
+                                onChanged: _busy
+                                    ? null
+                                    : (source) => setState(() {
+                                        _source = source;
+                                        _candidates = [];
+                                        _searched = false;
+                                        _error = null;
+                                      }),
+                              ),
+                              Align(
+                                alignment: AlignmentDirectional.centerStart,
+                                child: TextButton.icon(
+                                  onPressed: _busy
+                                      ? null
+                                      : () => Navigator.of(context).push(
+                                          MaterialPageRoute<void>(
+                                            builder: (_) =>
+                                                const MetadataProviderSettings(),
+                                          ),
+                                        ),
+                                  icon: const Icon(Icons.settings_outlined),
+                                  label: const Text('Provider setup & credits'),
+                                ),
+                              ),
+                              if (_source == 'local-json') ...[
+                                const Text(
+                                  'Open a JSON array containing id, title and optional catalog fields.',
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: _busy ? null : _chooseCatalog,
+                                  icon: const Icon(Icons.file_open_outlined),
+                                  label: Text(
+                                    _file ?? 'Open local JSON catalog',
                                   ),
                                 ),
-                            ],
-                            onChanged: _busy
-                                ? null
-                                : (source) => setState(() {
-                                    _source = source!;
-                                    _candidates = [];
-                                    _searched = false;
-                                    _error = null;
-                                  }),
-                          ),
-                          TextButton.icon(
-                            onPressed: _busy
-                                ? null
-                                : () => Navigator.of(context).push(
-                                    MaterialPageRoute<void>(
-                                      builder: (_) =>
-                                          const MetadataProviderSettings(),
-                                    ),
-                                  ),
-                            icon: const Icon(Icons.settings_outlined),
-                            label: const Text('Provider setup & credits'),
-                          ),
-                          if (_source == 'local-json') ...[
-                            const Text(
-                              'Open a JSON array containing id, title and optional catalog fields.',
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _busy ? null : _chooseCatalog,
-                              icon: const Icon(Icons.file_open_outlined),
-                              label: Text(_file ?? 'Open local JSON catalog'),
-                            ),
-                          ] else
-                            Text(
-                              'Search sends this title and optional year to ${OnlineCatalogProvider.label(_source)}. Files and private Study data stay on your device.',
-                            ),
-                          const SizedBox(height: 16),
-                          TextField(
-                            controller: _query,
-                            enabled: !_busy,
-                            onChanged: _clearCandidates,
-                            decoration: const InputDecoration(
-                              labelText: 'Title (or ID for an offline catalog)',
-                            ),
-                            onSubmitted: (_) => _perform(_search),
-                          ),
-                          TextField(
-                            controller: _year,
-                            enabled: !_busy,
-                            onChanged: _clearCandidates,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: 'Year (optional)',
-                            ),
-                          ),
-                          if (_kind == LibraryKind.television &&
-                              _source != 'local-json') ...[
-                            const SizedBox(height: 12),
-                            const Text(
-                              'For episode details, enter season and episode. Leave both empty for show-level details.',
-                            ),
-                            Wrap(
-                              spacing: 12,
-                              runSpacing: 12,
-                              children: [
-                                for (final entry in [
-                                  (_season, 'Season'),
-                                  (_episode, 'Episode'),
-                                  (_episodeEnd, 'Last episode (shared file)'),
-                                ])
-                                  SizedBox(
-                                    width: 200,
-                                    child: TextField(
-                                      controller: entry.$1,
-                                      enabled: !_busy,
-                                      keyboardType: TextInputType.number,
-                                      decoration: InputDecoration(
-                                        labelText: entry.$2,
+                              ] else
+                                Text(
+                                  'Search sends this title and optional year to ${OnlineCatalogProvider.label(_source)}. Files and private Study data stay on your device.',
+                                ),
+                              const SizedBox(height: 16),
+                              TextField(
+                                controller: _query,
+                                enabled: !_busy,
+                                onChanged: _clearCandidates,
+                                decoration: const InputDecoration(
+                                  labelText:
+                                      'Title (or ID for an offline catalog)',
+                                ),
+                                onSubmitted: (_) => _perform(_search),
+                              ),
+                              const SizedBox(height: 16),
+                              TextField(
+                                controller: _year,
+                                enabled: !_busy,
+                                onChanged: _clearCandidates,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: 'Year (optional)',
+                                ),
+                              ),
+                              if (_kind == LibraryKind.television &&
+                                  _source != 'local-json') ...[
+                                const SizedBox(height: 12),
+                                const Text(
+                                  'For episode details, enter season and episode. Leave both empty for show-level details.',
+                                ),
+                                Wrap(
+                                  spacing: 12,
+                                  runSpacing: 12,
+                                  children: [
+                                    for (final entry in [
+                                      (_season, 'Season'),
+                                      (_episode, 'Episode'),
+                                      (
+                                        _episodeEnd,
+                                        'Last episode (shared file)',
                                       ),
-                                    ),
-                                  ),
+                                    ])
+                                      SizedBox(
+                                        width: 200,
+                                        child: TextField(
+                                          controller: entry.$1,
+                                          enabled: !_busy,
+                                          keyboardType: TextInputType.number,
+                                          decoration: InputDecoration(
+                                            labelText: entry.$2,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
                               ],
-                            ),
-                          ],
-                          const SizedBox(height: 16),
-                          FilledButton(
-                            onPressed: _activeProvider == null || _busy
-                                ? null
-                                : () => _perform(_search),
-                            child: const Text('Search for matches'),
-                          ),
-                          for (final candidate in _candidates)
-                            ListTile(
-                              contentPadding: const EdgeInsets.symmetric(
-                                vertical: 8,
-                              ),
-                              leading: CatalogCandidateArtwork(
-                                url: candidate['artworkUrl'] as String?,
-                                width: 48,
-                                height: 64,
-                              ),
-                              title: Text(candidate['title'] as String),
-                              subtitle: Text(
-                                '${candidate['year'] ?? 'Unknown year'} · ${candidate['id']}\n${candidate['author'] ?? candidate['artist'] ?? candidate['show'] ?? ''} · ${candidate['_matchReason'] ?? ''}',
-                              ),
-                              trailing: const Icon(Icons.preview_outlined),
-                              onTap: _busy ? null : () => _select(candidate),
-                            ),
-                          if (_searched && _candidates.isEmpty)
-                            const Padding(
-                              padding: EdgeInsets.all(16),
-                              child: Text(
-                                'No candidates. Try a broader title or remove the year.',
-                              ),
-                            ),
-                          TextButton(
-                            onPressed: _busy
-                                ? null
-                                : () => _perform(() async {
-                                    await _store.clear(
-                                      widget.item,
-                                      expectedRevision:
-                                          _decision?['revision'] as int? ?? 0,
-                                    );
-                                    if (mounted) Navigator.pop(context);
-                                  }),
-                            child: const Text(
-                              'Clear match and return to local identification',
-                            ),
-                          ),
-                        ],
-                      ),
-                      ListView(
-                        padding: const EdgeInsets.all(24),
-                        children: [
-                          const Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  'Edit this title. Only your changes are saved.',
+                              const SizedBox(height: 16),
+                              Align(
+                                alignment: AlignmentDirectional.centerStart,
+                                child: FilledButton(
+                                  onPressed: _activeProvider == null || _busy
+                                      ? null
+                                      : () => _perform(_search),
+                                  child: const Text('Search for matches'),
                                 ),
                               ),
-                              Tooltip(
-                                message:
-                                    'Field options let you hide a field, reset it to catalog or filename data, or protect your edits during refresh.',
-                                child: Icon(Icons.info_outline),
+                              for (final candidate in _candidates)
+                                ListTile(
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  leading: CatalogCandidateArtwork(
+                                    url: candidate['artworkUrl'] as String?,
+                                    width: 48,
+                                    height: 64,
+                                  ),
+                                  title: Text(candidate['title'] as String),
+                                  subtitle: Text(
+                                    '${candidate['year'] ?? 'Unknown year'} · ${candidate['id']}\n${candidate['author'] ?? candidate['artist'] ?? candidate['show'] ?? ''} · ${candidate['_matchReason'] ?? ''}',
+                                  ),
+                                  trailing: const Icon(Icons.preview_outlined),
+                                  onTap: _busy
+                                      ? null
+                                      : () => _select(candidate),
+                                ),
+                              if (_searched && _candidates.isEmpty)
+                                const Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: Text(
+                                    'No candidates. Try a broader title or remove the year.',
+                                  ),
+                                ),
+                              TextButton(
+                                onPressed: _busy
+                                    ? null
+                                    : () => _perform(() async {
+                                        await _store.clear(
+                                          widget.item,
+                                          expectedRevision:
+                                              _decision?['revision'] as int? ??
+                                              0,
+                                        );
+                                        if (mounted) Navigator.pop(context);
+                                      }),
+                                child: const Text(
+                                  'Clear match and return to local identification',
+                                ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 16),
-                          DropdownButtonFormField<String>(
-                            decoration: const InputDecoration(
-                              labelText: 'Artwork source',
-                            ),
-                            hint: Text(
-                              _hasCatalogArtwork
-                                  ? 'Matched provider artwork'
-                                  : 'Local artwork',
-                            ),
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'inherit',
-                                child: Text('Use matched provider artwork'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'remove',
-                                child: Text('Use local artwork'),
-                              ),
-                            ],
-                            onChanged: _busy
-                                ? null
-                                : (value) => setState(() {
-                                    if (value != null) {
-                                      _changes['artworkUrl'] = value;
-                                      _locks['artworkUrl'] = true;
-                                    }
-                                  }),
-                          ),
-                          for (final field in _fields.entries.where(
-                            (field) => _primaryFields.contains(field.key),
-                          ))
-                            _fieldEditor(field),
-                          ExpansionTile(
-                            title: const Text('Advanced fields'),
-                            subtitle: const Text(
-                              'Fields used by other media categories',
-                            ),
+                        ),
+                      ),
+                      Align(
+                        alignment: Alignment.topCenter,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 860),
+                          child: ListView(
+                            padding: const EdgeInsets.all(24),
                             children: [
+                              const Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      'Edit this title. Only your changes are saved.',
+                                    ),
+                                  ),
+                                  Tooltip(
+                                    message:
+                                        'Field options let you hide a field, reset it to catalog or filename data, or protect your edits during refresh.',
+                                    child: Icon(Icons.info_outline),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 16),
+                              TangerineChoicePicker<String>(
+                                value:
+                                    _changes['artworkUrl'] ??
+                                    (_hasCatalogArtwork ? 'inherit' : 'remove'),
+                                label: 'Artwork',
+                                icon: Icons.image_outlined,
+                                choices: const [
+                                  TangerineChoice(
+                                    value: 'inherit',
+                                    label: 'Matched provider artwork',
+                                  ),
+                                  TangerineChoice(
+                                    value: 'remove',
+                                    label: 'Local artwork',
+                                  ),
+                                ],
+                                onChanged: _busy
+                                    ? null
+                                    : (value) => setState(() {
+                                        _changes['artworkUrl'] = value;
+                                        _locks['artworkUrl'] = true;
+                                      }),
+                              ),
                               for (final field in _fields.entries.where(
-                                (field) => !_primaryFields.contains(field.key),
+                                (field) => _primaryFields.contains(field.key),
                               ))
                                 _fieldEditor(field),
+                              ExpansionTile(
+                                title: const Text('Advanced fields'),
+                                subtitle: const Text(
+                                  'Fields used by other media categories',
+                                ),
+                                children: [
+                                  for (final field in _fields.entries.where(
+                                    (field) =>
+                                        !_primaryFields.contains(field.key),
+                                  ))
+                                    _fieldEditor(field),
+                                ],
+                              ),
+                              FilledButton(
+                                onPressed: _busy || _changes.isEmpty
+                                    ? null
+                                    : _saveFields,
+                                child: const Text('Save changed fields'),
+                              ),
                             ],
                           ),
-                          FilledButton(
-                            onPressed: _busy || _changes.isEmpty
-                                ? null
-                                : _saveFields,
-                            child: const Text('Save changed fields'),
-                          ),
-                        ],
+                        ),
                       ),
                     ],
                   ),

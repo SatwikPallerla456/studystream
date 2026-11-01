@@ -44,6 +44,7 @@ import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
 import '../../shared/widgets/next_item_countdown_dialog.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 class MediaPlayerScreen extends ConsumerStatefulWidget {
   const MediaPlayerScreen({
@@ -1450,6 +1451,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
 
   void _playerAction(String action) {
     if (action == 'newWindow') {
+      if (_player == null) return;
       unawaited(
         DesktopPlaybackWindows.open(
           widget.itemId,
@@ -1483,6 +1485,157 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     if (action == 'complete') _setCompleted(true);
     if (action == 'incomplete') _setCompleted(false);
   }
+
+  Future<void> _playbackControls() => showStudyAdaptiveModal<void>(
+    context: context,
+    builder: (sheetContext) => StudyModalFrame(
+      title: 'Playback controls',
+      description: cleanDisplayTitle(
+        _item?.userTitle ?? _item?.title ?? 'Player',
+      ),
+      icon: Icons.tune_rounded,
+      primaryAction: TextButton(
+        onPressed: () => Navigator.pop(sheetContext),
+        child: const Text('Done'),
+      ),
+      child: TangerineBoundedList(
+        maxHeight: MediaQuery.sizeOf(context).height * .55,
+        children: [
+          TangerineChoicePicker<double>(
+            label: 'Playback speed',
+            value: _speed,
+            choices: [
+              for (final speed in playbackSpeeds)
+                TangerineChoice(value: speed, label: '$speed×'),
+            ],
+            onChanged: (speed) {
+              Navigator.pop(sheetContext);
+              _setSpeed(speed);
+            },
+          ),
+          const SizedBox(height: 16),
+          if (_experience.sequential ||
+              widget.fromQueue ||
+              widget.multipartRepresentationId != null)
+            Wrap(
+              spacing: 8,
+              children: [
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _navigate(forward: false);
+                  },
+                  icon: const Icon(Icons.skip_previous),
+                  label: const Text('Previous'),
+                ),
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _navigate(forward: true);
+                  },
+                  icon: const Icon(Icons.skip_next),
+                  label: const Text('Next'),
+                ),
+              ],
+            ),
+          if (_experience.video)
+            ListTile(
+              leading: const Icon(Icons.movie_filter_outlined),
+              title: const Text('Advanced video'),
+              subtitle: const Text('Picture, comparison and video tools'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _openVideoWorkbench();
+              },
+            ),
+          if (_player is NativeVlcEngine) ...[
+            ListTile(
+              leading: const Icon(Icons.equalizer),
+              title: const Text('Playback effects'),
+              subtitle: const Text('Equalizer, picture and synchronization'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                showStudyAdaptiveModal<void>(
+                  context: context,
+                  builder: (_) => NativePlaybackTools(
+                    engine: _player! as NativeVlcEngine,
+                    database: _database,
+                    itemId: widget.itemId,
+                    video: _experience.video,
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.speaker_group_outlined),
+              title: const Text('Outputs & windows'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _playerAction('outputs');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.video_settings_outlined),
+              title: const Text('Advanced player'),
+              subtitle: const Text(
+                'Inputs, online subtitles and customization',
+              ),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _advanced();
+              },
+            ),
+          ],
+          if (DesktopPlaybackWindows.available)
+            ListTile(
+              leading: const Icon(Icons.open_in_new),
+              title: const Text('Open independent playback window'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _playerAction('newWindow');
+              },
+            ),
+          const SizedBox(height: 8),
+          TangerineActionGroup(
+            title: 'Sleep timer',
+            icon: Icons.bedtime_outlined,
+            children: [
+              for (final minutes in [15, 30, 60, 0])
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _setSleep(minutes);
+                  },
+                  child: Text(
+                    minutes == 0 ? 'Cancel timer' : '$minutes minutes',
+                  ),
+                ),
+            ],
+          ),
+          if (_experience.completion)
+            Wrap(
+              spacing: 8,
+              children: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _setCompleted(true);
+                  },
+                  child: Text(_experience.completionLabel(false)),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _setCompleted(false);
+                  },
+                  child: Text(_experience.completionLabel(true)),
+                ),
+              ],
+            ),
+        ],
+      ),
+    ),
+  );
 
   void _setSleep(int minutes) {
     _sleepTimer?.cancel();
@@ -1592,7 +1745,11 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
   @override
   Widget build(BuildContext context) {
     final item = _item;
-    final compact = MediaQuery.sizeOf(context).width < 700;
+    final currentRoute = ModalRoute.isCurrentOf(context) ?? false;
+    final pointerPlayer = _player;
+    if (pointerPlayer is NativeVlcEngine) {
+      pointerPlayer.routeNativePointer(currentRoute);
+    }
     return CallbackShortcuts(
       bindings: {
         for (final row in <(bool, int)>[
@@ -1633,205 +1790,42 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
                   showHome: true,
                   onBack: _back,
                   actions: [
-                    if (_experience.video && _player != null && !_loading)
-                      IconButton(
-                        tooltip: 'Advanced video',
-                        icon: const Icon(Icons.movie_filter_outlined),
-                        onPressed: _openVideoWorkbench,
-                      ),
-                    if (_player is NativeVlcEngine)
-                      IconButton(
-                        tooltip: 'Advanced player workflows',
-                        onPressed: () => _advanced(),
-                        icon: const Icon(Icons.video_settings),
-                      ),
-                    if (_player is NativeVlcEngine)
-                      IconButton(
-                        tooltip: 'Playback tools',
-                        onPressed: () => showStudyAdaptiveModal<void>(
-                          context: context,
-                          builder: (_) => NativePlaybackTools(
-                            engine: _player! as NativeVlcEngine,
-                            database: _database,
-                            itemId: widget.itemId,
-                            video: _experience.video,
-                          ),
-                        ),
-                        icon: const Icon(Icons.tune),
-                      ),
-                    if (!compact &&
-                        (_experience.sequential ||
-                            widget.fromQueue ||
-                            widget.multipartRepresentationId != null))
-                      IconButton(
-                        tooltip: 'Previous',
-                        onPressed: item == null
-                            ? null
-                            : () => _navigate(forward: false),
-                        icon: const Icon(Icons.skip_previous),
-                      ),
                     if (_experience.notes)
                       IconButton(
                         tooltip: _experience.notesLabel,
                         onPressed: item == null ? null : _showStudyTools,
                         icon: const Icon(Icons.note_alt_outlined),
                       ),
-                    if (!compact) ...[
+                    IconButton(
+                      tooltip: _experience.video
+                          ? 'Audio & subtitles'
+                          : 'Audio tracks',
+                      onPressed: _player == null ? null : _showTracks,
+                      icon: const Icon(Icons.closed_caption_outlined),
+                    ),
+                    IconButton(
+                      tooltip: 'Queue & playlists',
+                      onPressed: _showQueue,
+                      icon: const Icon(Icons.queue_music),
+                    ),
+                    if (_player is NativeVlcEngine &&
+                        (_player! as NativeVlcEngine).supports('fullscreen'))
                       IconButton(
-                        tooltip: _experience.video
-                            ? 'Audio and subtitle tracks'
-                            : 'Audio tracks',
-                        onPressed: item == null ? null : _showTracks,
-                        icon: const Icon(Icons.closed_caption_outlined),
-                      ),
-                      PopupMenuButton<double>(
-                        tooltip: 'Playback speed',
-                        initialValue: _speed,
-                        onSelected: _setSpeed,
-                        itemBuilder: (_) => playbackSpeeds
-                            .map(
-                              (speed) => PopupMenuItem(
-                                value: speed,
-                                child: Text('$speed×'),
-                              ),
-                            )
-                            .toList(),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          child: Center(
-                            child: Text(
-                              '$_speed×',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
+                        tooltip: _fullscreen ? 'Exit fullscreen' : 'Fullscreen',
+                        onPressed: () => _performAction('fullscreen'),
+                        icon: Icon(
+                          _fullscreen
+                              ? Icons.fullscreen_exit
+                              : Icons.fullscreen,
                         ),
                       ),
-                      PopupMenuButton<String>(
-                        tooltip: 'Playback actions',
-                        onSelected: _playerAction,
-                        itemBuilder: (_) => [
-                          if (DesktopPlaybackWindows.available)
-                            const PopupMenuItem(
-                              value: 'newWindow',
-                              child: Text('Open independent playback window'),
-                            ),
-                          const PopupMenuItem(
-                            value: 'queue',
-                            child: Text('Queue & playlists'),
-                          ),
-                          if (_player is NativeVlcEngine)
-                            const PopupMenuItem(
-                              value: 'outputs',
-                              child: Text('Outputs & windows'),
-                            ),
-                          for (final minutes in [15, 30, 60, 0])
-                            PopupMenuItem(
-                              value: 'sleep:$minutes',
-                              child: Text(
-                                minutes == 0
-                                    ? 'Cancel sleep timer'
-                                    : 'Sleep in $minutes minutes',
-                              ),
-                            ),
-
-                          if (_experience.completion)
-                            PopupMenuItem(
-                              value: 'complete',
-                              child: Text(_experience.completionLabel(false)),
-                            ),
-                          if (_experience.completion)
-                            PopupMenuItem(
-                              value: 'incomplete',
-                              child: Text(_experience.completionLabel(true)),
-                            ),
-                        ],
-                      ),
-                      IconButton(
-                        tooltip: 'Next',
-                        onPressed: item == null
-                            ? null
-                            : () => _navigate(forward: true),
-                        icon: const Icon(Icons.skip_next),
-                      ),
-                    ] else
-                      PopupMenuButton<String>(
-                        tooltip: 'Player options',
-                        onSelected: (value) {
-                          _playerAction(value);
-                          if (value == 'previous') _navigate(forward: false);
-                          if (value == 'next') _navigate(forward: true);
-                          if (value == 'complete') _setCompleted(true);
-                          if (value == 'incomplete') _setCompleted(false);
-                          if (value == 'tracks') _showTracks();
-                          if (value.startsWith('speed:')) {
-                            _setSpeed(double.parse(value.substring(6)));
-                          }
-                        },
-                        itemBuilder: (_) => [
-                          if (DesktopPlaybackWindows.available)
-                            const PopupMenuItem(
-                              value: 'newWindow',
-                              child: Text('Open independent playback window'),
-                            ),
-                          const PopupMenuItem(
-                            value: 'queue',
-                            child: Text('Queue & playlists'),
-                          ),
-                          if (_player is NativeVlcEngine)
-                            const PopupMenuItem(
-                              value: 'outputs',
-                              child: Text('Outputs & windows'),
-                            ),
-                          for (final minutes in [15, 30, 60, 0])
-                            PopupMenuItem(
-                              value: 'sleep:$minutes',
-                              child: Text(
-                                minutes == 0
-                                    ? 'Cancel sleep timer'
-                                    : 'Sleep in $minutes minutes',
-                              ),
-                            ),
-                          const PopupMenuItem(
-                            value: 'previous',
-                            child: Text('Previous'),
-                          ),
-                          const PopupMenuItem(
-                            value: 'next',
-                            child: Text('Next'),
-                          ),
-                          const PopupMenuDivider(),
-                          PopupMenuItem(
-                            value: 'tracks',
-                            child: Text(
-                              _experience.video
-                                  ? 'Audio and subtitles'
-                                  : 'Audio tracks',
-                            ),
-                          ),
-                          for (final speed in playbackSpeeds)
-                            PopupMenuItem(
-                              value: 'speed:$speed',
-                              child: Text(
-                                speed == _speed
-                                    ? 'Playback speed: $speed× ✓'
-                                    : 'Playback speed: $speed×',
-                              ),
-                            ),
-                          const PopupMenuDivider(),
-                          if (_experience.completion)
-                            PopupMenuItem(
-                              value: 'complete',
-                              child: Text(_experience.completionLabel(false)),
-                            ),
-                          if (_experience.completion)
-                            PopupMenuItem(
-                              value: 'incomplete',
-                              child: Text(_experience.completionLabel(true)),
-                            ),
-                        ],
-                      ),
+                    IconButton(
+                      tooltip: 'Playback controls & tools',
+                      onPressed: _player == null || _loading
+                          ? null
+                          : _playbackControls,
+                      icon: const Icon(Icons.tune_rounded),
+                    ),
                   ],
                 ),
           body: _body(),

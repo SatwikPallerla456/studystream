@@ -33,6 +33,13 @@ final class MyVLCDesktop: NSObject, NSWindowDelegate {
     var onPointer: ((String) -> Void)?
     private var closeDelegate:TangerineCloseDelegate?
     private weak var delegatedWindow:NSWindow?
+    // Flutter overlays must receive events before video mouse shortcuts do.
+    // Only the current playback route explicitly opts into native interception.
+    var pointerEnabled = false {
+        didSet {
+            if !pointerEnabled { singleClick?.invalidate(); singleClick = nil }
+        }
+    }
     private var pointerMonitor: Any?
     private var singleClick: Timer?
     private var lastHover = Date.distantPast
@@ -49,7 +56,7 @@ final class MyVLCDesktop: NSObject, NSWindowDelegate {
         engine.attach(to: canvas)
         (host as? TangerineHostView)?.attached = { [weak self] in guard let self else { return }; self.applyPreferences(self.preferences) }
         pointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
-            guard let self, event.window === self.host.window, self.host.bounds.contains(self.host.convert(event.locationInWindow, from: nil)) else { return event }
+            guard let self, self.pointerEnabled, event.window === self.host.window, self.host.bounds.contains(self.host.convert(event.locationInWindow, from: nil)) else { return event }
             if event.type == .leftMouseDown {
                 self.singleClick?.invalidate()
                 if event.clickCount >= 2 { self.onPointer?("pointer.double") }

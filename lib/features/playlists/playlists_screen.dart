@@ -13,6 +13,7 @@ import '../../data/providers/app_providers.dart';
 import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 class PlaylistsScreen extends ConsumerStatefulWidget {
   const PlaylistsScreen({super.key, this.currentItemId});
@@ -78,27 +79,44 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
 
   Future<String?> _name(String initial) async {
     var title = initial;
+    final form = GlobalKey<FormState>();
     final result = await showStudyAdaptiveModal<String>(
       context: context,
-      builder: (context) => StudyModalFrame(
-        title: initial.isEmpty ? 'New playlist' : 'Rename playlist',
-        primaryAction: FilledButton(
-          onPressed: () {
-            if (title.trim().isNotEmpty) Navigator.pop(context, title.trim());
-          },
-          child: const Text('Save'),
-        ),
-        child: TextFormField(
-          initialValue: initial,
-          onChanged: (value) => title = value,
-          autofocus: true,
-          maxLength: 200,
-          decoration: const InputDecoration(labelText: 'Playlist name'),
-          onFieldSubmitted: (value) {
-            if (value.trim().isNotEmpty) Navigator.pop(context, value.trim());
-          },
-        ),
-      ),
+      builder: (context) {
+        void save() {
+          if (form.currentState!.validate()) {
+            Navigator.pop(context, title.trim());
+          }
+        }
+
+        return StudyModalFrame(
+          title: initial.isEmpty ? 'New playlist' : 'Rename playlist',
+          secondaryAction: TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          primaryAction: FilledButton(
+            onPressed: save,
+            child: const Text('Save'),
+          ),
+          child: Form(
+            key: form,
+            child: TextFormField(
+              initialValue: initial,
+              onChanged: (value) => title = value,
+              autofocus: true,
+              maxLength: 200,
+              textInputAction: TextInputAction.done,
+              autovalidateMode: AutovalidateMode.onUserInteraction,
+              validator: (value) => (value ?? '').trim().isEmpty
+                  ? 'Enter a playlist name.'
+                  : null,
+              decoration: const InputDecoration(labelText: 'Playlist name'),
+              onFieldSubmitted: (_) => save(),
+            ),
+          ),
+        );
+      },
     );
     // Adaptive modals may animate out after the returned future completes.
     return result;
@@ -173,6 +191,7 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
   ) async {
     final chosen = List<String>.of(initial);
     var query = '';
+    var matches = _media(query);
     await showStudyAdaptiveModal<void>(
       context: context,
       builder: (modalContext) => StatefulBuilder(
@@ -192,12 +211,17 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                 TextField(
                   decoration: const InputDecoration(
                     labelText: 'Search library',
+                    helperText:
+                        'Up to 100 matches. Refine your search to find a title.',
                   ),
-                  onChanged: (value) => update(() => query = value),
+                  onChanged: (value) => update(() {
+                    query = value;
+                    matches = _media(query);
+                  }),
                 ),
                 Expanded(
                   child: FutureBuilder<List<Item>>(
-                    future: _media(query),
+                    future: matches,
                     builder: (context, snapshot) => ListView(
                       children: [
                         for (final item in snapshot.data ?? <Item>[])
@@ -298,25 +322,21 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
               playlist?.itemIds ?? state.queue.map((e) => e.itemId).toList();
           return Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                DropdownButton<String?>(
+            child: TangerineWorkbenchLayout(
+              header: [
+                TangerineChoicePicker<String?>(
+                  label: 'Playback list',
                   value: playlist?.id,
-                  isExpanded: true,
-                  items: [
-                    const DropdownMenuItem<String?>(
-                      value: null,
-                      child: Text('Play queue'),
-                    ),
+                  choices: [
+                    const TangerineChoice(value: null, label: 'Play queue'),
                     for (final row in state.playlists)
-                      DropdownMenuItem<String?>(
-                        value: row.id,
-                        child: Text(row.title),
-                      ),
+                      TangerineChoice(value: row.id, label: row.title),
                   ],
-                  onChanged: (value) => setState(() => _selected = value),
+                  onChanged: _busy
+                      ? null
+                      : (value) => setState(() => _selected = value),
                 ),
+                const SizedBox(height: 12),
                 if (ids.isNotEmpty || playlist != null)
                   Wrap(
                     crossAxisAlignment: WrapCrossAlignment.center,
@@ -330,22 +350,25 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                               _run(() => repository.setShuffle(value)),
                         ),
                         SizedBox(
-                          width: 240,
-                          child: DropdownButton<QueueRepeat>(
-                            isExpanded: true,
+                          width: 280,
+                          child: TangerineSegments<QueueRepeat>(
+                            label: 'Repeat',
                             value: state.repeat,
-                            items: [
+                            choices: [
                               for (final value in QueueRepeat.values)
-                                DropdownMenuItem(
+                                TangerineChoice(
                                   value: value,
-                                  child: Text('Repeat: ${value.name}'),
+                                  label: switch (value) {
+                                    QueueRepeat.off => 'Off',
+                                    QueueRepeat.one => 'One',
+                                    QueueRepeat.all => 'All',
+                                  },
                                 ),
                             ],
-                            onChanged: (value) {
-                              if (value != null) {
-                                _run(() => repository.setRepeat(value));
-                              }
-                            },
+                            onChanged: _busy
+                                ? null
+                                : (value) =>
+                                      _run(() => repository.setRepeat(value)),
                           ),
                         ),
                         TextButton(
@@ -418,12 +441,29 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                   ),
                 if (_busy) const LinearProgressIndicator(),
                 if (ids.isNotEmpty)
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: FilterChip(
-                      label: const Text('Group by folder'),
-                      selected: _tree,
-                      onSelected: (value) => _run(() => _setTree(value)),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: SizedBox(
+                      width: 320,
+                      child: TangerineSegments<bool>(
+                        label: 'Queue order',
+                        value: _tree,
+                        choices: const [
+                          TangerineChoice(
+                            value: false,
+                            label: 'Playback order',
+                            icon: Icons.reorder,
+                          ),
+                          TangerineChoice(
+                            value: true,
+                            label: 'By folder',
+                            icon: Icons.folder_outlined,
+                          ),
+                        ],
+                        onChanged: _busy
+                            ? null
+                            : (value) => _run(() => _setTree(value)),
+                      ),
                     ),
                   ),
                 if (_tree && ids.isNotEmpty)
@@ -438,173 +478,162 @@ class _PlaylistsScreenState extends ConsumerState<PlaylistsScreen> {
                     ),
                     onChanged: (value) => setState(() => _search = value),
                   ),
-                Expanded(
-                  child: FutureBuilder<List<Item?>>(
-                    future: Future.wait(
-                      ids.map(
-                        (id) => ref.read(appDatabaseProvider).getItemById(id),
-                      ),
-                    ),
-                    builder: (context, snapshot) {
-                      final items = snapshot.data;
-                      if (items == null) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      if (items.isEmpty) {
-                        return Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                playlist == null
-                                    ? 'Your queue is empty'
-                                    : 'This playlist is empty',
-                                style: Theme.of(context).textTheme.titleLarge,
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Choose audio or video from your libraries.',
-                              ),
-                              const SizedBox(height: 16),
-                              FilledButton.icon(
-                                onPressed: _busy
-                                    ? null
-                                    : () => _addMedia(ids, playlist),
-                                icon: const Icon(Icons.add),
-                                label: const Text('Add media'),
-                              ),
-                            ],
-                          ),
-                        );
-                      }
-                      Widget entryTile(int index) {
-                        final item = items[index];
-                        final title =
-                            item?.userTitle ?? item?.title ?? 'Removed media';
-                        if (_search.isNotEmpty &&
-                            !title.toLowerCase().contains(
-                              _search.toLowerCase(),
-                            )) {
-                          return SizedBox.shrink(
-                            key: ValueKey('hidden-$index'),
-                          );
-                        }
-                        final entry = playlist == null
-                            ? state.queue[index]
-                            : null;
-                        return ListTile(
-                          key: ValueKey(entry?.id ?? '$index-${ids[index]}'),
-                          selected:
-                              entry != null && entry.id == state.currentEntryId,
-                          leading: Icon(
-                            item?.unavailable == true || item == null
-                                ? Icons.link_off
-                                : Icons.play_circle_outline,
-                          ),
-                          title: Text(title),
-                          subtitle: Text(
-                            item?.filename ?? 'Your saved entry is retained.',
-                          ),
-                          onTap: item == null || item.unavailable
-                              ? null
-                              : () => _run(() async {
-                                  if (entry != null) {
-                                    await repository.select(entry.id);
-                                  } else {
-                                    await repository.setQueue(
-                                      ids,
-                                      currentIndex: index,
-                                    );
-                                  }
-                                  if (mounted) _open(ids[index]);
-                                }),
-                          trailing: Padding(
-                            padding: const EdgeInsets.only(right: 24),
-                            child: IconButton(
-                              tooltip: 'Remove entry',
-                              icon: const Icon(Icons.close),
-                              onPressed: () => _run(() async {
-                                if (entry != null) {
-                                  await repository.remove(entry.id);
-                                } else {
-                                  final updated = List.of(ids)..removeAt(index);
-                                  await repository.savePlaylist(
-                                    playlist!.title,
-                                    updated,
-                                    playlistId: playlist.id,
-                                  );
-                                }
-                              }),
-                            ),
-                          ),
-                        );
-                      }
-
-                      if (_tree) {
-                        final folders = <String, List<int>>{};
-                        for (var index = 0; index < items.length; index++) {
-                          final item = items[index];
-                          final title =
-                              item?.userTitle ?? item?.title ?? 'Removed media';
-                          if (_search.isNotEmpty &&
-                              !title.toLowerCase().contains(
-                                _search.toLowerCase(),
-                              ))
-                            continue;
-                          final folder = item == null
-                              ? 'Removed media'
-                              : item.filePath.startsWith('remote:')
-                              ? 'Remote library'
-                              : path.dirname(item.filePath);
-                          (folders[folder] ??= []).add(index);
-                        }
-                        return ListView(
-                          children: [
-                            for (final group in folders.entries)
-                              ExpansionTile(
-                                key: ValueKey('folder:${group.key}'),
-                                leading: const Icon(Icons.folder_outlined),
-                                title: Text(
-                                  group.key == 'Remote library' ||
-                                          group.key == 'Removed media'
-                                      ? group.key
-                                      : path.basename(group.key),
-                                ),
-                                subtitle: Text('${group.value.length} entries'),
-                                children: [
-                                  for (final index in group.value)
-                                    entryTile(index),
-                                ],
-                              ),
-                          ],
-                        );
-                      }
-                      return ReorderableListView.builder(
-                        buildDefaultDragHandles: _search.isEmpty,
-                        itemCount: items.length,
-                        onReorderItem: (old, next) => _run(() async {
-                          if (_search.isNotEmpty) return;
-                          if (playlist == null) {
-                            await repository.reorder(
-                              old,
-                              next > old ? next + 1 : next,
-                            );
-                          } else {
-                            final reordered = List.of(ids);
-                            reordered.insert(next, reordered.removeAt(old));
-                            await repository.savePlaylist(
-                              playlist.title,
-                              reordered,
-                              playlistId: playlist.id,
-                            );
-                          }
-                        }),
-                        itemBuilder: (context, index) => entryTile(index),
-                      );
-                    },
+              ],
+              body: FutureBuilder<List<Item?>>(
+                future: Future.wait(
+                  ids.map(
+                    (id) => ref.read(appDatabaseProvider).getItemById(id),
                   ),
                 ),
-              ],
+                builder: (context, snapshot) {
+                  final items = snapshot.data;
+                  if (items == null) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (items.isEmpty) {
+                    return Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            playlist == null
+                                ? 'Your queue is empty'
+                                : 'This playlist is empty',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Choose audio or video from your libraries.',
+                          ),
+                          const SizedBox(height: 16),
+                          FilledButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _addMedia(ids, playlist),
+                            icon: const Icon(Icons.add),
+                            label: const Text('Add media'),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                  Widget entryTile(int index) {
+                    final item = items[index];
+                    final title =
+                        item?.userTitle ?? item?.title ?? 'Removed media';
+                    if (_search.isNotEmpty &&
+                        !title.toLowerCase().contains(_search.toLowerCase())) {
+                      return SizedBox.shrink(key: ValueKey('hidden-$index'));
+                    }
+                    final entry = playlist == null ? state.queue[index] : null;
+                    return ListTile(
+                      key: ValueKey(entry?.id ?? '$index-${ids[index]}'),
+                      selected:
+                          entry != null && entry.id == state.currentEntryId,
+                      leading: Icon(
+                        item?.unavailable == true || item == null
+                            ? Icons.link_off
+                            : Icons.play_circle_outline,
+                      ),
+                      title: Text(title),
+                      subtitle: Text(
+                        item?.filename ?? 'Your saved entry is retained.',
+                      ),
+                      onTap: item == null || item.unavailable
+                          ? null
+                          : () => _run(() async {
+                              if (entry != null) {
+                                await repository.select(entry.id);
+                              } else {
+                                await repository.setQueue(
+                                  ids,
+                                  currentIndex: index,
+                                );
+                              }
+                              if (mounted) _open(ids[index]);
+                            }),
+                      trailing: Padding(
+                        padding: const EdgeInsets.only(right: 24),
+                        child: IconButton(
+                          tooltip: 'Remove entry',
+                          icon: const Icon(Icons.close),
+                          onPressed: () => _run(() async {
+                            if (entry != null) {
+                              await repository.remove(entry.id);
+                            } else {
+                              final updated = List.of(ids)..removeAt(index);
+                              await repository.savePlaylist(
+                                playlist!.title,
+                                updated,
+                                playlistId: playlist.id,
+                              );
+                            }
+                          }),
+                        ),
+                      ),
+                    );
+                  }
+
+                  if (_tree) {
+                    final folders = <String, List<int>>{};
+                    for (var index = 0; index < items.length; index++) {
+                      final item = items[index];
+                      final title =
+                          item?.userTitle ?? item?.title ?? 'Removed media';
+                      if (_search.isNotEmpty &&
+                          !title.toLowerCase().contains(_search.toLowerCase()))
+                        continue;
+                      final folder = item == null
+                          ? 'Removed media'
+                          : item.filePath.startsWith('remote:')
+                          ? 'Remote library'
+                          : path.dirname(item.filePath);
+                      (folders[folder] ??= []).add(index);
+                    }
+                    return ListView(
+                      children: [
+                        for (final group in folders.entries)
+                          ExpansionTile(
+                            key: ValueKey('folder:${group.key}'),
+                            leading: const Icon(Icons.folder_outlined),
+                            title: Text(
+                              group.key == 'Remote library' ||
+                                      group.key == 'Removed media'
+                                  ? group.key
+                                  : path.basename(group.key),
+                            ),
+                            subtitle: Text('${group.value.length} entries'),
+                            children: [
+                              for (final index in group.value) entryTile(index),
+                            ],
+                          ),
+                      ],
+                    );
+                  }
+                  return ReorderableListView.builder(
+                    buildDefaultDragHandles: _search.isEmpty,
+                    itemCount: items.length,
+                    onReorderItem: (old, next) => _run(() async {
+                      if (_search.isNotEmpty) return;
+                      if (playlist == null) {
+                        await repository.reorder(
+                          old,
+                          next > old ? next + 1 : next,
+                        );
+                      } else {
+                        final reordered = List.of(ids);
+                        reordered.insert(next, reordered.removeAt(old));
+                        await repository.savePlaylist(
+                          playlist.title,
+                          reordered,
+                          playlistId: playlist.id,
+                        );
+                      }
+                    }),
+                    itemBuilder: (context, index) => entryTile(index),
+                  );
+                },
+              ),
             ),
           );
         },

@@ -14,6 +14,7 @@ import '../../data/reader/book_page_source.dart';
 import '../../data/reader/reader_thumbnail_store.dart';
 import '../../domain/reader/reader_jobs.dart';
 import 'publication_view.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 Future<int?> showReaderPages({
   required BuildContext context,
@@ -116,33 +117,43 @@ class _ReaderPageGridState extends State<_ReaderPageGrid> {
         crossAxisSpacing: 8,
       ),
       itemCount: widget.source.pageCount,
-      itemBuilder: (context, index) => Card(
-        color: index + 1 == widget.currentPage
-            ? Theme.of(context).colorScheme.secondaryContainer
-            : null,
-        child: InkWell(
-          onTap: () => Navigator.pop(context, index + 1),
-          child: Column(
-            children: [
-              Expanded(
-                child: _PageThumbnail(
-                  key: ValueKey(index),
-                  source: widget.source,
-                  page: index + 1,
-                  revision: widget.revision,
-                  jobs: widget.jobs,
-                  store: widget.store,
+      itemBuilder: (context, index) => Semantics(
+        button: true,
+        selected: index + 1 == widget.currentPage,
+        label: '${index + 1} · ${widget.source.titles[index]}',
+        onTap: () => Navigator.pop(context, index + 1),
+        child: ExcludeSemantics(
+          child: TangerineInteraction(
+            child: Card(
+              color: index + 1 == widget.currentPage
+                  ? Theme.of(context).colorScheme.secondaryContainer
+                  : null,
+              child: InkWell(
+                onTap: () => Navigator.pop(context, index + 1),
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: _PageThumbnail(
+                        key: ValueKey(index),
+                        source: widget.source,
+                        page: index + 1,
+                        revision: widget.revision,
+                        jobs: widget.jobs,
+                        store: widget.store,
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(6),
+                      child: Text(
+                        '${index + 1} · ${widget.source.titles[index]}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.all(6),
-                child: Text(
-                  '${index + 1} · ${widget.source.titles[index]}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),

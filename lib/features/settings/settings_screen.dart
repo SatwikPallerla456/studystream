@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../data/providers/device_runtime_provider.dart';
@@ -55,8 +56,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: 'Import MyVLC library',
             icon: Icons.move_to_inbox_outlined,
             description:
-                '${preview.newItems} new media files, ${preview.existingItems} existing items, '
+                '${preview.newItems} new media ${preview.newItems == 1 ? 'file' : 'files'}, ${preview.existingItems} existing items, '
                 '${preview.playlists} playlists. Original media and MyVLC data stay in place.',
+            secondaryAction: TextButton(
+              onPressed: () => Navigator.pop(modalContext, false),
+              child: const Text('Cancel'),
+            ),
             primaryAction: FilledButton(
               onPressed: () => Navigator.pop(modalContext, true),
               child: const Text('Import library'),
@@ -68,20 +73,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   '${preview.progressConflicts} items already have Tangerine progress.',
                 ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<MyVlcProgressConflict>(
-                  initialValue: conflict,
-                  isExpanded: true,
-                  items: const [
-                    DropdownMenuItem(
+                TangerineChoicePicker<MyVlcProgressConflict>(
+                  label: 'Existing progress',
+                  value: conflict,
+                  choices: const [
+                    TangerineChoice(
                       value: MyVlcProgressConflict.keepTangerine,
-                      child: Text('Keep Tangerine progress'),
+                      label: 'Keep Tangerine progress',
                     ),
-                    DropdownMenuItem(
+                    TangerineChoice(
                       value: MyVlcProgressConflict.useMyVlc,
-                      child: Text('Use newer MyVLC progress'),
+                      label: 'Use newer MyVLC progress',
                     ),
                   ],
-                  onChanged: (value) => update(() => conflict = value!),
+                  onChanged: (value) => update(() => conflict = value),
                 ),
                 const SizedBox(height: 12),
                 const Text(
@@ -89,7 +94,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
                 if (preview.warnings.isNotEmpty)
                   Text(
-                    '${preview.warnings.length} skipped entries: ${preview.warnings.take(3).join(' ')}',
+                    '${preview.warnings.length} skipped ${preview.warnings.length == 1 ? 'entry' : 'entries'}: ${preview.warnings.take(3).join(' ')}',
                   ),
               ],
             ),
@@ -228,27 +233,36 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final themeMode = ref.watch(themeModeProvider);
     final preferences = ref.watch(appPreferencesProvider);
 
-    final appearance = StudySection(
+    final appearance = TangerinePreferenceSection(
       title: 'Appearance',
       description: 'Choose how Tangerine should look on this device.',
       icon: Icons.palette_outlined,
-      child: SizedBox(
-        width: double.infinity,
-        child: SegmentedButton<ThemeMode>(
-          segments: const [
-            ButtonSegment(value: ThemeMode.system, label: Text('System')),
-            ButtonSegment(value: ThemeMode.light, label: Text('Light')),
-            ButtonSegment(value: ThemeMode.dark, label: Text('Dark')),
-          ],
-          selected: {themeMode},
-          onSelectionChanged: (value) {
-            ref.read(themeModeProvider.notifier).setMode(value.first);
-          },
-        ),
+      child: TangerineSegments<ThemeMode>(
+        label: 'Appearance',
+        value: themeMode,
+        choices: const [
+          TangerineChoice(
+            value: ThemeMode.system,
+            label: 'System',
+            icon: Icons.brightness_auto_outlined,
+          ),
+          TangerineChoice(
+            value: ThemeMode.light,
+            label: 'Light',
+            icon: Icons.light_mode_outlined,
+          ),
+          TangerineChoice(
+            value: ThemeMode.dark,
+            label: 'Dark',
+            icon: Icons.dark_mode_outlined,
+          ),
+        ],
+        onChanged: (value) =>
+            ref.read(themeModeProvider.notifier).setMode(value),
       ),
     );
 
-    final playback = StudySection(
+    final playback = TangerinePreferenceSection(
       title: 'Playback',
       collapsible: true,
       description: 'Defaults for video and audio playback.',
@@ -260,7 +274,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
 
-    final reading = StudySection(
+    final reading = TangerinePreferenceSection(
       title: 'Reading',
       collapsible: true,
       description:
@@ -276,7 +290,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 'Books and PDFs reopen at their saved reading position.',
           ),
           const SizedBox(height: AppSpace.sm),
-          OutlinedButton.icon(
+          TextButton.icon(
             onPressed: () => showReaderPreferences(
               context: context,
               database: database,
@@ -289,7 +303,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
 
-    final backup = StudySection(
+    final backup = TangerinePreferenceSection(
       title: 'Backup & restore',
       collapsible: true,
       description:
@@ -298,12 +312,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            padding: const EdgeInsets.all(AppSpace.md),
-            decoration: BoxDecoration(
-              color: context.studyColors.infoContainer,
-              borderRadius: BorderRadius.circular(AppRadius.sm),
-            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: AppSpace.sm),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -336,7 +346,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     : const Icon(Icons.download_outlined),
                 label: Text(_exporting ? 'Exporting…' : 'Export backup'),
               ),
-              OutlinedButton.icon(
+              TextButton.icon(
                 onPressed: _restoring ? null : () => _restore(database),
                 icon: _restoring
                     ? const SizedBox.square(
@@ -361,9 +371,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.manage_search),
             title: const Text('Metadata providers & credits'),
-            subtitle: const Text(
-              'TheTVDB included, artwork and optional providers',
-            ),
+            subtitle: const Text('Provider setup, artwork and source credits'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
@@ -382,18 +390,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const SizedBox(height: AppSpace.md),
           Wrap(
             spacing: 8,
+            runSpacing: 8,
             children: [
-              OutlinedButton.icon(
+              TextButton.icon(
                 onPressed: () => context.push('/player-settings'),
                 icon: const Icon(Icons.keyboard),
                 label: const Text('Player controls & engine'),
               ),
-              OutlinedButton.icon(
+              TextButton.icon(
                 onPressed: () => context.push('/advanced-player'),
                 icon: const Icon(Icons.video_settings),
                 label: const Text('Advanced player workflows'),
               ),
-              OutlinedButton.icon(
+              TextButton.icon(
                 onPressed: () => context.push('/playlists'),
                 icon: const Icon(Icons.queue_music),
                 label: const Text('Queue & playlists'),
@@ -401,13 +410,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
           const SizedBox(height: AppSpace.md),
-          StudySection(
+          TangerinePreferenceSection(
             title: 'Import from MyVLC',
             collapsible: true,
             description:
                 'Preview a library.json import before merging local media, resume positions and playlists.',
             icon: Icons.move_to_inbox_outlined,
-            child: OutlinedButton.icon(
+            child: TextButton.icon(
               onPressed: _importingMyVlc ? null : () => _importMyVlc(database),
               icon: const Icon(Icons.file_open_outlined),
               label: Text(
@@ -418,7 +427,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const SizedBox(height: AppSpace.md),
-          StudySection(
+          TangerinePreferenceSection(
             title: 'Network & devices',
             description:
                 'Pair players, manage sharing and review approved devices.',
@@ -530,89 +539,75 @@ class _SettingsGrid extends StatelessWidget {
 
 class _PlaybackPreferences extends StatelessWidget {
   const _PlaybackPreferences({required this.value, required this.onChanged});
-
   final AppPreferences value;
   final ValueChanged<AppPreferences> onChanged;
-
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _SettingRow(
-          label: 'Default speed',
-          description: 'Applied when a title has no saved speed.',
-          control: DropdownButton<double>(
-            value: value.defaultPlaybackSpeed,
-            items: playbackSpeeds
-                .map(
-                  (speed) =>
-                      DropdownMenuItem(value: speed, child: Text('$speed×')),
-                )
-                .toList(),
-            onChanged: (speed) {
-              if (speed != null) {
-                onChanged(value.copyWith(defaultPlaybackSpeed: speed));
-              }
-            },
-          ),
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _SettingRow(
+        label: 'Default speed',
+        description: 'Applied when a title has no saved speed.',
+        control: TangerineChoicePicker<double>(
+          value: value.defaultPlaybackSpeed,
+          label: 'Speed',
+          icon: Icons.speed,
+          choices: [
+            for (final speed in playbackSpeeds)
+              TangerineChoice(value: speed, label: '$speed×'),
+          ],
+          onChanged: (speed) =>
+              onChanged(value.copyWith(defaultPlaybackSpeed: speed)),
         ),
-        const Divider(height: AppSpace.lg),
-        _SettingRow(
-          label: 'Resume rewind',
-          description: 'Replay a little context before your saved position.',
-          control: DropdownButton<double>(
-            value: value.resumeRewindSeconds,
-            items: const [0.0, 5.0, 10.0, 15.0, 30.0]
-                .map(
-                  (seconds) => DropdownMenuItem(
-                    value: seconds,
-                    child: Text('${seconds.round()} sec'),
-                  ),
-                )
-                .toList(),
-            onChanged: (seconds) {
-              if (seconds != null) {
-                onChanged(value.copyWith(resumeRewindSeconds: seconds));
-              }
-            },
-          ),
+      ),
+      const SizedBox(height: 24),
+      _SettingRow(
+        label: 'Resume rewind',
+        description: 'Replay a little context before your saved position.',
+        control: TangerineChoicePicker<double>(
+          value: value.resumeRewindSeconds,
+          label: 'Rewind',
+          icon: Icons.replay,
+          choices: [
+            for (final seconds in const [0.0, 5.0, 10.0, 15.0, 30.0])
+              TangerineChoice(value: seconds, label: '${seconds.round()} sec'),
+          ],
+          onChanged: (seconds) =>
+              onChanged(value.copyWith(resumeRewindSeconds: seconds)),
         ),
-        const Divider(height: AppSpace.lg),
-        _SettingRow(
-          label: 'Completion point',
-          description:
-              'Automatically finish a video or long-form audio title near its end.',
-          control: DropdownButton<double>(
-            value: value.completionThreshold,
-            items: const [0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
-                .map(
-                  (threshold) => DropdownMenuItem(
-                    value: threshold,
-                    child: Text('${(threshold * 100).round()}%'),
-                  ),
-                )
-                .toList(),
-            onChanged: (threshold) {
-              if (threshold != null) {
-                onChanged(value.copyWith(completionThreshold: threshold));
-              }
-            },
-          ),
+      ),
+      const SizedBox(height: 24),
+      _SettingRow(
+        label: 'Completion point',
+        description:
+            'Automatically finish a video or long-form audio title near its end.',
+        control: TangerineChoicePicker<double>(
+          value: value.completionThreshold,
+          label: 'Complete at',
+          icon: Icons.check_circle_outline,
+          choices: [
+            for (final threshold in const [0.75, 0.8, 0.85, 0.9, 0.95, 1.0])
+              TangerineChoice(
+                value: threshold,
+                label: '${(threshold * 100).round()}%',
+              ),
+          ],
+          onChanged: (threshold) =>
+              onChanged(value.copyWith(completionThreshold: threshold)),
         ),
-        const Divider(height: AppSpace.lg),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('Auto-advance'),
-          subtitle: const Text(
-            'Advance course lessons, TV episodes, or an explicit queue.',
-          ),
-          value: value.autoAdvance,
-          onChanged: (enabled) =>
-              onChanged(value.copyWith(autoAdvance: enabled)),
+      ),
+      const SizedBox(height: 24),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('Auto-advance'),
+        subtitle: const Text(
+          'Advance course lessons, TV episodes, or an explicit queue.',
         ),
-      ],
-    );
-  }
+        value: value.autoAdvance,
+        onChanged: (enabled) => onChanged(value.copyWith(autoAdvance: enabled)),
+      ),
+    ],
+  );
 }
 
 class _SettingRow extends StatelessWidget {
@@ -627,37 +622,19 @@ class _SettingRow extends StatelessWidget {
   final Widget control;
 
   @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final text = Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: AppSpace.xxs),
-            Text(description, style: Theme.of(context).textTheme.bodySmall),
-          ],
-        );
-        if (constraints.maxWidth < 380) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              text,
-              const SizedBox(height: AppSpace.xs),
-              control,
-            ],
-          );
-        }
-        return Row(
-          children: [
-            Expanded(child: text),
-            const SizedBox(width: AppSpace.sm),
-            control,
-          ],
-        );
-      },
-    );
-  }
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: Theme.of(context).textTheme.titleSmall),
+      const SizedBox(height: AppSpace.xxs),
+      Text(description, style: Theme.of(context).textTheme.bodySmall),
+      const SizedBox(height: 8),
+      ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: control,
+      ),
+    ],
+  );
 }
 
 class _SyncSection extends StatelessWidget {
@@ -1017,7 +994,7 @@ class _KeyboardSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const StudySection(
+    return const TangerinePreferenceSection(
       title: 'Keyboard shortcuts',
       collapsible: true,
       description: 'Controls while playing media on this device.',
@@ -1067,7 +1044,7 @@ class _DiagnosticsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const StudySection(
+    return const TangerinePreferenceSection(
       title: 'Storage, diagnostics & about',
       collapsible: true,
       description: 'Technical context, kept out of the everyday experience.',

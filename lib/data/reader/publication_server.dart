@@ -294,7 +294,7 @@ const measure=()=>{
  body.style.width=width+'px';body.style.height=height+'px';body.style.transformOrigin='0 0';body.style.transform='scale('+scale+')';root.style.overflow='hidden';}
  post({kind:'metrics',ready,width,height,scaledWidth:width*scale,scaledHeight:height*scale,scale,viewportWidth:innerWidth,viewportHeight:innerHeight,x:scrollX/width,y:scrollY/height});
 };
-if(flow){document.body.style.fontSize='${font}px';document.body.style.lineHeight='$line';}
+if(flow){document.body.style.fontSize='${font}px';document.body.style.lineHeight='$line';document.body.style.boxSizing='border-box';document.body.style.maxWidth='42em';document.body.style.marginInline='auto';document.body.style.paddingInline='clamp(20px,5vw,56px)';document.body.style.paddingBlock='24px';}
 const images=Array.from(document.images).map(image=>image.complete?Promise.resolve():new Promise((resolve)=>{image.onload=resolve;image.onerror=resolve;}));
 Promise.race([Promise.all([document.fonts?document.fonts.ready:Promise.resolve(),...images]),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Assets did not become ready within 8 seconds')),8000))])
  .then(()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{ready=true;measure();}))).catch(error=>post({kind:'error',message:error.message}));

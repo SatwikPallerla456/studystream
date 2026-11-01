@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,7 +9,9 @@ import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/catalog_playback.dart';
 import '../../domain/catalog/catalog_hints.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
+import '../../core/theme/app_theme.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/study_ui.dart';
 
@@ -130,6 +133,11 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
+      sheetAnimationStyle: AnimationStyle(
+        duration: AppMotion.resolve(context, AppMotion.standard),
+        reverseDuration: AppMotion.resolve(context, AppMotion.quick),
+      ),
       builder: (_) => _LibraryFilePicker(
         libraryId: widget.item.libraryId,
         itemType: part ? widget.item.itemType : null,
@@ -240,6 +248,7 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
           ],
         ),
         body: StudyPage(
+          maxWidth: 860,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -251,9 +260,14 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
               const SizedBox(height: 24),
               if (_busy) const LinearProgressIndicator(),
               if (_error != null) ...[
-                Text(
-                  _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    _error!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
                 ),
                 TextButton(
                   onPressed: _busy ? null : _reload,
@@ -266,27 +280,45 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 12),
-                TextField(
-                  controller: _edition,
-                  enabled: !_busy,
-                  maxLength: 200,
-                  decoration: const InputDecoration(
-                    labelText: 'Edition',
-                    hintText: 'Original, theatrical, director’s cut…',
-                  ),
-                  onChanged: (_) => setState(() => _dirty = true),
+                LayoutBuilder(
+                  builder: (context, box) {
+                    final sideBySide =
+                        box.maxWidth >= 640 &&
+                        MediaQuery.textScalerOf(context).scale(16) <= 22;
+                    final width = sideBySide
+                        ? (box.maxWidth - 16) / 2
+                        : box.maxWidth;
+                    return Wrap(
+                      spacing: 16,
+                      runSpacing: 12,
+                      children: [
+                        SizedBox(
+                          width: width,
+                          child: _identityField(
+                            _edition,
+                            'Edition',
+                            'Original, theatrical, director’s cut…',
+                          ),
+                        ),
+                        SizedBox(
+                          width: width,
+                          child: _identityField(
+                            _representation,
+                            'File version',
+                            '1080p, original audio, restored scan…',
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
-                TextField(
-                  controller: _representation,
-                  enabled: !_busy,
-                  maxLength: 200,
-                  decoration: const InputDecoration(
-                    labelText: 'File version',
-                    hintText: '1080p, original audio, restored scan…',
-                  ),
-                  onChanged: (_) => setState(() => _dirty = true),
+                const SizedBox(height: 8),
+                Text(
+                  'Original file',
+                  style: Theme.of(context).textTheme.labelLarge,
                 ),
-                SelectableText(widget.item.filename),
+                const SizedBox(height: 4),
+                SelectionArea(child: Text(widget.item.filename)),
                 const SizedBox(height: 24),
                 if (_playable) ...[
                   _heading(
@@ -411,22 +443,19 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
                       _extras[index].item.userTitle ??
                           _extras[index].item.title,
                     ),
-                    subtitle: DropdownButton<String>(
+                    subtitle: TangerineChoicePicker<String>(
+                      label: 'Extra type',
                       value: _extras[index].kind,
-                      items: CatalogPlayback.extraKinds.entries
-                          .map(
-                            (entry) => DropdownMenuItem(
-                              value: entry.key,
-                              child: Text(entry.value),
-                            ),
-                          )
-                          .toList(),
+                      choices: [
+                        for (final entry in CatalogPlayback.extraKinds.entries)
+                          TangerineChoice(value: entry.key, label: entry.value),
+                      ],
                       onChanged: _busy
                           ? null
                           : (kind) => setState(() {
                               _extras[index] = CatalogExtra(
                                 item: _extras[index].item,
-                                kind: kind!,
+                                kind: kind,
                               );
                               _dirty = true;
                             }),
@@ -450,6 +479,18 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
     );
   }
 
+  Widget _identityField(
+    TextEditingController controller,
+    String label,
+    String hint,
+  ) => TextField(
+    controller: controller,
+    enabled: !_busy,
+    maxLength: 200,
+    decoration: InputDecoration(labelText: label, hintText: hint),
+    onChanged: (_) => setState(() => _dirty = true),
+  );
+
   Widget _heading(
     String title,
     String description,
@@ -460,10 +501,14 @@ class _TitleFilesState extends ConsumerState<TitleFilesScreen> {
     children: [
       Text(title, style: Theme.of(context).textTheme.titleLarge),
       Text(description),
-      TextButton.icon(
-        onPressed: _busy ? null : onAdd,
-        icon: const Icon(Icons.add),
-        label: Text(action),
+      const SizedBox(height: 8),
+      TangerineInteraction(
+        enabled: !_busy,
+        child: TextButton.icon(
+          onPressed: _busy ? null : onAdd,
+          icon: const Icon(Icons.add),
+          label: Text(action),
+        ),
       ),
     ],
   );
@@ -483,6 +528,11 @@ Future<Item?> chooseLibraryParent(
   context: context,
   isScrollControlled: true,
   showDragHandle: true,
+  useSafeArea: true,
+  sheetAnimationStyle: AnimationStyle(
+    duration: AppMotion.resolve(context, AppMotion.standard),
+    reverseDuration: AppMotion.resolve(context, AppMotion.quick),
+  ),
   builder: (_) => _LibraryFilePicker(
     libraryId: libraryId,
     excluded: {extraId},
@@ -547,115 +597,164 @@ class _LibraryFilePickerState extends ConsumerState<_LibraryFilePicker> {
 
   @override
   Widget build(BuildContext context) => SafeArea(
-    child: SizedBox(
-      height: MediaQuery.sizeOf(context).height * .8,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Text(
-              widget.title ??
-                  (widget.needsDuration ? 'Choose a part' : 'Choose an extra'),
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            TextField(
-              controller: _search,
-              decoration: InputDecoration(
-                labelText: 'Search this library',
-                suffixIcon: IconButton(
-                  tooltip: 'Search files',
-                  icon: const Icon(Icons.search),
-                  onPressed: () => setState(() {
-                    _after = null;
-                    _history.clear();
-                    _rows = _load();
-                  }),
+    child: AnimatedPadding(
+      duration: AppMotion.resolve(context, AppMotion.standard),
+      curve: AppMotion.settle,
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: SizedBox(
+        height: math.max(
+          0,
+          MediaQuery.sizeOf(context).height * .8 -
+              MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.title ??
+                          (widget.needsDuration
+                              ? 'Choose a part'
+                              : 'Choose an extra'),
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  TangerineInteraction(
+                    child: IconButton(
+                      tooltip: 'Close file picker',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Files stay in their library. Choose one to attach it to this title.',
                 ),
               ),
-              onSubmitted: (_) => setState(() {
-                _after = null;
-                _history.clear();
-                _rows = _load();
-              }),
-            ),
-            Expanded(
-              child: FutureBuilder<List<Item>>(
-                future: _rows,
-                builder: (context, snapshot) {
-                  if (snapshot.hasError)
-                    return Center(
-                      child: TextButton(
-                        onPressed: () => setState(() => _rows = _load()),
-                        child: const Text('Could not load files. Retry'),
-                      ),
-                    );
-                  if (!snapshot.hasData)
-                    return const Center(child: CircularProgressIndicator());
-                  final rows = snapshot.data!.take(40).toList();
-                  return Column(
-                    children: [
-                      Expanded(
-                        child: rows.isEmpty
-                            ? const Center(child: Text('No matching files.'))
-                            : ListView.builder(
-                                itemCount: rows.length,
-                                itemBuilder: (context, index) {
-                                  final item = rows[index];
-                                  final selected = widget.excluded.contains(
-                                    item.id,
-                                  );
-                                  final timed =
-                                      item.durationSeconds != null &&
-                                      item.durationSeconds!.isFinite &&
-                                      item.durationSeconds! > 0;
-                                  return ListTile(
-                                    enabled:
-                                        !selected &&
-                                        (!widget.needsDuration || timed),
-                                    leading: Icon(MediaVisuals.icon(item)),
-                                    title: Text(item.userTitle ?? item.title),
-                                    subtitle: Text(
-                                      '${item.filename}${selected
-                                          ? ' · already selected'
-                                          : widget.needsDuration && !timed
-                                          ? ' · duration not available'
-                                          : ''}',
-                                    ),
-                                    onTap: () => Navigator.pop(context, item),
-                                  );
-                                },
-                              ),
-                      ),
-                      if (_history.isNotEmpty || snapshot.data!.length > 40)
-                        Row(
-                          children: [
-                            TextButton(
-                              onPressed: _history.isEmpty
-                                  ? null
-                                  : () => setState(() {
-                                      _after = _history.removeLast();
-                                      _rows = _load();
-                                    }),
-                              child: const Text('Previous'),
-                            ),
-                            TextButton(
-                              onPressed: snapshot.data!.length <= 40
-                                  ? null
-                                  : () => setState(() {
-                                      _history.add(_after);
-                                      _after = rows.last.id;
-                                      _rows = _load();
-                                    }),
-                              child: const Text('Next'),
-                            ),
-                          ],
-                        ),
-                    ],
-                  );
-                },
+              const SizedBox(height: 16),
+              TextField(
+                controller: _search,
+                decoration: InputDecoration(
+                  labelText: 'Search this library',
+                  suffixIcon: IconButton(
+                    tooltip: 'Search files',
+                    icon: const Icon(Icons.search),
+                    onPressed: () => setState(() {
+                      _after = null;
+                      _history.clear();
+                      _rows = _load();
+                    }),
+                  ),
+                ),
+                onSubmitted: (_) => setState(() {
+                  _after = null;
+                  _history.clear();
+                  _rows = _load();
+                }),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              Expanded(
+                child: FutureBuilder<List<Item>>(
+                  future: _rows,
+                  builder: (context, snapshot) {
+                    if (snapshot.hasError)
+                      return Center(
+                        child: TextButton(
+                          onPressed: () => setState(() {
+                            _rows = _load();
+                          }),
+                          child: const Text('Could not load files. Retry'),
+                        ),
+                      );
+                    if (!snapshot.hasData)
+                      return const Center(child: CircularProgressIndicator());
+                    final rows = snapshot.data!.take(40).toList();
+                    return Column(
+                      children: [
+                        Expanded(
+                          child: rows.isEmpty
+                              ? const Center(child: Text('No matching files.'))
+                              : ListView.builder(
+                                  itemCount: rows.length,
+                                  itemBuilder: (context, index) {
+                                    final item = rows[index];
+                                    final selected = widget.excluded.contains(
+                                      item.id,
+                                    );
+                                    final timed =
+                                        item.durationSeconds != null &&
+                                        item.durationSeconds!.isFinite &&
+                                        item.durationSeconds! > 0;
+                                    return TangerineInteraction(
+                                      enabled:
+                                          !selected &&
+                                          (!widget.needsDuration || timed),
+                                      lift: 1,
+                                      child: ListTile(
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(
+                                            16,
+                                          ),
+                                        ),
+                                        enabled:
+                                            !selected &&
+                                            (!widget.needsDuration || timed),
+                                        leading: Icon(MediaVisuals.icon(item)),
+                                        title: Text(
+                                          item.userTitle ?? item.title,
+                                        ),
+                                        subtitle: Text(
+                                          '${item.filename}${selected
+                                              ? ' · already selected'
+                                              : widget.needsDuration && !timed
+                                              ? ' · duration not available'
+                                              : ''}',
+                                        ),
+                                        onTap: () =>
+                                            Navigator.pop(context, item),
+                                      ),
+                                    );
+                                  },
+                                ),
+                        ),
+                        if (_history.isNotEmpty || snapshot.data!.length > 40)
+                          Row(
+                            children: [
+                              TextButton(
+                                onPressed: _history.isEmpty
+                                    ? null
+                                    : () => setState(() {
+                                        _after = _history.removeLast();
+                                        _rows = _load();
+                                      }),
+                                child: const Text('Previous'),
+                              ),
+                              TextButton(
+                                onPressed: snapshot.data!.length <= 40
+                                    ? null
+                                    : () => setState(() {
+                                        _history.add(_after);
+                                        _after = rows.last.id;
+                                        _rows = _load();
+                                      }),
+                                child: const Text('Next'),
+                              ),
+                            ],
+                          ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     ),

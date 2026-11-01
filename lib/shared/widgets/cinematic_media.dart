@@ -9,6 +9,7 @@ import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import 'item_artwork.dart';
 import 'remote_item_artwork.dart';
+import 'tangerine_controls.dart';
 
 abstract final class MediaVisuals {
   static const posterRatio = 2 / 3;
@@ -117,116 +118,125 @@ class _CinematicMediaCardState extends State<CinematicMediaCard> {
       widget.displayTitle ?? item.userTitle ?? item.title,
     );
     final scheme = Theme.of(context).colorScheme;
-    return AnimatedContainer(
-      duration: AppMotion.resolve(context, AppMotion.quick),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border.all(
-          color: _focused ? scheme.primary : scheme.outlineVariant,
-          width: 2,
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Material(
-        color: scheme.surfaceContainerLow,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: InkWell(
-                onTap: widget.onDetails,
-                onFocusChange: (value) => setState(() => _focused = value),
-                child: Semantics(
-                  button: true,
-                  label: 'Details for $title',
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      CinematicArtwork(item: item),
-                      Positioned(
-                        top: 8,
-                        right: 8,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: Colors.black87,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 7,
-                              vertical: 4,
-                            ),
-                            child: Text(
-                              item.filename.split('.').last.toUpperCase(),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
+    return TangerineInteraction(
+      lift: 3,
+      pressedScale: .985,
+      child: Focus(
+        canRequestFocus: false,
+        onFocusChange: (value) => setState(() => _focused = value),
+        child: AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.quick),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: _focused ? scheme.primary : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Material(
+            color: Colors.transparent,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: InkWell(
+                    onTap: widget.onDetails,
+                    child: Semantics(
+                      button: true,
+                      label: 'Details for $title',
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CinematicArtwork(item: item),
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Colors.black87,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 4,
+                                ),
+                                child: Text(
+                                  item.filename.split('.').last.toUpperCase(),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
-                      Positioned(
-                        right: 8,
-                        bottom: 8,
-                        child: IconButton.filled(
-                          tooltip:
-                              '${widget.actionLabel ?? MediaVisuals.action(item)} $title',
-                          onPressed: item.unavailable ? null : widget.onOpen,
-                          icon: Icon(
-                            MediaVisuals.isReading(item)
-                                ? Icons.menu_book_rounded
-                                : item.itemType == 'image'
-                                ? Icons.open_in_full
-                                : Icons.play_arrow_rounded,
+                          Positioned(
+                            right: 8,
+                            bottom: 8,
+                            child: IconButton.filled(
+                              tooltip:
+                                  '${widget.actionLabel ?? MediaVisuals.action(item)} $title',
+                              onPressed: item.unavailable
+                                  ? null
+                                  : widget.onOpen,
+                              icon: Icon(
+                                MediaVisuals.isReading(item)
+                                    ? Icons.menu_book_rounded
+                                    : item.itemType == 'image'
+                                    ? Icons.open_in_full
+                                    : Icons.play_arrow_rounded,
+                              ),
+                            ),
                           ),
+                          if (item.unavailable)
+                            const Center(
+                              child: Icon(Icons.cloud_off, color: Colors.white),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                if (widget.subtitle != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+                    child: Tooltip(
+                      message: item.filename,
+                      child: Text(
+                        widget.subtitle!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ),
+                  ),
+                if (widget.progressPercent != null)
+                  LinearProgressIndicator(
+                    value: (widget.progressPercent! / 100).clamp(0, 1),
+                    minHeight: 3,
+                    semanticsLabel: '$title progress',
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall,
                         ),
                       ),
-                      if (item.unavailable)
-                        const Center(
-                          child: Icon(Icons.cloud_off, color: Colors.white),
-                        ),
                     ],
                   ),
                 ),
-              ),
+              ],
             ),
-            if (widget.subtitle != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
-                child: Tooltip(
-                  message: item.filename,
-                  child: Text(
-                    widget.subtitle!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ),
-              ),
-            if (widget.progressPercent != null)
-              LinearProgressIndicator(
-                value: (widget.progressPercent! / 100).clamp(0, 1),
-                minHeight: 3,
-                semanticsLabel: '$title progress',
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );

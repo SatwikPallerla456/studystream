@@ -20,7 +20,7 @@ class MediaExperience {
     'md',
     'html',
   }.contains(itemType);
-  bool get notes => course || reading;
+  bool get notes => course || reading || audio || video;
   bool get longAudio =>
       {LibraryKind.audiobooks, LibraryKind.podcasts}.contains(kind);
   bool get completion => !photo && (course || video || reading || longAudio);

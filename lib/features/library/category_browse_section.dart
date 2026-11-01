@@ -15,6 +15,7 @@ import '../../domain/catalog/catalog_hints.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/item_artwork.dart';
 import '../../shared/widgets/media_categories.dart';
@@ -373,10 +374,10 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     return '${group.count} $unit${group.inProgress > 0 ? ' · ${group.inProgress} in progress' : ''}${group.completed > 0 ? ' · ${group.completed} completed' : ''}${group.unavailable > 0 ? ' · ${group.unavailable} offline' : ''}';
   }
 
-  Widget _roots() => Wrap(
-    spacing: 8,
-    runSpacing: 8,
-    children: [
+  Widget _roots() => TangerineSegments<String?>(
+    label: 'Browse by',
+    value: _group,
+    choices: [
       for (final group in switch (widget.kind) {
         LibraryKind.television => <String?>['show', null],
         LibraryKind.music => <String?>['artist', 'album', null],
@@ -388,30 +389,25 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
         LibraryKind.documents => <String?>['format', 'folder', null],
         _ => <String?>[null, 'series', 'author'],
       })
-        ChoiceChip(
-          label: Text(_fieldLabel(group, widget.kind)),
-          selected: _group == group,
-          onSelected: (_) => _changeGroup(group),
-        ),
+        TangerineChoice(value: group, label: _fieldLabel(group, widget.kind)),
     ],
+    onChanged: _changeGroup,
   );
-  Widget _statusFilters() => SizedBox(
-    width: 180,
-    child: DropdownButtonFormField<ShelfStatus>(
-      key: ValueKey(_status),
-      initialValue: _status,
-      decoration: InputDecoration(
-        labelText: _reading
-            ? 'Reading status'
-            : _listening
-            ? 'Listening status'
-            : 'Watch status',
-      ),
-      items: [
+  Widget _statusFilters() => ConstrainedBox(
+    constraints: const BoxConstraints(maxWidth: 320),
+    child: TangerineChoicePicker<ShelfStatus>(
+      value: _status,
+      icon: Icons.auto_stories_outlined,
+      label: _reading
+          ? 'Reading status'
+          : _listening
+          ? 'Listening status'
+          : 'Watch status',
+      choices: [
         for (final status in ShelfStatus.values)
-          DropdownMenuItem(
+          TangerineChoice(
             value: status,
-            child: Text(switch (status) {
+            label: switch (status) {
               ShelfStatus.all => 'All',
               ShelfStatus.inProgress =>
                 _reading
@@ -431,14 +427,12 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
                     : _listening
                     ? 'Played'
                     : 'Watched',
-            }),
+            },
           ),
       ],
       onChanged: (value) {
-        if (value != null) {
-          _status = value;
-          _reload();
-        }
+        _status = value;
+        _reload();
       },
     ),
   );
@@ -455,122 +449,116 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       if (!widget.nested) ...[_roots(), const SizedBox(height: 16)],
-      if (widget.kind == LibraryKind.music)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: Wrap(
-            spacing: 12,
+      TextField(
+        controller: _search,
+        decoration: InputDecoration(
+          prefixIcon: const Icon(Icons.search),
+          labelText: 'Search ${widget.kind.label.toLowerCase()}',
+          hintText: widget.kind == LibraryKind.music
+              ? 'Title, artist or album'
+              : 'Title, author or filename',
+          suffixIcon: _search.text.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear search',
+                  icon: const Icon(Icons.clear),
+                  onPressed: () {
+                    _search.clear();
+                    _reload();
+                  },
+                ),
+        ),
+        onChanged: (_) {
+          _searchTimer?.cancel();
+          _searchTimer = Timer(const Duration(milliseconds: 250), () {
+            if (mounted) _reload();
+          });
+        },
+      ),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 12,
+        runSpacing: 8,
+        children: [
+          TangerineActionGroup(
+            title: 'Filter, sort & view',
+            icon: Icons.tune,
             children: [
-              OutlinedButton.icon(
-                onPressed: () => context.push('/music'),
-                icon: const Icon(Icons.library_music),
-                label: const Text(
-                  'Smart playlists · history · radio · outputs',
-                ),
-              ),
-              TextButton(
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => const MusicLibraryScreen(initialTab: 4),
-                  ),
-                ),
-                child: const Text('Edit library tags'),
+              if (_reading ||
+                  _listening ||
+                  widget.kind == LibraryKind.television ||
+                  widget.kind == LibraryKind.homeVideos)
+                _statusFilters(),
+              if (widget.libraryId == null && !widget.nested) _libraryFilter(),
+              CatalogBrowseControls(
+                sort: _sort,
+                grid: _gridView,
+                favorites: _favorites,
+                tag: _tag,
+                libraryId: widget.libraryId ?? _library,
+                category: widget.kind.name,
+                onSort: (value) {
+                  _sort = value;
+                  _reload();
+                },
+                onGrid: (value) => setState(() => _gridView = value),
+                onFavorites: (value) {
+                  _favorites = value;
+                  _reload();
+                },
+                onTag: (value) {
+                  _tag = value;
+                  _reload();
+                },
               ),
             ],
           ),
-        ),
-      Wrap(
-        spacing: 16,
-        runSpacing: 12,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          SizedBox(
-            width: 420,
-            child: TextField(
-              controller: _search,
-              decoration: InputDecoration(
-                prefixIcon: const Icon(Icons.search),
-                labelText: 'Search ${widget.kind.label.toLowerCase()}',
-                hintText: _visual
-                    ? 'Title or filename'
-                    : widget.kind == LibraryKind.documents
-                    ? 'Document title or author'
-                    : widget.kind == LibraryKind.music
-                    ? 'Title, artist or album'
-                    : widget.kind == LibraryKind.television
-                    ? 'Show or episode title'
-                    : 'Title, author or series',
-                suffixIcon: _search.text.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: 'Clear search',
-                        icon: const Icon(Icons.clear),
-                        onPressed: () {
-                          _search.clear();
-                          _reload();
-                        },
-                      ),
-              ),
-              onChanged: (_) {
-                _searchTimer?.cancel();
-                _searchTimer = Timer(const Duration(milliseconds: 250), () {
-                  if (mounted) _reload();
-                });
-              },
+          if (widget.kind == LibraryKind.music)
+            TangerineActionGroup(
+              title: 'Music tools',
+              icon: Icons.library_music,
+              children: [
+                TextButton.icon(
+                  onPressed: () => context.push('/music'),
+                  icon: const Icon(Icons.library_music),
+                  label: const Text(
+                    'Smart playlists · history · radio · outputs',
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => const MusicLibraryScreen(initialTab: 4),
+                    ),
+                  ),
+                  child: const Text('Edit library tags'),
+                ),
+              ],
             ),
-          ),
-          if (_reading ||
-              _listening ||
-              widget.kind == LibraryKind.television ||
-              widget.kind == LibraryKind.homeVideos)
-            _statusFilters(),
-          if (widget.libraryId == null && !widget.nested) _libraryFilter(),
         ],
-      ),
-      const SizedBox(height: 12),
-      CatalogBrowseControls(
-        sort: _sort,
-        grid: _gridView,
-        favorites: _favorites,
-        tag: _tag,
-        libraryId: widget.libraryId ?? _library,
-        category: widget.kind.name,
-        onSort: (value) {
-          _sort = value;
-          _reload();
-        },
-        onGrid: (value) => setState(() => _gridView = value),
-        onFavorites: (value) {
-          _favorites = value;
-          _reload();
-        },
-        onTag: (value) {
-          _tag = value;
-          _reload();
-        },
       ),
       if (widget.kind == LibraryKind.comics &&
           widget.filters.containsKey('series')) ...[
         const SizedBox(height: 12),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
+        TangerineSegments<ReadingUnits>(
+          label: 'Reading formats',
+          value: _units,
+          choices: [
             for (final units in ReadingUnits.values)
-              ChoiceChip(
-                label: Text(switch (units) {
+              TangerineChoice(
+                value: units,
+                label: switch (units) {
                   ReadingUnits.all => 'All formats',
                   ReadingUnits.volumes => 'Volumes',
                   ReadingUnits.chapters => 'Chapters / issues',
-                }),
-                selected: _units == units,
-                onSelected: (_) {
-                  _units = units;
-                  _reload();
                 },
               ),
           ],
+          onChanged: (units) {
+            _units = units;
+            _reload();
+          },
         ),
       ],
       const SizedBox(height: 20),
@@ -665,7 +653,7 @@ class _CategoryBrowseState extends ConsumerState<CategoryBrowseSection> {
               Wrap(
                 spacing: 12,
                 runSpacing: 12,
-                crossAxisAlignment: WrapCrossAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.start,
                 children: [
                   Text(
                     '${_fieldLabel(_group, widget.kind)}${page.more ? ' · more on the next page' : ''}',
@@ -1022,7 +1010,7 @@ class _CategoryDrillScreen extends StatelessWidget {
           Wrap(
             spacing: 4,
             runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.start,
             children: [
               TextButton(
                 onPressed: () => Navigator.of(context).popUntil(

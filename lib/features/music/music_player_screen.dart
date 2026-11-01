@@ -14,6 +14,7 @@ import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/item_artwork.dart';
 import '../../shared/widgets/timed_word_text.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import 'music_art.dart';
 import 'music_provider.dart';
 import 'music_library_screen.dart';
@@ -202,6 +203,22 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
     });
   }
 
+  Future<void> _notes(MusicSession session) async {
+    final track = session.track;
+    if (track == null) return;
+    await showLessonToolsSheet(
+      context: context,
+      database: ref.read(appDatabaseProvider),
+      item: track.item,
+      title: 'Listening notes & bookmarks',
+      currentPositionSeconds:
+          (session.player?.state.position.inMilliseconds ?? 0) / 1000,
+      onJumpToPosition: (seconds) => _run(
+        () => session.seek(Duration(milliseconds: (seconds * 1000).round())),
+      ),
+    );
+  }
+
   Future<void> _preferences(MusicSession session) async {
     var gapless = session.gapless,
         fade = session.crossfade,
@@ -214,48 +231,50 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
           title: const Text('Listening & atmosphere'),
           content: SizedBox(
             width: 500,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SwitchListTile(
-                  title: const Text('Gapless transitions'),
-                  subtitle: const Text(
-                    'Keep the audio output open between queued tracks',
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    title: const Text('Gapless transitions'),
+                    subtitle: const Text(
+                      'Keep the audio output open between queued tracks',
+                    ),
+                    value: gapless,
+                    onChanged: (v) => set(() => gapless = v),
                   ),
-                  value: gapless,
-                  onChanged: (v) => set(() => gapless = v),
-                ),
-                Text(
-                  'Crossfade: ${fade.toStringAsFixed(1)} s · 0 keeps album transitions intact',
-                ),
-                Slider(
-                  value: fade,
-                  min: 0,
-                  max: 12,
-                  divisions: 24,
-                  onChanged: (v) => set(() => fade = v),
-                ),
-                DropdownButtonFormField<String>(
-                  initialValue: style,
-                  items: [
-                    for (final value in ['auto', 'calm', 'punchy', 'off'])
-                      DropdownMenuItem(value: value, child: Text(value)),
-                  ],
-                  onChanged: (v) => set(() => style = v!),
-                  decoration: const InputDecoration(
-                    labelText: 'Artwork response',
+                  Text(
+                    'Crossfade: ${fade.toStringAsFixed(1)} s · 0 keeps album transitions intact',
                   ),
-                ),
-                const SizedBox(height: 16),
-                Text('Motion intensity ${(intensity * 100).round()}%'),
-                Slider(
-                  value: intensity,
-                  onChanged: (v) => set(() => intensity = v),
-                ),
-                const Text(
-                  'Colours come from the artwork. Audio energy drives the pulse. Reduced motion keeps the background still.',
-                ),
-              ],
+                  Slider(
+                    value: fade,
+                    min: 0,
+                    max: 12,
+                    divisions: 24,
+                    onChanged: (v) => set(() => fade = v),
+                  ),
+                  TangerineSegments<String>(
+                    label: 'Artwork response',
+                    value: style,
+                    choices: const [
+                      TangerineChoice(value: 'auto', label: 'Auto'),
+                      TangerineChoice(value: 'calm', label: 'Calm'),
+                      TangerineChoice(value: 'punchy', label: 'Punchy'),
+                      TangerineChoice(value: 'off', label: 'Off'),
+                    ],
+                    onChanged: (value) => set(() => style = value),
+                  ),
+                  const SizedBox(height: 16),
+                  Text('Motion intensity ${(intensity * 100).round()}%'),
+                  Slider(
+                    value: intensity,
+                    onChanged: (v) => set(() => intensity = v),
+                  ),
+                  const Text(
+                    'Colours come from the artwork. Audio energy drives the pulse. Reduced motion keeps the background still.',
+                  ),
+                ],
+              ),
             ),
           ),
           actions: [
@@ -338,6 +357,11 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
               title: const Text('Now playing'),
               actions: [
                 IconButton(
+                  tooltip: 'Notes & bookmarks',
+                  onPressed: () => _notes(session),
+                  icon: const Icon(Icons.note_alt_outlined),
+                ),
+                IconButton(
                   tooltip: 'Queue & playlists',
                   icon: const Icon(Icons.queue_music),
                   onPressed: () => context.push(
@@ -402,42 +426,56 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                 child: LayoutBuilder(
                   builder: (context, box) {
                     final wide = box.maxWidth > 850;
-                    final artwork = Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Semantics(
-                          label:
-                              'Album artwork; audio-reactive colour background',
-                          image: true,
-                          child: Transform.scale(
-                            scale: reduced
-                                ? 1
-                                : 1 +
-                                      session.beat *
-                                          session.visualIntensity *
-                                          .018 +
-                                      session.energy *
-                                          session.visualIntensity *
-                                          .012,
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(24),
-                              child: ItemArtwork(
-                                item: track.item,
-                                size: wide
-                                    ? 310
-                                    : box.maxWidth.clamp(180, 330) - 48,
-                              ),
-                            ),
+                    final compactArtwork = !wide && box.maxHeight < 700;
+                    final coverSize = wide
+                        ? 310.0
+                        : compactArtwork
+                        ? 96.0
+                        : 220.0;
+                    final cover = Semantics(
+                      label: 'Album artwork; audio-reactive colour background',
+                      image: true,
+                      child: Transform.scale(
+                        scale: reduced
+                            ? 1
+                            : 1 +
+                                  session.beat *
+                                      session.visualIntensity *
+                                      .018 +
+                                  session.energy *
+                                      session.visualIntensity *
+                                      .012,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(
+                            compactArtwork ? 18 : 24,
                           ),
+                          child: ItemArtwork(item: track.item, size: coverSize),
                         ),
-                        const SizedBox(height: 26),
+                      ),
+                    );
+                    final trackInfo = Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: compactArtwork
+                          ? CrossAxisAlignment.start
+                          : CrossAxisAlignment.center,
+                      children: [
                         Text(
                           track.title,
-                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: compactArtwork
+                              ? TextAlign.start
+                              : TextAlign.center,
                           style: Theme.of(context).textTheme.headlineSmall
                               ?.copyWith(color: Colors.white),
                         ),
                         TextButton(
+                          style: TextButton.styleFrom(
+                            alignment: compactArtwork
+                                ? AlignmentDirectional.centerStart
+                                : Alignment.center,
+                            padding: EdgeInsets.zero,
+                          ),
                           onPressed: () => Navigator.push(
                             context,
                             MaterialPageRoute<void>(
@@ -452,16 +490,40 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                             style: const TextStyle(color: Colors.white70),
                           ),
                         ),
-                        Text(
-                          '${track.metadata['album'] ?? ''}${track.metadata['edition'] == null ? '' : ' · ${track.metadata['edition']}'}',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.white60),
-                        ),
+                        if ('${track.metadata['album'] ?? ''}${track.metadata['edition'] ?? ''}'
+                            .isNotEmpty)
+                          Text(
+                            '${track.metadata['album'] ?? ''}${track.metadata['edition'] == null ? '' : ' · ${track.metadata['edition']}'}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: compactArtwork
+                                ? TextAlign.start
+                                : TextAlign.center,
+                            style: const TextStyle(color: Colors.white60),
+                          ),
                       ],
                     );
+                    final artwork = compactArtwork
+                        ? Row(
+                            children: [
+                              cover,
+                              const SizedBox(width: 20),
+                              Expanded(child: trackInfo),
+                            ],
+                          )
+                        : Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              cover,
+                              const SizedBox(height: 20),
+                              trackInfo,
+                            ],
+                          );
                     final timeline = Column(
                       children: [
                         Slider(
+                          semanticFormatterCallback: (value) =>
+                              musicTime(Duration(milliseconds: value.round())),
                           value: position.inMilliseconds.toDouble().clamp(
                             0,
                             duration.inMilliseconds > 0
@@ -617,19 +679,7 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                               label: const Text('Import lyrics / CUE'),
                             ),
                             TextButton.icon(
-                              onPressed: () => showLessonToolsSheet(
-                                context: context,
-                                database: ref.read(appDatabaseProvider),
-                                item: track.item,
-                                title: 'Listening notes & bookmarks',
-                                currentPositionSeconds:
-                                    position.inMilliseconds / 1000,
-                                onJumpToPosition: (s) => _run(
-                                  () => session.seek(
-                                    Duration(milliseconds: (s * 1000).round()),
-                                  ),
-                                ),
-                              ),
+                              onPressed: () => _notes(session),
                               icon: const Icon(Icons.bookmark_outline),
                               label: const Text('Notes & bookmarks'),
                             ),

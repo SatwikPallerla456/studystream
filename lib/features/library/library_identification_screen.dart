@@ -10,6 +10,8 @@ import '../../domain/catalog/media_catalog_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/media_categories.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
+import '../../core/theme/app_theme.dart';
 import '../media/catalog_editor_screen.dart';
 import 'automatic_identification_controls.dart';
 
@@ -130,7 +132,9 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           StudyPageHeader(
-            title: 'Identify titles',
+            title: 'Review your titles',
+            description:
+                'Review uncertain titles, or choose Find match to correct a match.',
             actions: [
               OutlinedButton.icon(
                 onPressed: _busy ? null : _reidentify,
@@ -141,15 +145,14 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
               ),
             ],
           ),
-          const Text(
-            'Confident movie and TV matches receive metadata automatically. Review uncertain titles or use Find match to choose or correct any match.',
-          ),
+          const SizedBox(height: AppSpace.md),
           AutomaticIdentificationControls(
             libraryId: widget.libraryId,
             onQueued: _reload,
           ),
           const SizedBox(height: 16),
-          if (_message != null) Text(_message!),
+          if (_message != null)
+            Semantics(liveRegion: true, child: Text(_message!)),
           TextField(
             controller: _search,
             decoration: const InputDecoration(
@@ -181,122 +184,105 @@ class _IdentificationState extends ConsumerState<LibraryIdentificationScreen> {
                       'No files to identify. Scan a source folder or change the search.',
                     ),
                   for (final row in rows.take(40))
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${row.data['title'] ?? row.item.title}',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            SelectableText(row.item.filename),
-                            Text(
-                              [
-                                row.data['matchState'] == 'matched'
-                                    ? row.data['_matchOrigin'] == 'automatic'
-                                          ? 'Automatically matched · TheTVDB'
-                                          : 'Catalog matched'
-                                    : row.data['_identificationState'] ==
-                                          'review'
-                                    ? 'Needs review · use Find match'
-                                    : row.data['_identificationState'] ==
-                                              'queued' ||
-                                          row.data['_identificationState'] ==
-                                              'running'
-                                    ? 'Identification queued'
-                                    : 'Local filename hints',
-                                if (row.data['year'] != null)
-                                  '${row.data['year']}',
-                                if (CatalogHints.episodeLabel(row.data)
-                                    case final String episode)
-                                  episode,
-                              ].join(' · '),
-                            ),
-                            const SizedBox(height: 12),
-                            Wrap(
-                              spacing: 16,
-                              runSpacing: 12,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              children: [
-                                SizedBox(
-                                  width: 240,
-                                  child: DropdownButtonFormField<String>(
-                                    key: ValueKey(
-                                      '${row.item.id}:${row.data['category']}',
-                                    ),
-                                    initialValue:
-                                        LibraryKind.values.any(
-                                          (k) => k.name == row.data['category'],
-                                        )
-                                        ? row.data['category'] as String
-                                        : 'mixed',
-                                    decoration: const InputDecoration(
-                                      labelText: 'Category',
-                                    ),
-                                    items: [
-                                      for (final kind in LibraryKind.values)
-                                        DropdownMenuItem(
-                                          value: kind.name,
-                                          child: Row(
-                                            children: [
-                                              Icon(
-                                                mediaCategoryIcon(kind),
-                                                size: 18,
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Text(kind.label),
-                                            ],
-                                          ),
-                                        ),
-                                    ],
-                                    onChanged: _busy
-                                        ? null
-                                        : (value) async {
-                                            if (value == null) return;
-                                            try {
-                                              await CatalogIdentityStore(
-                                                ref.read(appDatabaseProvider),
-                                              ).override(
-                                                row.item,
-                                                'category',
-                                                value,
-                                              );
-                                              if (mounted) _reload();
-                                            } catch (_) {
-                                              if (mounted)
-                                                setState(
-                                                  () => _message =
-                                                      'Category could not be saved. Try again.',
-                                                );
-                                            }
-                                          },
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${row.data['title'] ?? row.item.title}',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          SelectableText(row.item.filename),
+                          Text(
+                            [
+                              row.data['matchState'] == 'matched'
+                                  ? row.data['_matchOrigin'] == 'automatic'
+                                        ? 'Automatically matched · TheTVDB'
+                                        : 'Catalog matched'
+                                  : row.data['_identificationState'] == 'review'
+                                  ? 'Needs review · use Find match'
+                                  : row.data['_identificationState'] ==
+                                            'queued' ||
+                                        row.data['_identificationState'] ==
+                                            'running'
+                                  ? 'Identification queued'
+                                  : 'Local filename hints',
+                              if (row.data['year'] != null)
+                                '${row.data['year']}',
+                              if (CatalogHints.episodeLabel(row.data)
+                                  case final String episode)
+                                episode,
+                            ].join(' · '),
+                          ),
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 16,
+                            runSpacing: 12,
+                            crossAxisAlignment: WrapCrossAlignment.start,
+                            children: [
+                              SizedBox(
+                                width: 240,
+                                child: TangerineChoicePicker<String>(
+                                  key: ValueKey(
+                                    '${row.item.id}:${row.data['category']}',
                                   ),
-                                ),
-                                OutlinedButton.icon(
-                                  onPressed: _busy
+                                  value:
+                                      LibraryKind.values.any(
+                                        (k) => k.name == row.data['category'],
+                                      )
+                                      ? row.data['category'] as String
+                                      : 'mixed',
+                                  label: 'Category',
+                                  choices: [
+                                    for (final kind in LibraryKind.values)
+                                      TangerineChoice(
+                                        value: kind.name,
+                                        label: kind.label,
+                                        icon: mediaCategoryIcon(kind),
+                                      ),
+                                  ],
+                                  onChanged: _busy
                                       ? null
-                                      : () async {
-                                          await Navigator.of(context).push(
-                                            MaterialPageRoute<void>(
-                                              builder: (_) =>
-                                                  CatalogEditorScreen(
-                                                    item: row.item,
-                                                  ),
-                                            ),
-                                          );
-                                          if (mounted) _reload();
+                                      : (value) async {
+                                          try {
+                                            await CatalogIdentityStore(
+                                              ref.read(appDatabaseProvider),
+                                            ).override(
+                                              row.item,
+                                              'category',
+                                              value,
+                                            );
+                                            if (mounted) _reload();
+                                          } catch (_) {
+                                            if (mounted)
+                                              setState(
+                                                () => _message =
+                                                    'Category could not be saved. Try again.',
+                                              );
+                                          }
                                         },
-                                  icon: const Icon(Icons.manage_search),
-                                  label: const Text(
-                                    'Find match / edit details',
-                                  ),
                                 ),
-                              ],
-                            ),
-                          ],
-                        ),
+                              ),
+                              TextButton.icon(
+                                onPressed: _busy
+                                    ? null
+                                    : () async {
+                                        await Navigator.of(context).push(
+                                          MaterialPageRoute<void>(
+                                            builder: (_) => CatalogEditorScreen(
+                                              item: row.item,
+                                            ),
+                                          ),
+                                        );
+                                        if (mounted) _reload();
+                                      },
+                                icon: const Icon(Icons.manage_search),
+                                label: const Text('Find match / edit details'),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
                   Wrap(

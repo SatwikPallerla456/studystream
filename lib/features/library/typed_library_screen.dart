@@ -11,6 +11,7 @@ import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../media/media_browser_section.dart';
 import 'collections_screen.dart';
 import 'photo_slideshow_screen.dart';
@@ -222,16 +223,11 @@ class _TypedLibraryState extends ConsumerState<TypedLibraryScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (widget.filters.isEmpty) ...[
-            Text(
-              widget.kind.label,
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
+            TangerineActionGroup(
+              title: 'Library tools',
+              icon: Icons.tune_rounded,
               children: [
-                OutlinedButton.icon(
+                TextButton.icon(
                   onPressed: () async {
                     await showLibraryScan(
                       context,
@@ -242,7 +238,7 @@ class _TypedLibraryState extends ConsumerState<TypedLibraryScreen> {
                   icon: const Icon(Icons.sync),
                   label: const Text('Scan library'),
                 ),
-                OutlinedButton.icon(
+                TextButton.icon(
                   onPressed: () async {
                     await context.push(
                       '/library/${widget.library.id}/identify',

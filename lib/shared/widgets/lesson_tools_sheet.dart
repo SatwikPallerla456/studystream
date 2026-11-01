@@ -12,6 +12,7 @@ import '../../domain/study/study_catalog_repository.dart';
 import 'content_state.dart';
 import 'study_animated_list.dart';
 import 'study_ui.dart';
+import 'tangerine_controls.dart';
 
 Future<void> showLessonToolsSheet({
   required BuildContext context,
@@ -577,21 +578,24 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
                 ],
               ),
             ),
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(
-                value: 0,
-                icon: Icon(Icons.notes),
-                label: Text('Notes'),
-              ),
-              ButtonSegment(
-                value: 1,
-                icon: Icon(Icons.bookmark_outline),
-                label: Text('Bookmarks'),
-              ),
-            ],
-            selected: {_tab},
-            onSelectionChanged: (value) => setState(() => _tab = value.first),
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpace.md,
+              vertical: AppSpace.sm,
+            ),
+            child: TangerineSegments<int>(
+              label: 'Contextual study entries',
+              value: _tab,
+              choices: const [
+                TangerineChoice(value: 0, label: 'Notes', icon: Icons.notes),
+                TangerineChoice(
+                  value: 1,
+                  label: 'Bookmarks',
+                  icon: Icons.bookmark_outline,
+                ),
+              ],
+              onChanged: (value) => setState(() => _tab = value),
+            ),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: AppSpace.md),
@@ -599,7 +603,8 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
               controller: _search,
               maxLength: 256,
               decoration: InputDecoration(
-                labelText: 'Search this title’s Study entries',
+                labelText: 'Search this title’s notes & bookmarks',
+                counterText: '',
                 suffixIcon: IconButton(
                   tooltip: 'Search entries',
                   icon: const Icon(Icons.search),
@@ -628,6 +633,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
 
   Widget _notes() {
     return StreamBuilder<StudyPageResult>(
+      key: const ValueKey('contextual-note-page'),
       stream: _pages[0],
       builder: (context, snapshot) {
         if (snapshot.hasError) {
@@ -688,15 +694,18 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
                       ),
                       subtitle: Padding(
                         padding: const EdgeInsets.only(top: AppSpace.xs),
-                        child: StudyStatusBadge(
-                          label: _location(
-                            note.positionSeconds,
-                            note.pageNumber,
+                        child: Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: StudyStatusBadge(
+                            label: _location(
+                              note.positionSeconds,
+                              note.pageNumber,
+                            ),
+                            icon: note.pageNumber != null
+                                ? Icons.menu_book_rounded
+                                : Icons.schedule_rounded,
+                            tone: StudyStatusTone.info,
                           ),
-                          icon: note.pageNumber != null
-                              ? Icons.menu_book_rounded
-                              : Icons.schedule_rounded,
-                          tone: StudyStatusTone.info,
                         ),
                       ),
                       onTap:
@@ -724,7 +733,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
                 },
               ),
             ),
-            _pager(0, page),
+            if (_history[0].isNotEmpty || page.next != null) _pager(0, page),
           ],
         );
       },
@@ -733,6 +742,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
 
   Widget _bookmarks() {
     return StreamBuilder<StudyPageResult>(
+      key: const ValueKey('contextual-bookmark-page'),
       stream: _pages[1],
       builder: (context, snapshot) {
         if (snapshot.hasError) {
@@ -819,7 +829,7 @@ class _LessonToolsSheetState extends State<LessonToolsSheet> {
                 },
               ),
             ),
-            _pager(1, page),
+            if (_history[1].isNotEmpty || page.next != null) _pager(1, page),
           ],
         );
       },

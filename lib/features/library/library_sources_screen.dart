@@ -14,6 +14,9 @@ import '../../domain/reader/reader_session_store.dart';
 import '../reader/reader_preferences_sheet.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/media_categories.dart';
+import '../../shared/widgets/tangerine_controls.dart';
+import '../../core/theme/app_theme.dart';
 
 class LibrarySourcesScreen extends ConsumerStatefulWidget {
   const LibrarySourcesScreen({super.key, required this.libraryId});
@@ -30,6 +33,7 @@ class _LibrarySourcesState extends ConsumerState<LibrarySourcesScreen> {
   ScanProgress? _progress;
   String? _message;
   bool _loading = true;
+  bool _savingKind = false;
   late final AppDatabase _db;
   late final MediaCatalogRepository _catalog;
   @override
@@ -157,20 +161,28 @@ class _LibrarySourcesState extends ConsumerState<LibrarySourcesScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          DropdownButtonFormField<LibraryKind>(
-            key: ValueKey(_kind),
-            initialValue: _kind,
-            decoration: const InputDecoration(labelText: 'Library content'),
-            items: LibraryKind.values
-                .map(
-                  (kind) =>
-                      DropdownMenuItem(value: kind, child: Text(kind.label)),
-                )
-                .toList(),
-            onChanged: _token != null || _loading
+          Text(
+            'Library content',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 8),
+          TangerineChoicePicker<LibraryKind>(
+            value: _kind,
+            label: 'Content',
+            icon: mediaCategoryIcon(_kind),
+            choices: [
+              for (final kind in LibraryKind.values)
+                TangerineChoice(
+                  value: kind,
+                  label: kind.label,
+                  icon: mediaCategoryIcon(kind),
+                ),
+            ],
+            onChanged: _token != null || _loading || _savingKind
                 ? null
                 : (value) async {
-                    if (value == null) return;
+                    if (_savingKind) return;
+                    setState(() => _savingKind = true);
                     try {
                       await _catalog.setLibraryKind(widget.libraryId, value);
                       if (mounted) setState(() => _kind = value);
@@ -180,6 +192,8 @@ class _LibrarySourcesState extends ConsumerState<LibrarySourcesScreen> {
                           () => _message =
                               'The library category could not be saved. Reopen settings and try again.',
                         );
+                    } finally {
+                      if (mounted) setState(() => _savingKind = false);
                     }
                   },
           ),
@@ -202,11 +216,20 @@ class _LibrarySourcesState extends ConsumerState<LibrarySourcesScreen> {
               label: const Text('Library reading defaults'),
             ),
           const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: _token != null ? null : () => _choose(),
-            icon: const Icon(Icons.create_new_folder_outlined),
-            label: const Text('Add source folder'),
+          StudySectionHeader(
+            title: 'Connected folders',
+            description:
+                'Scan each source independently, or relink a folder that has moved.',
+            trailing: TangerineInteraction(
+              enabled: _token == null && !_loading,
+              child: FilledButton.icon(
+                onPressed: _token != null || _loading ? null : () => _choose(),
+                icon: const Icon(Icons.create_new_folder_outlined),
+                label: const Text('Add source folder'),
+              ),
+            ),
           ),
+          const SizedBox(height: AppSpace.lg),
           if (_loading) const LinearProgressIndicator(),
           if (_token != null) ...[
             const SizedBox(height: 16),
@@ -220,35 +243,91 @@ class _LibrarySourcesState extends ConsumerState<LibrarySourcesScreen> {
           if (_message != null)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
-              child: SelectableText(_message!),
+              child: Semantics(
+                liveRegion: true,
+                child: SelectableText(_message!),
+              ),
             ),
           for (final source in _sources)
-            Card(
-              child: ListTile(
-                isThreeLine: true,
-                leading: Icon(
-                  source.unavailable ? Icons.cloud_off : Icons.folder_outlined,
-                ),
-                title: Text(
-                  source.namespace.isEmpty
-                      ? 'Original source'
-                      : source.root.split(RegExp(r'[/\\]')).last,
-                ),
-                subtitle: Text(
-                  '${source.root}\n${source.unavailable ? 'Unavailable' : 'Available'} · ${_scans[source.id]?['outcome'] ?? 'Not scanned'}',
-                ),
-                trailing: PopupMenuButton<String>(
-                  enabled: _token == null,
-                  onSelected: (value) =>
-                      value == 'scan' ? _scan(source) : _choose(source: source),
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'scan', child: Text('Scan / retry')),
-                    PopupMenuItem(
-                      value: 'relink',
-                      child: Text('Relink folder'),
-                    ),
-                  ],
-                ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpace.lg),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Icon(
+                          source.unavailable
+                              ? Icons.cloud_off_outlined
+                              : Icons.folder_open_rounded,
+                          color: source.unavailable
+                              ? Theme.of(context).colorScheme.error
+                              : Theme.of(context).colorScheme.primary,
+                        ),
+                      ),
+                      const SizedBox(width: AppSpace.md),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              source.namespace.isEmpty
+                                  ? 'Original source'
+                                  : source.root.split(RegExp(r'[/\\]')).last,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 4),
+                            SelectableText(
+                              source.root,
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpace.sm),
+                  StudyStatusBadge(
+                    label:
+                        '${source.unavailable ? 'Unavailable' : 'Available'} · ${_scans[source.id]?['outcome'] ?? 'Not scanned'}',
+                    icon: source.unavailable
+                        ? Icons.cloud_off_outlined
+                        : Icons.check_circle_outline_rounded,
+                    tone: source.unavailable
+                        ? StudyStatusTone.warning
+                        : StudyStatusTone.neutral,
+                  ),
+                  const SizedBox(height: AppSpace.xs),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      TangerineInteraction(
+                        enabled: _token == null,
+                        child: TextButton.icon(
+                          onPressed: _token != null
+                              ? null
+                              : () => _scan(source),
+                          icon: const Icon(Icons.sync_rounded),
+                          label: const Text('Scan / retry'),
+                        ),
+                      ),
+                      TangerineInteraction(
+                        enabled: _token == null,
+                        child: TextButton.icon(
+                          onPressed: _token != null
+                              ? null
+                              : () => _choose(source: source),
+                          icon: const Icon(Icons.folder_copy_outlined),
+                          label: const Text('Relink folder'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
         ],

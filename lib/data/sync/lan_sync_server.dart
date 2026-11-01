@@ -48,7 +48,17 @@ class LanSyncState {
 }
 
 class LanSyncServer {
-  LanSyncServer(this.database, {this.playbackController});
+  LanSyncServer(
+    this.database, {
+    this.playbackController,
+    this.bindAddress,
+    this.advertise = true,
+  });
+
+  /// Local previews can bind loopback and disable discovery. Normal hosting
+  /// retains the existing LAN binding and advertisement behavior.
+  final InternetAddress? bindAddress;
+  final bool advertise;
 
   final RemotePlaybackController? playbackController;
 
@@ -89,13 +99,13 @@ class LanSyncServer {
     _name = name.trim();
     try {
       final server = await HttpServer.bind(
-        InternetAddress.anyIPv4,
+        bindAddress ?? InternetAddress.anyIPv4,
         port,
         shared: false,
       );
       _server = server;
       await SyncChangeJournal(database).trim();
-      await _discovery.advertise(server.port, name: _name);
+      if (advertise) await _discovery.advertise(server.port, name: _name);
       regeneratePairingCode();
       _requestSubscription = server.listen(
         (request) => unawaited(
@@ -246,6 +256,10 @@ class LanSyncServer {
       final device = await _authorise(request);
       if (device == null) return;
       if (request.method == 'GET' && request.uri.path == '/v1/session') {
+        final access = LibraryAccessStore(database);
+        final browsable = await access.allowed(device.id, 'browse');
+        final streamable = await access.allowed(device.id, 'stream');
+        final mutable = await access.allowed(device.id, 'mutate');
         return await _json(request, HttpStatus.ok, {
           'deviceId': device.id,
           'capabilities': [
@@ -259,12 +273,12 @@ class LanSyncServer {
           'libraries': [
             for (final library
                 in await database.select(database.libraries).get())
-              if ((await LibraryAccessStore(
-                database,
-              ).allowed(device.id, 'browse')).contains(library.id))
+              if (browsable.contains(library.id))
                 {
                   'id': library.id,
                   'title': library.title,
+                  'canStream': streamable.contains(library.id),
+                  'canMutate': mutable.contains(library.id),
                   'kind': (await MediaCatalogRepository(
                     database,
                   ).libraryKind(library.id)).name,

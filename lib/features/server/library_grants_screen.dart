@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../data/db/app_database.dart';
 import '../../data/sync/library_access_store.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 class LibraryGrantsScreen extends StatefulWidget {
   const LibraryGrantsScreen({
@@ -104,43 +106,76 @@ class _LibraryGrantsState extends State<LibraryGrantsScreen> {
     ),
     body: _libraries == null
         ? const Center(child: CircularProgressIndicator())
-        : ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              const Text(
-                'Choose what this player can access. New libraries require approval. Turning browsing off also turns off streaming and changes.',
-              ),
-              if (_error != null) ...[
-                Text(_error!),
-                TextButton(
-                  onPressed: _saving ? null : _load,
-                  child: const Text('Reload access'),
+        : StudyPage(
+            maxWidth: 880,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Choose what this player can access. New libraries require approval. Turning browsing off also turns off streaming and changes.',
                 ),
-              ],
-              for (final library in _libraries!)
-                Card(
-                  child: Column(
-                    children: [
-                      ListTile(title: Text(library.title)),
-                      for (final permission in LibraryAccessStore.permissions)
-                        SwitchListTile(
-                          title: Text(switch (permission) {
-                            'browse' => 'Browse catalog',
-                            'stream' => 'Stream files',
-                            _ => 'Sync changes and control playback',
-                          }),
-                          value: _grants[library.id]?[permission] ?? false,
-                          onChanged:
-                              _saving ||
-                                  permission != 'browse' &&
-                                      _grants[library.id]?['browse'] != true
-                              ? null
-                              : (value) => _set(library.id, permission, value),
-                        ),
-                    ],
+                if (_error != null) ...[
+                  Text(_error!),
+                  TextButton(
+                    onPressed: _saving ? null : _load,
+                    child: const Text('Reload access'),
                   ),
-                ),
-            ],
+                ],
+                if (_libraries!.isEmpty && _error == null)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Text(
+                      'No shareable folder libraries. Add a linked folder on the server to choose access here. Individually imported files and remote libraries are not shared by this host.',
+                    ),
+                  ),
+                for (final library in _libraries!)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 16),
+                    child: TangerinePreferenceSection(
+                      key: ValueKey(library.id),
+                      title: library.title,
+                      icon: Icons.video_library_outlined,
+                      collapsible: true,
+                      description: _grants[library.id]?['browse'] == true
+                          ? [
+                              'Browsing',
+                              if (_grants[library.id]?['stream'] == true)
+                                'Streaming',
+                              if (_grants[library.id]?['mutate'] == true)
+                                'Sync & control',
+                            ].join(' · ')
+                          : 'No access · expand to choose permissions',
+                      child: Column(
+                        children: [
+                          for (final permission
+                              in LibraryAccessStore.permissions)
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(switch (permission) {
+                                'browse' => 'Browse catalog',
+                                'stream' => 'Stream files',
+                                _ => 'Sync changes and control playback',
+                              }),
+                              subtitle: permission == 'mutate'
+                                  ? const Text(
+                                      'Allow notes, bookmarks, progress and host playback commands.',
+                                    )
+                                  : null,
+                              value: _grants[library.id]?[permission] ?? false,
+                              onChanged:
+                                  _saving ||
+                                      permission != 'browse' &&
+                                          _grants[library.id]?['browse'] != true
+                                  ? null
+                                  : (value) =>
+                                        _set(library.id, permission, value),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
   );
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../data/db/app_database.dart';
 import '../../domain/reader/reader_session_store.dart';
 
@@ -16,6 +18,11 @@ Future<void> showReaderPreferences({
   context: context,
   isScrollControlled: true,
   showDragHandle: true,
+  useSafeArea: true,
+  sheetAnimationStyle: AnimationStyle(
+    duration: AppMotion.resolve(context, AppMotion.emphasized),
+    reverseDuration: AppMotion.resolve(context, AppMotion.standard),
+  ),
   builder: (_) => _ReaderPreferencesSheet(
     store: ReaderPreferencesStore(database, libraryId: libraryId, item: item),
     initialScope: initialScope,
@@ -94,37 +101,55 @@ class _ReaderPreferencesState extends State<_ReaderPreferencesSheet> {
       child: SizedBox(
         height: MediaQuery.sizeOf(context).height * .85,
         child: SingleChildScrollView(
+          primary: false,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Reading preferences',
-                  style: Theme.of(context).textTheme.headlineSmall,
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Reading preferences',
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                    ),
+                    TangerineInteraction(
+                      child: IconButton(
+                        tooltip: 'Close reading preferences',
+                        onPressed: _busy ? null : () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 16),
-                SegmentedButton<ReaderPreferenceScope>(
-                  segments: [
-                    const ButtonSegment(
+                TangerineSegments<ReaderPreferenceScope>(
+                  label: 'Preference scope',
+                  value: _scope,
+                  choices: [
+                    const TangerineChoice(
                       value: ReaderPreferenceScope.app,
-                      label: Text('App'),
+                      label: 'App',
+                      icon: Icons.settings_outlined,
                     ),
                     if (widget.store.libraryId != null)
-                      const ButtonSegment(
+                      const TangerineChoice(
                         value: ReaderPreferenceScope.library,
-                        label: Text('Library'),
+                        label: 'Library',
+                        icon: Icons.folder_outlined,
                       ),
                     if (widget.store.item != null)
-                      const ButtonSegment(
+                      const TangerineChoice(
                         value: ReaderPreferenceScope.title,
-                        label: Text('This title'),
+                        label: 'This title',
+                        icon: Icons.menu_book_outlined,
                       ),
                   ],
-                  selected: {_scope},
-                  onSelectionChanged: _busy
+                  onChanged: _busy
                       ? null
-                      : (value) => setState(() => _scope = value.first),
+                      : (value) => setState(() => _scope = value),
                 ),
                 const SizedBox(height: 12),
                 Text(switch (_scope) {
@@ -141,10 +166,13 @@ class _ReaderPreferencesState extends State<_ReaderPreferencesSheet> {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          _error!,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
+                        child: Semantics(
+                          liveRegion: true,
+                          child: Text(
+                            _error!,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
                           ),
                         ),
                       ),
@@ -156,6 +184,11 @@ class _ReaderPreferencesState extends State<_ReaderPreferencesSheet> {
                   ),
                 if (layers != null) ...[
                   const SizedBox(height: 16),
+                  Text(
+                    'Page presentation',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 12),
                   _choice('mode', 'Page layout', {
                     'horizontal': 'Single page / chapter',
                     'spread': 'Two page spreads',
@@ -181,6 +214,12 @@ class _ReaderPreferencesState extends State<_ReaderPreferencesSheet> {
                     false: 'Allow pairing',
                   }),
                   if (widget.typography) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Publication text',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 12),
                     _choice('fontSize', 'Publication text size', {
                       for (var value = 12; value <= 36; value++)
                         value.toDouble(): '$value px',
@@ -190,6 +229,7 @@ class _ReaderPreferencesState extends State<_ReaderPreferencesSheet> {
                         value / 10: '${(value / 10).toStringAsFixed(1)}×',
                     }, numeric: true),
                   ],
+                  const SizedBox(height: 12),
                   Text(
                     'Tap regions',
                     style: Theme.of(context).textTheme.titleMedium,
@@ -273,21 +313,17 @@ class _ReaderPreferencesState extends State<_ReaderPreferencesSheet> {
     final effective = options[normalize(resolved)] ?? '$resolved';
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
-      child: DropdownButtonFormField<Object>(
-        key: ValueKey('$_scope:$key:$selected'),
-        initialValue: selected,
-        isExpanded: true,
-        decoration: InputDecoration(labelText: title),
-        items: [
-          DropdownMenuItem(
+      child: TangerineChoicePicker<Object>(
+        key: ValueKey('$_scope:$key'),
+        value: selected,
+        label: title,
+        choices: [
+          TangerineChoice(
             value: 'inherit',
-            child: Text(
-              '$inheritedLabel · $effective',
-              overflow: TextOverflow.ellipsis,
-            ),
+            label: '$inheritedLabel · $effective',
           ),
           for (final entry in options.entries)
-            DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+            TangerineChoice(value: entry.key, label: entry.value),
         ],
         onChanged: _busy
             ? null

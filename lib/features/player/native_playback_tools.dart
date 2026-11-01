@@ -8,6 +8,7 @@ import '../../data/db/app_database.dart';
 import '../../domain/services/player_behavior_preferences.dart';
 import '../../data/playback/playback_engine.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 class NativePlaybackSettings {
   NativePlaybackSettings({
@@ -166,7 +167,10 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
   ) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text('$title · ${value.toStringAsFixed(1)}'),
+      Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Text('$title · ${value.toStringAsFixed(1)}'),
+      ),
       Slider(
         value: value.clamp(minimum, maximum),
         min: minimum,
@@ -199,22 +203,26 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
                 children: [
                   if (_error != null) Text(_error!),
                   if (chapters > 0)
-                    DropdownButtonFormField<int>(
-                      decoration: const InputDecoration(labelText: 'Chapter'),
-                      initialValue:
-                          (widget.engine.diagnostics['chapter'] as int? ?? 0)
-                              .clamp(0, chapters - 1),
-                      items: [
+                    TangerineChoicePicker<int>(
+                      label: 'Chapter',
+                      value: (widget.engine.diagnostics['chapter'] as int? ?? 0)
+                          .clamp(0, chapters - 1),
+                      choices: [
                         for (var i = 0; i < chapters; i++)
-                          DropdownMenuItem(
-                            value: i,
-                            child: Text('Chapter ${i + 1}'),
-                          ),
+                          TangerineChoice(value: i, label: 'Chapter ${i + 1}'),
                       ],
-                      onChanged: (value) {
-                        if (value != null) widget.engine.setChapter(value);
-                      },
+                      onChanged: widget.engine.setChapter,
                     ),
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Listening',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                   if (widget.engine.supports('equalizer'))
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
@@ -253,48 +261,50 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
                       ),
                   ],
                   if (widget.video) ...[
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Text(
+                        'Picture',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                     for (final field in {
                       'aspect': 'Aspect ratio',
                       'crop': 'Crop',
                     }.entries)
                       if (widget.engine.supports(field.key))
-                        DropdownButtonFormField<String>(
-                          key: ValueKey(
-                            '${field.key}:${settings.picture[field.key]}',
-                          ),
-                          initialValue:
-                              (settings.picture[field.key] as String?) ?? '',
-                          decoration: InputDecoration(labelText: field.value),
-                          items: [
-                            for (final value in [
-                              '',
-                              '16:9',
-                              '4:3',
-                              '21:9',
-                              '1:1',
-                              '16:10',
-                              '2.35:1',
-                              if (settings.picture[field.key] is String &&
-                                  ![
-                                    '',
-                                    '16:9',
-                                    '4:3',
-                                    '21:9',
-                                    '1:1',
-                                    '16:10',
-                                    '2.35:1',
-                                  ].contains(settings.picture[field.key]))
-                                settings.picture[field.key] as String,
-                            ])
-                              DropdownMenuItem(
-                                value: value,
-                                child: Text(
-                                  value.isEmpty ? 'Source / automatic' : value,
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: TangerineChoicePicker<String>(
+                            key: ValueKey(field.key),
+                            label: field.value,
+                            value:
+                                (settings.picture[field.key] as String?) ?? '',
+                            choices: [
+                              for (final value in <String>{
+                                '',
+                                '16:9',
+                                '4:3',
+                                '21:9',
+                                '1:1',
+                                '16:10',
+                                '2.35:1',
+                                if (settings.picture[field.key] is String)
+                                  settings.picture[field.key] as String,
+                              })
+                                TangerineChoice(
+                                  value: value,
+                                  label: value.isEmpty
+                                      ? 'Source / automatic'
+                                      : value,
                                 ),
-                              ),
-                          ],
-                          onChanged: (value) => _change(
-                            () => settings.picture[field.key] = value ?? '',
+                            ],
+                            onChanged: (value) => _change(
+                              () => settings.picture[field.key] = value,
+                            ),
                           ),
                         ),
                     if (widget.engine.supports('zoom'))
@@ -307,39 +317,29 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
                             _change(() => settings.picture['zoom'] = value),
                       ),
                     if (widget.engine.supports('deinterlace'))
-                      DropdownButtonFormField<String>(
-                        key: ValueKey(
-                          'deinterlace:${settings.picture['deinterlaceMode']}',
-                        ),
-                        initialValue:
+                      TangerineChoicePicker<String>(
+                        label: 'Deinterlace',
+                        value:
                             (settings.picture['deinterlaceMode'] as String?) ??
                             'off',
-                        decoration: const InputDecoration(
-                          labelText: 'Deinterlace',
-                        ),
-                        items: [
-                          for (final value in [
+                        choices: [
+                          for (final value in <String>{
                             'off',
                             'blend',
                             'bob',
                             'linear',
                             'yadif',
                             'yadif2x',
-                            if (settings.picture['deinterlaceMode'] is String &&
-                                ![
-                                  'off',
-                                  'blend',
-                                  'bob',
-                                  'yadif',
-                                  'yadif2x',
-                                ].contains(settings.picture['deinterlaceMode']))
+                            if (settings.picture['deinterlaceMode'] is String)
                               settings.picture['deinterlaceMode'] as String,
-                          ])
-                            DropdownMenuItem(value: value, child: Text(value)),
+                          })
+                            TangerineChoice(
+                              value: value,
+                              label: value == 'off' ? 'Off' : value,
+                            ),
                         ],
                         onChanged: (value) => _change(
-                          () => settings.picture['deinterlaceMode'] =
-                              value ?? 'off',
+                          () => settings.picture['deinterlaceMode'] = value,
                         ),
                       ),
                     if (widget.engine.supports('hue'))
@@ -372,6 +372,16 @@ class _NativePlaybackToolsState extends State<NativePlaybackTools> {
                               _change(() => settings.picture[key] = value),
                         ),
                   ],
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Text(
+                      'Synchronization',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                   _slider(
                     'Audio delay (seconds)',
                     (settings.picture['audioDelay'] as num?)?.toDouble() ?? 0,

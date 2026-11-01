@@ -88,6 +88,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
   int _totalPages = 0;
   bool _searchVisible = false;
   bool _ready = false;
+  Future<List<PdfOutlineNode>>? _outline;
   bool _focusMode = false;
   bool _interacting = false;
 
@@ -249,9 +250,10 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     if (mounted) setState(() {});
   }
 
-  void _pageChanged(int? page) {
+  void _pageChanged(int? page, {bool explicit = false}) {
     if (!mounted || _restoring || page == null || page == _currentPage) return;
-    if (_presentation != null &&
+    if (!explicit &&
+        _presentation != null &&
         _presentation!.cellFor(page) == _presentation!.cellFor(_currentPage))
       return;
     if (page < _currentPage) _writer?.markPositionIntent();
@@ -313,9 +315,23 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
       final base = _controller
           .calcMatrixForPage(pageNumber: number)
           .getMaxScaleOnAxis();
+      final targetZoom = base * locator.zoom;
+      final visibleSize =
+          _controller.visibleRect.size * (_controller.currentZoom / targetZoom);
+      // Canonical points cannot encode the negative outer margins of a fitted
+      // page. Recenter an axis that fits after a viewport/layout change; retain
+      // the canonical position on axes that still need scrolling.
+      final offset = Offset(
+        rect.width <= visibleSize.width
+            ? rect.center.dx - visibleSize.width / 2
+            : rect.left + point.dx,
+        rect.height <= visibleSize.height
+            ? rect.center.dy - visibleSize.height / 2
+            : rect.top + point.dy,
+      );
       await _controller.goToPosition(
-        documentOffset: rect.topLeft + point,
-        zoom: base * locator.zoom,
+        documentOffset: offset,
+        zoom: targetZoom,
         duration: Duration.zero,
       );
     }
@@ -412,7 +428,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     }
     if (page == null || !_ready) return;
     _writer?.markPositionIntent();
-    _currentPage = page.clamp(1, _totalPages);
+    _pageChanged(page.clamp(1, _totalPages), explicit: true);
     await _controller.goToPage(pageNumber: _currentPage);
     _sampleBackground();
   }
@@ -710,7 +726,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     }
     if (intentional) _writer?.markPositionIntent();
     final number = locator.page.clamp(1, _totalPages);
-    _currentPage = number;
+    _pageChanged(number, explicit: true);
     await _restoreLocator(locator);
   }
 
@@ -793,7 +809,7 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
         pageNumber: anchor.startPage,
         rect: first.charRects[anchor.startOffset],
       );
-      _currentPage = anchor.startPage;
+      _pageChanged(anchor.startPage, explicit: true);
     } on Object {
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
@@ -964,6 +980,256 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
     super.dispose();
   }
 
+  Future<void> _documentContents() async {
+    if (!_ready || !_controller.isReady) return;
+    final future = _outline ??= _controller.document.loadOutline();
+    var query = '';
+    final result = await showStudyAdaptiveModal<Object>(
+      context: context,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, update) => StudyModalFrame(
+          title: 'Contents',
+          description: 'Navigate the document outline or browse its pages.',
+          icon: Icons.format_list_bulleted_rounded,
+          primaryAction: TextButton(
+            onPressed: () => Navigator.pop(sheetContext),
+            child: const Text('Done'),
+          ),
+          child: SizedBox(
+            height: MediaQuery.sizeOf(context).height * .5,
+            child: Column(
+              children: [
+                TextField(
+                  decoration: const InputDecoration(
+                    labelText: 'Find a heading',
+                    prefixIcon: Icon(Icons.search),
+                  ),
+                  onChanged: (value) =>
+                      update(() => query = value.trim().toLowerCase()),
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: FutureBuilder<List<PdfOutlineNode>>(
+                    future: future,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done)
+                        return const Center(child: CircularProgressIndicator());
+                      final rows = <({PdfOutlineNode node, int depth})>[];
+                      void append(List<PdfOutlineNode> nodes, int depth) {
+                        if (depth > 16) return;
+                        for (final node in nodes) {
+                          if (rows.length >= 1000) break;
+                          rows.add((node: node, depth: depth));
+                          append(node.children, depth + 1);
+                        }
+                      }
+
+                      append(snapshot.data ?? [], 0);
+                      if (rows.isEmpty)
+                        return ContentState(
+                          compact: true,
+                          icon: Icons.menu_book_outlined,
+                          title: snapshot.hasError
+                              ? 'Contents unavailable'
+                              : 'No table of contents',
+                          message: 'Browse page previews to choose a page.',
+                          action: TextButton.icon(
+                            onPressed: () =>
+                                Navigator.pop(sheetContext, 'pages'),
+                            icon: const Icon(Icons.grid_view),
+                            label: const Text('Browse pages'),
+                          ),
+                        );
+                      final visible = rows
+                          .where(
+                            (row) =>
+                                query.isEmpty ||
+                                row.node.title.toLowerCase().contains(query),
+                          )
+                          .toList();
+                      if (visible.isEmpty)
+                        return const Center(
+                          child: Text('No matching headings'),
+                        );
+                      return ListView.builder(
+                        itemCount: visible.length,
+                        itemBuilder: (context, index) {
+                          final row = visible[index],
+                              destination = row.node.dest;
+                          return ListTile(
+                            contentPadding: EdgeInsetsDirectional.only(
+                              start: 12 + row.depth * 12.0,
+                              end: 12,
+                            ),
+                            title: Text(
+                              row.node.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: destination == null
+                                ? null
+                                : Text('${destination.pageNumber}'),
+                            enabled: destination != null,
+                            selected: destination?.pageNumber == _currentPage,
+                            onTap: destination == null
+                                ? null
+                                : () =>
+                                      Navigator.pop(sheetContext, destination),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (result == 'pages') {
+      await _pageBrowser();
+      return;
+    }
+    if (result is PdfDest) {
+      _writer?.markPositionIntent();
+      await _controller.goToDest(
+        result,
+        duration: AppMotion.resolve(context, AppMotion.standard),
+      );
+      await _saveProgress();
+    }
+  }
+
+  Future<void> _readingControls() => showStudyAdaptiveModal<void>(
+    context: context,
+    builder: (sheetContext) => StudyModalFrame(
+      title: 'Reading controls',
+      description: 'Page $_currentPage of $_totalPages',
+      icon: Icons.tune_rounded,
+      primaryAction: TextButton(
+        onPressed: () => Navigator.pop(sheetContext),
+        child: const Text('Done'),
+      ),
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * .5,
+        child: ListView(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.format_list_bulleted_rounded),
+              title: const Text('Contents'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _documentContents();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.find_in_page_outlined),
+              title: const Text('Go to page'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _jumpToPage();
+              },
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _advanceCell(false),
+                  icon: const Icon(Icons.navigate_before),
+                  label: const Text('Previous'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => _advanceCell(true),
+                  icon: const Icon(Icons.navigate_next),
+                  label: const Text('Next'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _controller.zoomDown,
+                  icon: const Icon(Icons.zoom_out),
+                  label: const Text('Zoom out'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _controller.zoomUp,
+                  icon: const Icon(Icons.zoom_in),
+                  label: const Text('Zoom in'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                TextButton(
+                  onPressed: () => _fit(true),
+                  child: const Text('Fit width'),
+                ),
+                TextButton(
+                  onPressed: () => _fit(false),
+                  child: const Text('Fit page'),
+                ),
+              ],
+            ),
+            ListTile(
+              leading: const Icon(Icons.auto_stories_outlined),
+              title: const Text('Reading preferences'),
+              subtitle: const Text(
+                'Layout, direction, background and gestures',
+              ),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _readerSettings();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.document_scanner_outlined),
+              title: Text(
+                ReaderImageAnalysis.available
+                    ? 'Recognize page text'
+                    : 'OCR availability',
+              ),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _pageTextTools();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.fullscreen_rounded),
+              title: const Text('Focus mode'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                setState(() => _focusMode = true);
+              },
+            ),
+            Wrap(
+              spacing: 8,
+              children: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _setCompleted(true);
+                  },
+                  child: const Text('Mark read'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    _setCompleted(false);
+                  },
+                  child: const Text('Mark unread'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final item = _item;
@@ -984,140 +1250,25 @@ class _PdfReaderScreenState extends ConsumerState<PdfReaderScreen>
                   onPressed: _ready ? _pageBrowser : null,
                   icon: const Icon(Icons.grid_view),
                 ),
-                if (!compact) ...[
-                  IconButton(
-                    tooltip: 'Reading preferences',
-                    onPressed: _ready ? _readerSettings : null,
-                    icon: const Icon(Icons.tune),
-                  ),
-                  IconButton(
-                    tooltip: 'Previous reading cell',
-                    onPressed: _ready ? () => _advanceCell(false) : null,
-                    icon: const Icon(Icons.chevron_left),
-                  ),
-                  IconButton(
-                    tooltip: 'Next reading cell',
-                    onPressed: _ready ? () => _advanceCell(true) : null,
-                    icon: const Icon(Icons.chevron_right),
-                  ),
-                  PopupMenuButton<bool>(
-                    tooltip: 'Fit document',
-                    onSelected: _fit,
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: true, child: Text('Fit width')),
-                      PopupMenuItem(value: false, child: Text('Fit page')),
-                    ],
-                  ),
-                ],
                 if (_ready && !compact)
-                  TextButton.icon(
+                  TextButton(
                     onPressed: _jumpToPage,
-                    icon: const Icon(Icons.find_in_page_outlined),
-                    label: Text('$_currentPage / $_totalPages'),
+                    child: Text('$_currentPage / $_totalPages'),
                   ),
-                if (!compact)
-                  IconButton(
-                    tooltip: ReaderImageAnalysis.available
-                        ? 'Recognize page text'
-                        : 'OCR availability',
-                    onPressed: _ready ? _pageTextTools : null,
-                    icon: const Icon(Icons.document_scanner_outlined),
-                  ),
-                if (!compact) ...[
-                  IconButton(
-                    tooltip: 'Search document',
-                    onPressed: _ready ? _toggleSearch : null,
-                    icon: const Icon(Icons.search_rounded),
-                  ),
-                  IconButton(
-                    tooltip: 'Zoom out',
-                    onPressed: _ready ? _controller.zoomDown : null,
-                    icon: const Icon(Icons.zoom_out_rounded),
-                  ),
-                  IconButton(
-                    tooltip: 'Zoom in',
-                    onPressed: _ready ? _controller.zoomUp : null,
-                    icon: const Icon(Icons.zoom_in_rounded),
-                  ),
-                  IconButton(
-                    tooltip: 'Notes & bookmarks',
-                    onPressed: item == null ? null : _showTools,
-                    icon: const Icon(Icons.note_alt_outlined),
-                  ),
-                  IconButton(
-                    tooltip: 'Enter focus mode',
-                    onPressed: _ready
-                        ? () => setState(() => _focusMode = true)
-                        : null,
-                    icon: const Icon(Icons.fullscreen_rounded),
-                  ),
-                ],
-                PopupMenuButton<String>(
-                  tooltip: 'Document actions',
-                  onSelected: (value) {
-                    if (value == 'focus') {
-                      setState(() => _focusMode = true);
-                    }
-                    if (value == 'settings') _readerSettings();
-                    if (value == 'ocr') _pageTextTools();
-                    if (value == 'previous') _advanceCell(false);
-                    if (value == 'next') _advanceCell(true);
-                    if (value == 'fitWidth') _fit(true);
-                    if (value == 'fitPage') _fit(false);
-                    if (value == 'complete') _setCompleted(true);
-                    if (value == 'incomplete') _setCompleted(false);
-                  },
-                  itemBuilder: (_) => [
-                    if (compact) ...[
-                      PopupMenuItem(
-                        enabled: _ready,
-                        value: 'settings',
-                        child: const Text('Reading preferences'),
-                      ),
-                      PopupMenuItem(
-                        enabled: _ready,
-                        value: 'ocr',
-                        child: Text(
-                          ReaderImageAnalysis.available
-                              ? 'Image text recognition'
-                              : 'OCR availability',
-                        ),
-                      ),
-                      PopupMenuItem(
-                        enabled: _ready,
-                        value: 'previous',
-                        child: const Text('Previous reading cell'),
-                      ),
-                      PopupMenuItem(
-                        enabled: _ready,
-                        value: 'next',
-                        child: const Text('Next reading cell'),
-                      ),
-                      PopupMenuItem(
-                        enabled: _ready,
-                        value: 'fitWidth',
-                        child: const Text('Fit width'),
-                      ),
-                      PopupMenuItem(
-                        enabled: _ready,
-                        value: 'fitPage',
-                        child: const Text('Fit page'),
-                      ),
-                    ],
-                    if (compact)
-                      const PopupMenuItem(
-                        value: 'focus',
-                        child: Text('Focus mode'),
-                      ),
-                    const PopupMenuItem(
-                      value: 'complete',
-                      child: Text('Mark read'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'incomplete',
-                      child: Text('Mark unread'),
-                    ),
-                  ],
+                IconButton(
+                  tooltip: 'Search document',
+                  onPressed: _ready ? _toggleSearch : null,
+                  icon: const Icon(Icons.search_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Notes & bookmarks',
+                  onPressed: item == null ? null : _showTools,
+                  icon: const Icon(Icons.note_alt_outlined),
+                ),
+                IconButton(
+                  tooltip: 'Reading controls',
+                  onPressed: _ready ? _readingControls : null,
+                  icon: const Icon(Icons.tune_rounded),
                 ),
               ],
             ),

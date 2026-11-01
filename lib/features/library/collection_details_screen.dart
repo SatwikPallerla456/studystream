@@ -6,6 +6,7 @@ import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/collection_browse_repository.dart';
 import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/item_artwork.dart';
 import 'photo_slideshow_screen.dart';
@@ -171,7 +172,7 @@ class _CollectionDetailsState extends ConsumerState<CollectionDetailsScreen> {
               style: Theme.of(context).textTheme.headlineMedium,
             ),
             Text(
-              '${summary.libraryTitle} · ${summary.record.kind == 'album' ? 'Ordered album' : 'Collection'} · ${summary.total} members',
+              '${summary.libraryTitle} · ${summary.record.kind == 'album' ? 'Ordered album' : 'Collection'} · ${summary.total} ${summary.total == 1 ? 'member' : 'members'}',
             ),
             const SizedBox(height: 16),
             Wrap(
@@ -211,17 +212,25 @@ class _CollectionDetailsState extends ConsumerState<CollectionDetailsScreen> {
                     icon: const Icon(Icons.slideshow),
                     label: const Text('View photo album'),
                   ),
-                IconButton(
-                  tooltip: 'Grid view',
-                  isSelected: _grid,
-                  onPressed: () => setState(() => _grid = true),
-                  icon: const Icon(Icons.grid_view),
-                ),
-                IconButton(
-                  tooltip: 'List view',
-                  isSelected: !_grid,
-                  onPressed: () => setState(() => _grid = false),
-                  icon: const Icon(Icons.view_list),
+                SizedBox(
+                  width: 240,
+                  child: TangerineSegments<bool>(
+                    label: 'Collection view',
+                    value: _grid,
+                    choices: const [
+                      TangerineChoice(
+                        value: true,
+                        label: 'Grid',
+                        icon: Icons.grid_view,
+                      ),
+                      TangerineChoice(
+                        value: false,
+                        label: 'List',
+                        icon: Icons.view_list,
+                      ),
+                    ],
+                    onChanged: (value) => setState(() => _grid = value),
+                  ),
                 ),
               ],
             ),
@@ -306,30 +315,31 @@ class _CollectionDetailsState extends ConsumerState<CollectionDetailsScreen> {
                                 : () => _open(member),
                           ),
                         ),
-                    Wrap(
-                      spacing: 12,
-                      children: [
-                        TextButton(
-                          onPressed: _history.isEmpty
-                              ? null
-                              : () {
-                                  _after = _history.removeLast();
-                                  _refresh();
-                                },
-                          child: const Text('Previous page'),
-                        ),
-                        TextButton(
-                          onPressed: !page.more
-                              ? null
-                              : () {
-                                  _history.add(_after);
-                                  _after = page.cursor;
-                                  _refresh();
-                                },
-                          child: const Text('Next page'),
-                        ),
-                      ],
-                    ),
+                    if (_history.isNotEmpty || page.more)
+                      Wrap(
+                        spacing: 12,
+                        children: [
+                          TextButton(
+                            onPressed: _history.isEmpty
+                                ? null
+                                : () {
+                                    _after = _history.removeLast();
+                                    _refresh();
+                                  },
+                            child: const Text('Previous page'),
+                          ),
+                          TextButton(
+                            onPressed: !page.more
+                                ? null
+                                : () {
+                                    _history.add(_after);
+                                    _after = page.cursor;
+                                    _refresh();
+                                  },
+                            child: const Text('Next page'),
+                          ),
+                        ],
+                      ),
                   ],
                 );
               },

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -8,6 +9,7 @@ import '../../data/providers/app_providers.dart';
 import '../../data/sync/lan_discovery.dart';
 import '../../data/sync/lan_sync_client.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 class SyncClientSection extends ConsumerStatefulWidget {
   const SyncClientSection({super.key});
@@ -33,6 +35,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
   }
 
   Future<void> _pair() async {
+    if (_busy) return;
     setState(() {
       _busy = true;
       _error = null;
@@ -55,6 +58,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
   }
 
   Future<void> _discover() async {
+    if (_discovering) return;
     setState(() {
       _discovering = true;
       _error = null;
@@ -82,6 +86,12 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
     }
   }
 
+  String _lastSync(BuildContext context, int stamp) {
+    final date = DateTime.fromMillisecondsSinceEpoch(stamp).toLocal(),
+        labels = MaterialLocalizations.of(context);
+    return 'Last synced ${labels.formatCompactDate(date)} at ${labels.formatTimeOfDay(TimeOfDay.fromDateTime(date))}';
+  }
+
   @override
   Widget build(BuildContext context) {
     final client = ref.watch(lanSyncClientProvider);
@@ -91,10 +101,10 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
       builder: (context, snapshot) {
         final state = snapshot.data ?? client.state;
         final connected = state.address != null;
-        return StudySection(
+        return TangerinePreferenceSection(
           title: 'Connect to a media server',
           description:
-              'Browse and play a paired server’s library here. Notes, bookmarks, completion, and progress sync automatically while connected.',
+              'Browse and play your approved libraries. Notes, bookmarks and progress sync when the host allows changes.',
           icon: Icons.devices_rounded,
           trailing: StudyStatusBadge(
             label: switch (state.phase) {
@@ -104,9 +114,13 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
               ConnectionPhase.retrying => 'Retrying',
               ConnectionPhase.error => 'Needs attention',
             },
-            tone: state.phase == ConnectionPhase.connected
-                ? StudyStatusTone.success
-                : StudyStatusTone.neutral,
+            tone: switch (state.phase) {
+              ConnectionPhase.connected => StudyStatusTone.success,
+              ConnectionPhase.retrying => StudyStatusTone.warning,
+              ConnectionPhase.error => StudyStatusTone.error,
+              ConnectionPhase.connecting => StudyStatusTone.info,
+              ConnectionPhase.disconnected => StudyStatusTone.neutral,
+            },
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -122,7 +136,7 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                 Text(
                   state.lastSyncAt == null
                       ? 'Waiting for the first successful sync'
-                      : 'Last successful sync: ${DateTime.fromMillisecondsSinceEpoch(state.lastSyncAt!).toLocal()}',
+                      : _lastSync(context, state.lastSyncAt!),
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: AppSpace.sm),
@@ -131,7 +145,9 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                   runSpacing: AppSpace.xs,
                   children: [
                     OutlinedButton.icon(
-                      onPressed: () => client.sync(),
+                      onPressed: state.phase == ConnectionPhase.connecting
+                          ? null
+                          : () => client.sync(),
                       icon: const Icon(Icons.sync_rounded),
                       label: const Text('Sync now'),
                     ),
@@ -142,11 +158,14 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                   ],
                 ),
               ] else ...[
-                OutlinedButton.icon(
-                  onPressed: _discovering ? null : _discover,
-                  icon: const Icon(Icons.radar_rounded),
-                  label: Text(
-                    _discovering ? 'Discovering…' : 'Find nearby servers',
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: TextButton.icon(
+                    onPressed: _discovering ? null : _discover,
+                    icon: const Icon(Icons.radar_rounded),
+                    label: Text(
+                      _discovering ? 'Discovering…' : 'Find nearby servers',
+                    ),
                   ),
                 ),
                 for (final host in _hosts.entries)
@@ -160,6 +179,8 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                 const SizedBox(height: AppSpace.sm),
                 TextField(
                   controller: _address,
+                  enabled: !_busy,
+                  textInputAction: TextInputAction.next,
                   keyboardType: TextInputType.url,
                   autocorrect: false,
                   decoration: const InputDecoration(
@@ -170,6 +191,9 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                 const SizedBox(height: AppSpace.sm),
                 TextField(
                   controller: _name,
+                  enabled: !_busy,
+                  maxLength: 80,
+                  textInputAction: TextInputAction.next,
                   decoration: const InputDecoration(
                     labelText: 'This device’s name',
                   ),
@@ -177,6 +201,10 @@ class _SyncClientSectionState extends ConsumerState<SyncClientSection> {
                 const SizedBox(height: AppSpace.sm),
                 TextField(
                   controller: _code,
+                  enabled: !_busy,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _pair(),
                   keyboardType: TextInputType.number,
                   maxLength: 6,
                   decoration: const InputDecoration(

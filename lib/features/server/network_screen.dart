@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../settings/sync_client_section.dart';
 
 class NetworkScreen extends StatelessWidget {
@@ -12,13 +13,13 @@ class NetworkScreen extends StatelessWidget {
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Network')),
     body: StudyPage(
-      maxWidth: 1000,
+      maxWidth: 880,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const SyncClientSection(),
           const SizedBox(height: AppSpace.md),
-          StudySection(
+          TangerinePreferenceSection(
             title: 'Use this device as a server',
             description:
                 'Set up sharing from the same app, with your local media and paired devices.',

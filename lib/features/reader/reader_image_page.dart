@@ -26,6 +26,7 @@ class ReaderImagePage extends StatefulWidget {
     required this.fit,
     required this.targetWidth,
     this.vertical = false,
+    this.showZoomControls = false,
     required this.onColors,
     this.cache,
     this.onGeometry,
@@ -42,7 +43,7 @@ class ReaderImagePage extends StatefulWidget {
   final ReaderJobScheduler jobs;
   final ReaderByteCache<DecodedReaderPage>? cache;
   final ValueChanged<Size>? onGeometry;
-  final bool vertical;
+  final bool vertical, showZoomControls;
   final double initialZoom;
   final Offset initialPoint;
   final ReaderViewportState? initialViewState;
@@ -223,6 +224,20 @@ class _ReaderImagePageState extends State<ReaderImagePage> {
     _transform.value = matrix;
   }
 
+  void _zoomTo(double scale) {
+    if (_viewport.isEmpty) return;
+    final old = _transform.value.getMaxScaleOnAxis();
+    final zoom = scale.clamp(1.0, 5.0);
+    final center = _viewport.center(Offset.zero);
+    final point = MatrixUtils.transformPoint(
+      Matrix4.inverted(_transform.value),
+      center,
+    );
+    if ((zoom - old).abs() < .001) return;
+    _install(zoom, center - point * zoom);
+    _settled();
+  }
+
   void _restore(ReaderViewportState? saved) {
     if (saved != null &&
         saved.compatible(
@@ -283,29 +298,79 @@ class _ReaderImagePageState extends State<ReaderImagePage> {
           _positionRestored = true;
           _restore(saved);
         }
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapUp: widget.onTapUp,
-          onDoubleTapDown: (details) => _tap = details.localPosition,
-          onDoubleTap: () {
-            final zoom = _transform.value.getMaxScaleOnAxis() > 1.05
-                ? 1.0
-                : 2.5;
-            final matrix = Matrix4.identity();
-            matrix.setEntry(0, 0, zoom);
-            matrix.setEntry(1, 1, zoom);
-            matrix.setEntry(0, 3, -_tap.dx * (zoom - 1));
-            matrix.setEntry(1, 3, -_tap.dy * (zoom - 1));
-            _transform.value = matrix;
-            _settled();
-          },
-          child: InteractiveViewer(
-            transformationController: _transform,
-            minScale: 1,
-            maxScale: 5,
-            onInteractionEnd: (_) => _settled(),
-            child: image,
-          ),
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapUp: widget.onTapUp,
+              onDoubleTapDown: (details) => _tap = details.localPosition,
+              onDoubleTap: () {
+                final zoom = _transform.value.getMaxScaleOnAxis() > 1.05
+                    ? 1.0
+                    : 2.5;
+                final matrix = Matrix4.identity();
+                matrix.setEntry(0, 0, zoom);
+                matrix.setEntry(1, 1, zoom);
+                matrix.setEntry(0, 3, -_tap.dx * (zoom - 1));
+                matrix.setEntry(1, 3, -_tap.dy * (zoom - 1));
+                _transform.value = matrix;
+                _settled();
+              },
+              child: InteractiveViewer(
+                transformationController: _transform,
+                minScale: 1,
+                maxScale: 5,
+                onInteractionEnd: (_) => _settled(),
+                child: image,
+              ),
+            ),
+            if (widget.showZoomControls)
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: Material(
+                  color: const Color(0xDD20221F),
+                  borderRadius: BorderRadius.circular(18),
+                  child: ListenableBuilder(
+                    listenable: _transform,
+                    builder: (context, _) => Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Zoom out',
+                          color: Colors.white,
+                          onPressed:
+                              _transform.value.getMaxScaleOnAxis() <= 1.01
+                              ? null
+                              : () => _zoomTo(
+                                  _transform.value.getMaxScaleOnAxis() / 1.25,
+                                ),
+                          icon: const Icon(Icons.zoom_out),
+                        ),
+                        IconButton(
+                          tooltip: 'Reset zoom',
+                          color: Colors.white,
+                          onPressed: () => _zoomTo(1),
+                          icon: const Icon(Icons.center_focus_strong),
+                        ),
+                        IconButton(
+                          tooltip: 'Zoom in',
+                          color: Colors.white,
+                          onPressed:
+                              _transform.value.getMaxScaleOnAxis() >= 4.99
+                              ? null
+                              : () => _zoomTo(
+                                  _transform.value.getMaxScaleOnAxis() * 1.25,
+                                ),
+                          icon: const Icon(Icons.zoom_in),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
         );
       },
     );

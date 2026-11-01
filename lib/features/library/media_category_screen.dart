@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/study_ui.dart';
 import '../../shared/widgets/media_categories.dart';
@@ -56,33 +57,40 @@ class MediaCategoryScreen extends ConsumerWidget {
                     children: [
                       const Text('Source libraries'),
                       for (final source in sources)
-                        ActionChip(
-                          avatar: const Icon(Icons.folder_outlined, size: 18),
-                          label: Text(source.data['title'] as String),
-                          onPressed: () => context.push(
-                            '/library/${Uri.encodeComponent(source.data['id'] as String)}',
+                        TangerineInteraction(
+                          child: TextButton.icon(
+                            icon: const Icon(Icons.folder_outlined, size: 18),
+                            label: Text(source.data['title'] as String),
+                            onPressed: () => context.push(
+                              '/library/${Uri.encodeComponent(source.data['id'] as String)}',
+                            ),
                           ),
                         ),
-                      if (sources.length == 1) ...[
-                        LibraryProcessingButton(
-                          libraryId: sources.single.data['id'] as String,
+                      if (sources.length == 1)
+                        TangerineActionGroup(
+                          title: 'Library tools',
+                          icon: Icons.tune,
+                          children: [
+                            LibraryProcessingButton(
+                              libraryId: sources.single.data['id'] as String,
+                            ),
+                            TextButton.icon(
+                              onPressed: () => showLibraryScan(
+                                context,
+                                libraryId: sources.single.data['id'] as String,
+                              ),
+                              icon: const Icon(Icons.sync),
+                              label: const Text('Scan library'),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => context.push(
+                                '/library/${Uri.encodeComponent(sources.single.data['id'] as String)}/identify',
+                              ),
+                              icon: const Icon(Icons.manage_search),
+                              label: const Text('Identify titles'),
+                            ),
+                          ],
                         ),
-                        OutlinedButton.icon(
-                          onPressed: () => showLibraryScan(
-                            context,
-                            libraryId: sources.single.data['id'] as String,
-                          ),
-                          icon: const Icon(Icons.sync),
-                          label: const Text('Scan library'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: () => context.push(
-                            '/library/${Uri.encodeComponent(sources.single.data['id'] as String)}/identify',
-                          ),
-                          icon: const Icon(Icons.manage_search),
-                          label: const Text('Identify titles'),
-                        ),
-                      ],
                     ],
                   ),
                 );

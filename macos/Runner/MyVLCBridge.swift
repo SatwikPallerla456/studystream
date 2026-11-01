@@ -356,6 +356,7 @@ final class MyVLCBridge: NSObject, FlutterPlugin, FlutterPlatformViewFactory {
                     let window=desktops[id]?.window
                     self.handle(FlutterMethodCall(methodName:"dispose",arguments:["id":id]),result:result)
                     DispatchQueue.main.async { window?.performClose(nil) };return
+                case "window.pointer": desktops[id]?.pointerEnabled = args["enabled"] as? Bool ?? false
                 case "window.preferences": desktops[id]?.applyPreferences(args["values"] as? [String: String] ?? [:])
                 case "escape": desktops[id]?.exitPresentation()
                 case "record.toggle":
@@ -430,6 +431,7 @@ final class MyVLCBridge: NSObject, FlutterPlugin, FlutterPlatformViewFactory {
                     desktops[id]?.close()
                     let oldDesktop = desktops[id]
                     let desktop = MyVLCDesktop(engine: replacement, windowProvider:{ [weak self] in self?.flutterView?.window })
+                    desktop.pointerEnabled = oldDesktop?.pointerEnabled ?? false
                     desktop.onPointer = oldDesktop?.onPointer; desktop.onSeek = oldDesktop?.onSeek; desktop.onTransport = oldDesktop?.onTransport
                     if let values = oldDesktop?.currentPreferences { desktop.applyPreferences(values) }
                     // Preserve the platform-view host rather than replacing it.

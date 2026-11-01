@@ -7,6 +7,7 @@ import '../../core/theme/app_theme.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../shared/widgets/cinematic_media.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../library/collection_details_screen.dart';
 import '../library/collections_screen.dart';
@@ -316,7 +317,7 @@ class CinematicHomeSection extends ConsumerWidget {
   );
 }
 
-class _ResumeShelf extends StatelessWidget {
+class _ResumeShelf extends StatefulWidget {
   const _ResumeShelf({
     required this.title,
     required this.titles,
@@ -326,73 +327,159 @@ class _ResumeShelf extends StatelessWidget {
   final List<_HomeTitle> titles;
   final ValueChanged<Item> onOpen;
   @override
+  State<_ResumeShelf> createState() => _ResumeShelfState();
+}
+
+class _ResumeShelfState extends State<_ResumeShelf> {
+  final _scroll = ScrollController();
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _move(int delta) {
+    if (!_scroll.hasClients) return;
+    final target =
+        (_scroll.offset + delta * _scroll.position.viewportDimension * .8)
+            .clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.animateTo(
+      target,
+      duration: AppMotion.resolve(context, AppMotion.emphasized),
+      curve: AppMotion.settle,
+    );
+  }
+
+  @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(title, style: Theme.of(context).textTheme.titleLarge),
-      const SizedBox(height: 12),
+      Row(
+        children: [
+          Expanded(
+            child: Semantics(
+              header: true,
+              child: Text(
+                widget.title,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ),
+          ),
+          if (widget.titles.length > 1) ...[
+            IconButton(
+              tooltip: 'Previous in ${widget.title}',
+              onPressed: () => _move(-1),
+              icon: const Icon(Icons.chevron_left_rounded),
+            ),
+            IconButton(
+              tooltip: 'Next in ${widget.title}',
+              onPressed: () => _move(1),
+              icon: const Icon(Icons.chevron_right_rounded),
+            ),
+          ],
+        ],
+      ),
+      const SizedBox(height: 8),
       SizedBox(
         height:
-            152 *
-            (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(1, 1.8),
+            156 *
+            (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(
+              1,
+              double.infinity,
+            ),
         child: LayoutBuilder(
           builder: (context, box) => ListView.separated(
+            key: PageStorageKey('resume-shelf-${widget.title}'),
+            controller: _scroll,
             scrollDirection: Axis.horizontal,
-            itemCount: titles.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 12),
+            itemCount: widget.titles.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 20),
             itemBuilder: (context, index) {
-              final entry = titles[index];
+              final entry = widget.titles[index];
+              final reading = MediaVisuals.isReading(entry.item);
               return SizedBox(
                 width: box.maxWidth.clamp(240, 380),
-                child: Card(
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () => context.push(
-                      '/details/${Uri.encodeComponent(entry.item.id)}',
-                    ),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: 92,
-                          child: CinematicArtwork(item: entry.item),
+                child: TangerineInteraction(
+                  lift: 2,
+                  pressedScale: .985,
+                  child: Material(
+                    color: Colors.transparent,
+                    borderRadius: BorderRadius.circular(16),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(16),
+                      onTap: () => context.push(
+                        '/details/${Uri.encodeComponent(entry.item.id)}',
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 8,
+                          horizontal: 4,
                         ),
-                        Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.all(14),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  entry.title,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.titleMedium,
-                                ),
-                                const SizedBox(height: 8),
-                                if (entry.progress != null)
-                                  LinearProgressIndicator(
-                                    value: (entry.progress! / 100).clamp(0, 1),
-                                    semanticsLabel:
-                                        '${entry.progress!.round()} percent complete',
-                                  ),
-                                const SizedBox(height: 4),
-                                TextButton.icon(
-                                  onPressed: () => onOpen(entry.item),
-                                  icon: const Icon(Icons.play_arrow),
-                                  label: Text(
-                                    MediaVisuals.isReading(entry.item)
-                                        ? 'Continue reading'
-                                        : 'Resume',
-                                  ),
-                                ),
-                              ],
+                        child: Row(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: SizedBox(
+                                width: 92,
+                                height: 138,
+                                child: CinematicArtwork(item: entry.item),
+                              ),
                             ),
-                          ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    entry.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleMedium,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  if (entry.progress != null)
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(
+                                        AppRadius.pill,
+                                      ),
+                                      child: LinearProgressIndicator(
+                                        value: (entry.progress! / 100).clamp(
+                                          0,
+                                          1,
+                                        ),
+                                        minHeight: 3,
+                                        semanticsLabel:
+                                            '${entry.progress!.round()} percent complete',
+                                      ),
+                                    ),
+                                  const SizedBox(height: 8),
+                                  TextButton.icon(
+                                    style: TextButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                      ),
+                                      shape: const StadiumBorder(),
+                                    ),
+                                    onPressed: () => widget.onOpen(entry.item),
+                                    icon: Icon(
+                                      reading
+                                          ? Icons.menu_book_outlined
+                                          : Icons.play_arrow_rounded,
+                                      size: 20,
+                                    ),
+                                    label: Text(
+                                      reading ? 'Continue reading' : 'Resume',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),

@@ -17,6 +17,7 @@ import '../../data/sync/lan_sync_server.dart';
 import '../../domain/models/device_configuration.dart';
 import '../../domain/services/media_import_service.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import 'library_grants_screen.dart';
 import '../library/library_setup_sheet.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
@@ -176,7 +177,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             _addresses = _localAddresses(state.port!);
           }
           return StudyPage(
-            maxWidth: 1100,
+            maxWidth: 960,
             child: StreamBuilder<List<Library>>(
               stream: database.watchLibraries(),
               builder: (context, librariesSnapshot) {
@@ -199,7 +200,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                     ),
                     const SizedBox(height: AppSpace.lg),
                     if (state.running) ...[
-                      StudySection(
+                      TangerinePreferenceSection(
                         title: 'Connect a player',
                         description:
                             'On the other device, choose Player → Network → Pair this device.',
@@ -267,12 +268,12 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                               spacing: AppSpace.xs,
                               runSpacing: AppSpace.xs,
                               children: [
-                                OutlinedButton.icon(
+                                TextButton.icon(
                                   onPressed: server.regeneratePairingCode,
                                   icon: const Icon(Icons.password_rounded),
                                   label: const Text('New pairing code'),
                                 ),
-                                OutlinedButton.icon(
+                                TextButton.icon(
                                   onPressed: () => setState(
                                     () => _addresses = _localAddresses(
                                       state.port!,
@@ -300,7 +301,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                         ),
                       ),
                     ] else ...[
-                      StudySection(
+                      TangerinePreferenceSection(
                         title: '1. Server details',
                         icon: Icons.dns_outlined,
                         child: Column(
@@ -344,12 +345,12 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                       ),
                     ],
                     const SizedBox(height: AppSpace.md),
-                    StudySection(
+                    TangerinePreferenceSection(
                       title: state.running
                           ? 'Shared libraries'
                           : '2. Add your media',
                       description:
-                          'Choose library access for each approved player. Adding files copies them into this app; adding a folder keeps media in place.',
+                          'Linked folder libraries can be shared with approved players. Imported files stay local. Choose access separately for each player.',
                       icon: Icons.video_library_outlined,
                       trailing: StudyStatusBadge(
                         label: '${libraries.length} libraries',
@@ -364,29 +365,42 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                                 'Add video, music, documents, or a course to get started.',
                               ),
                             ),
-                          for (final library in libraries)
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(
-                                library.unavailable
-                                    ? Icons.folder_off_outlined
-                                    : Icons.folder_outlined,
-                              ),
-                              title: Text(library.title),
-                              subtitle: Text(
-                                library.unavailable
-                                    ? 'Folder unavailable · relink it in the library'
-                                    : library.rootFolderPath,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              trailing: IconButton(
-                                tooltip: 'Browse library',
-                                icon: const Icon(Icons.arrow_forward_rounded),
-                                onPressed: () =>
-                                    context.push('/library/${library.id}'),
-                              ),
+                          if (libraries.isNotEmpty)
+                            TangerineBoundedList(
+                              children: [
+                                for (final library in libraries)
+                                  ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: Icon(
+                                      library.unavailable
+                                          ? Icons.folder_off_outlined
+                                          : Icons.folder_outlined,
+                                    ),
+                                    title: Text(library.title),
+                                    subtitle: Text(
+                                      library.unavailable
+                                          ? 'Folder unavailable · relink it in the library'
+                                          : library.rootFolderPath.startsWith(
+                                              'import:',
+                                            )
+                                          ? 'Imported files · local to this device'
+                                          : library.rootFolderPath,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    trailing: IconButton(
+                                      tooltip: 'Browse library',
+                                      icon: const Icon(
+                                        Icons.arrow_forward_rounded,
+                                      ),
+                                      onPressed: () => context.push(
+                                        '/library/${library.id}',
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
+                          const SizedBox(height: AppSpace.md),
                           Wrap(
                             spacing: AppSpace.xs,
                             runSpacing: AppSpace.xs,
@@ -422,7 +436,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                     ),
                     const SizedBox(height: AppSpace.md),
                     if (!state.running)
-                      StudySection(
+                      TangerinePreferenceSection(
                         title: '3. Start sharing',
                         icon: Icons.wifi_tethering_rounded,
                         child: Column(
@@ -437,7 +451,11 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                                   _busy ||
                                       configuration == null ||
                                       libraries.every(
-                                        (library) => library.unavailable,
+                                        (library) =>
+                                            library.unavailable ||
+                                            library.rootFolderPath.startsWith(
+                                              'import:',
+                                            ),
                                       )
                                   ? null
                                   : _start,
@@ -512,7 +530,7 @@ class _ApprovedPlayers extends StatelessWidget {
   final AppDatabase database;
 
   @override
-  Widget build(BuildContext context) => StudySection(
+  Widget build(BuildContext context) => TangerinePreferenceSection(
     title: 'Approved players',
     icon: Icons.verified_user_outlined,
     child: StreamBuilder<List<KnownDevice>>(
@@ -540,22 +558,38 @@ class _ApprovedPlayers extends StatelessWidget {
                         LibraryGrantsScreen(database: database, device: device),
                   ),
                 ),
-                trailing: TextButton(
-                  onPressed: () async {
-                    final revoke = await showStudyAdaptiveModal<bool>(
-                      context: context,
-                      builder: (_) => StudyConfirmDialog(
-                        title: 'Revoke ${device.name}?',
-                        message:
-                            'This player will need to pair again to access your media.',
-                        confirmLabel: 'Revoke access',
-                        icon: Icons.phonelink_erase_rounded,
-                        destructive: true,
+                trailing: Wrap(
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => LibraryGrantsScreen(
+                            database: database,
+                            device: device,
+                          ),
+                        ),
                       ),
-                    );
-                    if (revoke == true) await database.revokeDevice(device.id);
-                  },
-                  child: const Text('Revoke'),
+                      child: const Text('Access'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final revoke = await showStudyAdaptiveModal<bool>(
+                          context: context,
+                          builder: (_) => StudyConfirmDialog(
+                            title: 'Revoke ${device.name}?',
+                            message:
+                                'This player will need to pair again to access your media.',
+                            confirmLabel: 'Revoke access',
+                            icon: Icons.phonelink_erase_rounded,
+                            destructive: true,
+                          ),
+                        );
+                        if (revoke == true)
+                          await database.revokeDevice(device.id);
+                      },
+                      child: const Text('Revoke'),
+                    ),
+                  ],
                 ),
               ),
           ],

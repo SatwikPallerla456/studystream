@@ -3,6 +3,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../domain/catalog/online_catalog_provider.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 
 class MetadataProviderSettings extends StatefulWidget {
   const MetadataProviderSettings({super.key});
@@ -17,6 +18,7 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
   bool _tvdbSaved = false;
 
   Future<void> _saveTvdb({bool remove = false}) async {
+    if (_busy) return;
     setState(() {
       _busy = true;
       _message = null;
@@ -69,6 +71,7 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
   }
 
   Future<void> _save({bool remove = false}) async {
+    if (_busy) return;
     setState(() {
       _busy = true;
       _message = null;
@@ -102,19 +105,26 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
     super.dispose();
   }
 
-  Widget _link(String label, String url) => TextButton(
-    onPressed: () async {
-      if (!await launchUrl(
-            Uri.parse(url),
-            mode: LaunchMode.externalApplication,
-          ) &&
-          mounted) {
-        setState(
-          () => _message = 'Could not open the provider website. Try again.',
-        );
-      }
-    },
-    child: Text(label),
+  Widget _link(String label, String url) => Align(
+    alignment: Alignment.centerLeft,
+    child: TangerineInteraction(
+      child: TextButton.icon(
+        icon: const Icon(Icons.open_in_new, size: 18),
+        onPressed: () async {
+          if (!await launchUrl(
+                Uri.parse(url),
+                mode: LaunchMode.externalApplication,
+              ) &&
+              mounted) {
+            setState(
+              () =>
+                  _message = 'Could not open the provider website. Try again.',
+            );
+          }
+        },
+        label: Text(label),
+      ),
+    ),
   );
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -122,159 +132,199 @@ class _MetadataProviderSettingsState extends State<MetadataProviderSettings> {
       title: 'Metadata providers & credits',
       showBack: true,
     ),
-    body: ListView(
-      padding: const EdgeInsets.all(24),
-      children: [
-        const Text(
-          'Manual search and automatic movie/TV identification send only titles, years and episode information to the provider. Control automatic identification in each library’s Identify titles or Processing screen. Files, paths, notes and playback history are not sent.',
-        ),
-        const SizedBox(height: 24),
-        Text(
-          'TheTVDB · movies and TV',
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        Text(
-          CatalogCredentials.hasBundledTvdbKey
-              ? 'Included with Tangerine · no setup required'
-              : _tvdbSaved
-              ? 'Project key saved on this device'
-              : 'Add the Tangerine project API key',
-        ),
-        const Text(
-          'Default provider for new movie and TV matches. Episode matching uses official aired order.',
-        ),
-        const SizedBox(height: 12),
-        if (!CatalogCredentials.hasBundledTvdbKey) ...[
-          TextField(
-            controller: _tvdb,
-            obscureText: true,
-            enabled: !_busy,
-            enableSuggestions: false,
-            autocorrect: false,
-            decoration: InputDecoration(
-              labelText: _tvdbSaved
-                  ? 'Replacement TheTVDB project API key'
-                  : 'TheTVDB project API key',
-              helperText:
-                  'Stored in the device keychain; excluded from backups and library sync.',
-            ),
-            onChanged: (_) => setState(() {}),
-          ),
-          Wrap(
-            spacing: 12,
-            children: [
-              FilledButton(
-                onPressed: _busy || _tvdb.text.trim().isEmpty
-                    ? null
-                    : () => _saveTvdb(),
-                child: const Text('Save TheTVDB key'),
-              ),
-              if (_tvdbSaved)
-                TextButton(
-                  onPressed: _busy ? null : () => _saveTvdb(remove: true),
-                  child: const Text('Remove TheTVDB key'),
+    bottomNavigationBar: _message == null
+        ? null
+        : SafeArea(
+            top: false,
+            child: Material(
+              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 12, 16, 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        liveRegion: true,
+                        child: Text(_message!),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Dismiss message',
+                      onPressed: () => setState(() => _message = null),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
                 ),
-              _link(
-                'TheTVDB project dashboard',
-                'https://thetvdb.com/dashboard',
+              ),
+            ),
+          ),
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860),
+        child: ListView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text(
+              'Metadata for your library',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Manual search and automatic movie/TV identification send only titles, years and episode information to the provider. Control automatic identification in each library’s Identify titles or Processing screen. Files, paths, notes and playback history are not sent.',
+            ),
+            const SizedBox(height: 20),
+            if (_busy) const LinearProgressIndicator(),
+            const SizedBox(height: 12),
+            Text(
+              'TheTVDB · movies and TV',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            Text(
+              CatalogCredentials.hasBundledTvdbKey
+                  ? 'Included with Tangerine · no setup required'
+                  : _tvdbSaved
+                  ? 'Project key saved on this device'
+                  : 'Add the Tangerine project API key',
+            ),
+            const Text(
+              'Default provider for new movie and TV matches. Episode matching uses official aired order.',
+            ),
+            const SizedBox(height: 12),
+            if (!CatalogCredentials.hasBundledTvdbKey) ...[
+              TextField(
+                controller: _tvdb,
+                obscureText: true,
+                enabled: !_busy,
+                enableSuggestions: false,
+                autocorrect: false,
+                decoration: InputDecoration(
+                  labelText: _tvdbSaved
+                      ? 'Replacement TheTVDB project API key'
+                      : 'TheTVDB project API key',
+                  helperMaxLines: 3,
+                  helperText:
+                      'Stored in the device keychain; excluded from backups and library sync.',
+                ),
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: _busy || _tvdb.text.trim().isEmpty
+                        ? null
+                        : () => _saveTvdb(),
+                    child: const Text('Save TheTVDB key'),
+                  ),
+                  if (_tvdbSaved)
+                    TextButton(
+                      onPressed: _busy ? null : () => _saveTvdb(remove: true),
+                      child: const Text('Remove TheTVDB key'),
+                    ),
+                  _link(
+                    'TheTVDB project dashboard',
+                    'https://thetvdb.com/dashboard',
+                  ),
+                ],
               ),
             ],
-          ),
-        ],
-        if (_message != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Text(_message!),
-          ),
-        const Divider(height: 32),
-        Text(
-          'Optional providers',
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        Text(
-          'TMDB · movies and TV',
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        Text(
-          _saved
-              ? 'Token saved on this device'
-              : 'Requires your own API Read Access Token',
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _token,
-          obscureText: true,
-          enabled: !_busy,
-          enableSuggestions: false,
-          autocorrect: false,
-          decoration: InputDecoration(
-            labelText: _saved
-                ? 'Replacement read-access token'
-                : 'API Read Access Token',
-            helperText:
-                'Stored in the device keychain; excluded from backups and library sync.',
-          ),
-          onChanged: (_) => setState(() {}),
-        ),
-        Wrap(
-          spacing: 12,
-          children: [
-            FilledButton(
-              onPressed: _busy || _token.text.trim().isEmpty
-                  ? null
-                  : () => _save(),
-              child: const Text('Save token'),
+            const SizedBox(height: 32),
+            Text(
+              'Optional providers',
+              style: Theme.of(context).textTheme.titleMedium,
             ),
-            if (_saved)
-              TextButton(
-                onPressed: _busy ? null : () => _save(remove: true),
-                child: const Text('Remove token'),
+            Text(
+              'TMDB · movies and TV',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            Text(
+              _saved
+                  ? 'Token saved on this device'
+                  : 'Requires your own API Read Access Token',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _token,
+              obscureText: true,
+              enabled: !_busy,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: _saved
+                    ? 'Replacement read-access token'
+                    : 'API Read Access Token',
+                helperMaxLines: 3,
+                helperText:
+                    'Stored in the device keychain; excluded from backups and library sync.',
               ),
-            _link(
-              'Get a TMDB token',
-              'https://www.themoviedb.org/settings/api',
+              onChanged: (_) => setState(() {}),
             ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                FilledButton(
+                  onPressed: _busy || _token.text.trim().isEmpty
+                      ? null
+                      : () => _save(),
+                  child: const Text('Save token'),
+                ),
+                if (_saved)
+                  TextButton(
+                    onPressed: _busy ? null : () => _save(remove: true),
+                    child: const Text('Remove token'),
+                  ),
+                _link(
+                  'Get a TMDB token',
+                  'https://www.themoviedb.org/settings/api',
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+            Text(
+              'Provider credits',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 20),
+            for (final id in OnlineCatalogProvider.labels.keys) ...[
+              if (id == 'tmdb')
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: SvgPicture.asset(
+                      'assets/brand/tmdb.svg',
+                      width: 120,
+                      semanticsLabel: 'The Movie Database (TMDB)',
+                    ),
+                  ),
+                ),
+              Text(
+                OnlineCatalogProvider.label(id),
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              Text(OnlineCatalogProvider.attribution(id)),
+              _link('Provider information', switch (id) {
+                'tvdb' => 'https://thetvdb.com',
+                'tmdb' => 'https://www.themoviedb.org',
+                'tvmaze' => 'https://www.tvmaze.com/api',
+                'open-library' => 'https://openlibrary.org/developers/api',
+                _ => 'https://musicbrainz.org/doc/MusicBrainz_API',
+              }),
+              const SizedBox(height: 12),
+            ],
+            const Text(
+              'TVmaze, Open Library and MusicBrainz need no API key. Results and covers depend on provider coverage. MusicBrainz may have no description or cover for a recording. Personal videos, photos, courses and other unsupported categories retain manual details and offline catalogs.',
+            ),
+            _link('Cover Art Archive', 'https://coverartarchive.org'),
           ],
         ),
-        if (_busy) const LinearProgressIndicator(),
-        if (_message != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Text(_message!),
-          ),
-        const Divider(height: 32),
-        for (final id in OnlineCatalogProvider.labels.keys) ...[
-          if (id == 'tmdb')
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: SvgPicture.asset(
-                  'assets/brand/tmdb.svg',
-                  width: 120,
-                  semanticsLabel: 'The Movie Database (TMDB)',
-                ),
-              ),
-            ),
-          Text(
-            OnlineCatalogProvider.label(id),
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          Text(OnlineCatalogProvider.attribution(id)),
-          _link('Provider information', switch (id) {
-            'tvdb' => 'https://thetvdb.com',
-            'tmdb' => 'https://www.themoviedb.org',
-            'tvmaze' => 'https://www.tvmaze.com/api',
-            'open-library' => 'https://openlibrary.org/developers/api',
-            _ => 'https://musicbrainz.org/doc/MusicBrainz_API',
-          }),
-          const SizedBox(height: 12),
-        ],
-        const Text(
-          'TVmaze, Open Library and MusicBrainz need no API key. Results and covers depend on provider coverage. MusicBrainz may have no description or cover for a recording. Personal videos, photos, courses and other unsupported categories retain manual details and offline catalogs.',
-        ),
-        _link('Cover Art Archive', 'https://coverartarchive.org'),
-      ],
+      ),
     ),
   );
 }

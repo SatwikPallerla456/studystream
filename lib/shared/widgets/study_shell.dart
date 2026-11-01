@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_theme.dart';
 import 'study_ui.dart';
+import 'tangerine_controls.dart';
 
 class StudyShellDestination {
   const StudyShellDestination({
@@ -198,14 +199,23 @@ class _RailShell extends StatelessWidget {
                     NavigationRailDestination(
                       icon: Tooltip(
                         message: '${destinations[i].label} · Alt+${i + 1}',
-                        child: Icon(destinations[i].icon),
+                        child: TangerineInteraction(
+                          child: Icon(destinations[i].icon),
+                        ),
                       ),
-                      selectedIcon: Icon(destinations[i].selectedIcon),
+                      selectedIcon: TangerineInteraction(
+                        child: Icon(destinations[i].selectedIcon),
+                      ),
                       label: Text(destinations[i].label),
                     ),
                 ],
                 trailing: Column(
                   children: [
+                    IconButton(
+                      tooltip: 'Queue & playlists',
+                      onPressed: () => context.push('/playlists'),
+                      icon: const Icon(Icons.queue_music_rounded),
+                    ),
                     IconButton(
                       tooltip: 'Network',
                       onPressed: () => context.push('/network'),
@@ -361,44 +371,46 @@ class _SidebarDestination extends StatelessWidget {
     return Semantics(
       selected: selected,
       button: true,
-      child: AnimatedContainer(
-        duration: AppMotion.resolve(context, AppMotion.quick),
-        decoration: BoxDecoration(
-          color: selected ? colors.primaryContainer : Colors.transparent,
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(AppRadius.sm),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpace.md,
-                vertical: AppSpace.sm,
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    selected ? destination.selectedIcon : destination.icon,
-                    color: selected
-                        ? colors.onPrimaryContainer
-                        : context.studyColors.textMuted,
-                  ),
-                  const SizedBox(width: AppSpace.sm),
-                  Expanded(
-                    child: Text(
-                      destination.label,
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: selected
-                            ? colors.onPrimaryContainer
-                            : colors.onSurfaceVariant,
+      child: TangerineInteraction(
+        child: AnimatedContainer(
+          duration: AppMotion.resolve(context, AppMotion.quick),
+          decoration: BoxDecoration(
+            color: selected ? colors.primaryContainer : Colors.transparent,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(16),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpace.md,
+                  vertical: AppSpace.sm,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      selected ? destination.selectedIcon : destination.icon,
+                      color: selected
+                          ? colors.onPrimaryContainer
+                          : context.studyColors.textMuted,
+                    ),
+                    const SizedBox(width: AppSpace.sm),
+                    Expanded(
+                      child: Text(
+                        destination.label,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: selected
+                              ? colors.onPrimaryContainer
+                              : colors.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
-                  if (selected) StudyShortcutHint(keys: shortcut),
-                ],
+                    if (selected) StudyShortcutHint(keys: shortcut),
+                  ],
+                ),
               ),
             ),
           ),

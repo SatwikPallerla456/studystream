@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart' show SpringDescription;
 
 /// The shared Tangerine layout rhythm. Values are intentionally limited so screens
 /// stay visually related at every window size.
@@ -48,6 +49,13 @@ abstract final class AppMotion {
   static const Duration quick = Duration(milliseconds: 120);
   static const Duration standard = Duration(milliseconds: 200);
   static const Duration emphasized = Duration(milliseconds: 320);
+  static const Curve settle = Cubic(.2, .8, .2, 1);
+  static const Curve release = Cubic(.16, 1, .3, 1);
+  static const feedbackSpring = SpringDescription(
+    mass: 1,
+    stiffness: 700,
+    damping: 40,
+  );
 
   static Duration resolve(BuildContext context, Duration duration) =>
       MediaQuery.maybeDisableAnimationsOf(context) ?? false

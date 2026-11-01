@@ -904,6 +904,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       fit: _options['fit'] as String,
       targetWidth: (width * MediaQuery.devicePixelRatioOf(context)).ceil(),
       vertical: vertical,
+      showZoomControls: _chrome && page == _page && !vertical,
       layoutKey:
           '$_mode:$_rtl:${_presentation?.pagesFor(page).join(',') ?? page}',
       onTapUp: _imageTap,
@@ -913,7 +914,7 @@ class _BookReaderState extends ConsumerState<BookReaderScreen>
       onColors: (colors) => _receivedColors(page, colors),
       onSettled: (zoom, point, state) {
         _viewState = state;
-        _page = page;
+        if (_page != page) setState(() => _page = page);
         _zoom = zoom;
         _pointX = point.dx;
         _pointY = point.dy;

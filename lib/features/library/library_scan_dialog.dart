@@ -111,6 +111,7 @@ class _LibraryScanState extends ConsumerState<_LibraryScan> {
     canPop: !_running,
     child: AlertDialog(
       title: Text(_running ? 'Scanning library' : 'Library scan'),
+      scrollable: true,
       content: SizedBox(
         width: 500,
         child: Column(
@@ -132,10 +133,12 @@ class _LibraryScanState extends ConsumerState<_LibraryScan> {
       actions: [
         if (_running)
           TextButton(
-            onPressed: () {
-              _token.cancel();
-              setState(() => _message = 'Cancelling…');
-            },
+            onPressed: _token.isCancelled
+                ? null
+                : () {
+                    _token.cancel();
+                    setState(() {});
+                  },
             child: Text(_token.isCancelled ? 'Cancelling…' : 'Cancel scan'),
           )
         else

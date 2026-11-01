@@ -211,9 +211,19 @@ abstract final class TimedText {
         throw const FormatException(
           'Choose a TTML document with a tt root element.',
         );
-      final appleLyrics = root.attributes.any(
-        (a) => a.value == 'http://itunes.apple.com/lyric-ttml-extensions',
-      );
+      // Apple and LRC.red lyric TTML use absolute media timestamps, including
+      // bare seconds. Ordinary TTML keeps parent-relative timing semantics.
+      const lyricNamespaces = {
+        'http://itunes.apple.com/lyric-ttml-extensions',
+        'http://lrc.red/lyric-ttml-internal',
+      };
+      final absoluteLyrics =
+          root.attributes.any((a) => lyricNamespaces.contains(a.value)) ||
+          root.attributes.any(
+            (a) =>
+                a.name.local == 'timing' &&
+                lyricNamespaces.contains(a.namespaceUri),
+          );
       String? attr(XmlElement e, String name) {
         for (final a in e.attributes) {
           if (a.name.local == name) return a.value;
@@ -250,7 +260,7 @@ abstract final class TimedText {
         attr(root, 'frameRate') == null ? 1 : fps * subFrame,
       );
       int time(String value) {
-        if (appleLyrics && RegExp(r'^\d+(?:\.\d+)?$').hasMatch(value.trim()))
+        if (absoluteLyrics && RegExp(r'^\d+(?:\.\d+)?$').hasMatch(value.trim()))
           return _bounded(double.parse(value.trim()) * 1000);
         final offset = RegExp(
           r'^(\d+(?:\.\d+)?)(ms|h|m|s|f|t)$',
@@ -268,7 +278,7 @@ abstract final class TimedText {
                 },
           );
         final clock = RegExp(
-          r'^(?:(\d+):)?(\d{2}):(\d{2})(?:\.(\d+)|:(\d+)(?:\.(\d+))?)?$',
+          r'^(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d+)|:(\d+)(?:\.(\d+))?)?$',
         ).firstMatch(value.trim());
         if (clock == null ||
             int.parse(clock[2]!) > 59 ||
@@ -293,12 +303,12 @@ abstract final class TimedText {
       (int, int) resolve(XmlElement e, int reference, int parentEnd) {
         final begin = attr(e, 'begin') == null
             ? reference
-            : (appleLyrics ? 0 : reference) + time(attr(e, 'begin')!);
+            : (absoluteLyrics ? 0 : reference) + time(attr(e, 'begin')!);
         var end = parentEnd;
         if (attr(e, 'end') != null)
           end = math.min(
             end,
-            (appleLyrics ? 0 : reference) + time(attr(e, 'end')!),
+            (absoluteLyrics ? 0 : reference) + time(attr(e, 'end')!),
           );
         if (attr(e, 'dur') != null)
           end = math.min(end, begin + time(attr(e, 'dur')!));

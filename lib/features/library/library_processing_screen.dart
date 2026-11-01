@@ -7,6 +7,8 @@ import '../media/title_files_screen.dart';
 import '../../domain/catalog/library_processing.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
+import '../../core/theme/app_theme.dart';
 import 'automatic_identification_controls.dart';
 import '../media/catalog_editor_screen.dart';
 
@@ -14,7 +16,7 @@ class LibraryProcessingButton extends ConsumerWidget {
   const LibraryProcessingButton({super.key, required this.libraryId});
   final String libraryId;
   @override
-  Widget build(BuildContext context, WidgetRef ref) => OutlinedButton.icon(
+  Widget build(BuildContext context, WidgetRef ref) => TextButton.icon(
     icon: const Icon(Icons.auto_awesome_motion_outlined),
     label: const Text('Processing'),
     onPressed: () => Navigator.of(context).push(
@@ -98,12 +100,12 @@ class _ProcessingState extends ConsumerState<LibraryProcessingScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Ready behind the scenes',
+              'Library activity',
               style: Theme.of(context).textTheme.headlineMedium,
             ),
             const SizedBox(height: 8),
             const Text(
-              'New and changed files are organized, analyzed and identified automatically while Tangerine is open. Playback and reading take priority. Your files, matches, notes and progress stay in place.',
+              'Organization, analysis and identification run while Tangerine is open. Playback and reading take priority. Your files, matches, notes and progress stay in place.',
             ),
             AutomaticIdentificationControls(libraryId: widget.libraryId),
             const SizedBox(height: 20),
@@ -119,8 +121,8 @@ class _ProcessingState extends ConsumerState<LibraryProcessingScreen> {
                     .where((r) => r.data['state'] == state)
                     .fold(0, (n, r) => n + (r.data['total'] as int));
                 return Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
+                  spacing: 28,
+                  runSpacing: 16,
                   children: [
                     for (final state in [
                       'queued',
@@ -131,7 +133,38 @@ class _ProcessingState extends ConsumerState<LibraryProcessingScreen> {
                       'unsupported',
                       'review',
                     ])
-                      Chip(label: Text('${_state(state)} · ${count(state)}')),
+                      Semantics(
+                        label: '${_state(state)}, ${count(state)}',
+                        excludeSemantics: true,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            AnimatedSwitcher(
+                              duration: AppMotion.resolve(
+                                context,
+                                AppMotion.standard,
+                              ),
+                              child: Text(
+                                '${count(state)}',
+                                key: ValueKey(count(state)),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .headlineMedium
+                                    ?.copyWith(
+                                      color:
+                                          state == 'failed' && count(state) > 0
+                                          ? Theme.of(context).colorScheme.error
+                                          : null,
+                                    ),
+                              ),
+                            ),
+                            Text(
+                              _state(state),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
                   ],
                 );
               },
@@ -190,11 +223,21 @@ class _ProcessingState extends ConsumerState<LibraryProcessingScreen> {
               },
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Pause stops new work and discards an in-flight result after its resources are released. Offline sources wait for reconnection. Failed files receive up to three automatic attempts; unsupported files wait for an explicit retry.',
+            TangerineActionGroup(
+              title: 'How processing works',
+              icon: Icons.info_outline_rounded,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 720),
+                  child: const Text(
+                    'Pause stops new work and discards an in-flight result after its resources are released. Offline sources wait for reconnection. Failed files receive up to three automatic attempts; unsupported files wait for an explicit retry.',
+                  ),
+                ),
+              ],
             ),
             if (_busy) const LinearProgressIndicator(),
-            if (_message != null) Text(_message!),
+            if (_message != null)
+              Semantics(liveRegion: true, child: Text(_message!)),
             const SizedBox(height: 24),
             Text(
               'Organization review',

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../core/utils/display_utils.dart';
 import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
@@ -243,28 +244,28 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
               Wrap(
                 spacing: 12,
                 runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.start,
                 children: [
                   SizedBox(
-                    width: 220,
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _category ?? '',
-                      decoration: const InputDecoration(labelText: 'Category'),
-                      items: [
-                        const DropdownMenuItem(
+                    width: 260,
+                    child: TangerineChoicePicker<String>(
+                      value: _category ?? '',
+                      label: 'Category',
+                      icon: Icons.category_outlined,
+                      choices: [
+                        const TangerineChoice(
                           value: '',
-                          child: Text('All categories'),
+                          label: 'All categories',
                         ),
                         for (final kind in LibraryKind.values.where(
                           (k) => k != LibraryKind.mixed,
                         ))
-                          DropdownMenuItem(
-                            value: kind.name,
-                            child: Text(kind.label),
-                          ),
+                          TangerineChoice(value: kind.name, label: kind.label),
                       ],
                       onChanged: (value) {
-                        setState(() => _category = value == '' ? null : value);
+                        setState(
+                          () => _category = value.isEmpty ? null : value,
+                        );
                         unawaited(_search(_controller.text));
                       },
                     ),
@@ -306,7 +307,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
               if (_history.isNotEmpty || _more)
                 Wrap(
                   spacing: 12,
-                  crossAxisAlignment: WrapCrossAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.start,
                   children: [
                     Text('Page ${_history.length + 1}'),
                     TextButton(
@@ -426,19 +427,19 @@ class _SearchControls extends StatelessWidget {
     return Row(
       children: [
         Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                _chip('All', _SearchFilter.all),
-                const SizedBox(width: AppSpace.xs),
-                _chip('Titles', _SearchFilter.lesson),
-                const SizedBox(width: AppSpace.xs),
-                _chip('Notes', _SearchFilter.note),
-                const SizedBox(width: AppSpace.xs),
-                _chip('Bookmarks', _SearchFilter.bookmark),
-              ],
-            ),
+          child: TangerineSegments<_SearchFilter>(
+            label: 'Search result type',
+            value: filter,
+            choices: const [
+              TangerineChoice(value: _SearchFilter.all, label: 'All'),
+              TangerineChoice(value: _SearchFilter.lesson, label: 'Titles'),
+              TangerineChoice(value: _SearchFilter.note, label: 'Notes'),
+              TangerineChoice(
+                value: _SearchFilter.bookmark,
+                label: 'Bookmarks',
+              ),
+            ],
+            onChanged: onFilter,
           ),
         ),
         if (hasQuery) ...[
@@ -469,12 +470,6 @@ class _SearchControls extends StatelessWidget {
       ],
     );
   }
-
-  Widget _chip(String label, _SearchFilter value) => FilterChip(
-    label: Text(label),
-    selected: filter == value,
-    onSelected: (_) => onFilter(value),
-  );
 }
 
 class _SearchStartState extends StatelessWidget {
@@ -482,7 +477,11 @@ class _SearchStartState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StudySurface(
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        vertical: AppSpace.xl,
+        horizontal: AppSpace.md,
+      ),
       child: SingleChildScrollView(
         child: Center(
           child: ConstrainedBox(
@@ -495,7 +494,7 @@ class _SearchStartState extends StatelessWidget {
                   height: 72,
                   decoration: BoxDecoration(
                     color: Theme.of(context).colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(AppRadius.xl),
+                    shape: BoxShape.circle,
                   ),
                   child: Icon(
                     Icons.manage_search_rounded,

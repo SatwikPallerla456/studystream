@@ -19,6 +19,7 @@ import '../../shared/widgets/library_card.dart';
 import '../../shared/widgets/study_shell.dart';
 import '../../shared/widgets/study_ui.dart';
 import '../../shared/widgets/study_motion.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../search/search_screen.dart';
 import '../settings/settings_screen.dart';
 import '../media/cinematic_home_section.dart';
@@ -581,94 +582,46 @@ class _LibraryToolbar extends StatelessWidget {
       onChanged: onSearch,
     );
     final controls = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         SizedBox(
           width: 200,
-          child: DropdownButtonFormField<_LibrarySort>(
-            isExpanded: true,
-            initialValue: sort,
-            decoration: const InputDecoration(
-              labelText: 'Sort by',
-              contentPadding: EdgeInsets.symmetric(
-                horizontal: AppSpace.sm,
-                vertical: AppSpace.xs,
-              ),
-            ),
-            items: const [
-              DropdownMenuItem(
-                value: _LibrarySort.title,
-                child: Text(
-                  'Title',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              DropdownMenuItem(
+          child: TangerineChoicePicker<_LibrarySort>(
+            value: sort,
+            label: 'Sort',
+            icon: Icons.sort_rounded,
+            choices: const [
+              TangerineChoice(value: _LibrarySort.title, label: 'Title'),
+              TangerineChoice(
                 value: _LibrarySort.recentlyUpdated,
-                child: Text(
-                  'Recently updated',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                label: 'Recently updated',
               ),
-              DropdownMenuItem(
+              TangerineChoice(
                 value: _LibrarySort.recentlyAdded,
-                child: Text(
-                  'Recently added',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                label: 'Recently added',
               ),
             ],
-            selectedItemBuilder: (_) => const [
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Title',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Recently updated',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Recently added',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-            onChanged: (value) {
-              if (value != null) onSort(value);
-            },
+            onChanged: onSort,
           ),
         ),
         const SizedBox(width: AppSpace.xs),
-        SegmentedButton<LibraryCardLayout>(
-          showSelectedIcon: false,
-          segments: const [
-            ButtonSegment(
+        TangerineSegments<LibraryCardLayout>(
+          label: 'Library layout',
+          value: layout,
+          choices: const [
+            TangerineChoice(
               value: LibraryCardLayout.grid,
-              icon: Icon(Icons.grid_view_rounded),
-              tooltip: 'Grid view',
+              label: 'Grid',
+              icon: Icons.grid_view_rounded,
             ),
-            ButtonSegment(
+            TangerineChoice(
               value: LibraryCardLayout.list,
-              icon: Icon(Icons.view_list_rounded),
-              tooltip: 'List view',
+              label: 'List',
+              icon: Icons.view_list_rounded,
             ),
           ],
-          selected: {layout},
-          onSelectionChanged: (value) => onLayout(value.first),
+          onChanged: onLayout,
         ),
       ],
     );
@@ -688,6 +641,7 @@ class _LibraryToolbar extends StatelessWidget {
           );
         }
         return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(child: search),
             const SizedBox(width: AppSpace.sm),

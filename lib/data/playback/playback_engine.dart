@@ -138,6 +138,7 @@ class NativeVlcEngine extends PlaybackEngine {
   double? _aspectRatio, _cropRatio;
   double _zoom = 0;
   bool _mobileFullscreen = false;
+  bool? _nativePointerEnabled;
   Map<String, String> _preferences = {};
   Future<int> Function()? _nextSnapshotSequence;
   bool supports(String feature) => _capabilities.contains(feature);
@@ -720,6 +721,22 @@ class NativeVlcEngine extends PlaybackEngine {
 
   Future<void> closeWindow() async {
     await _call<void>('window.close');
+  }
+
+  /// The native macOS event monitor must yield to Flutter dialogs and routes.
+  /// This is transient presentation state, never a saved player preference.
+  void routeNativePointer(bool enabled) {
+    if (!Platform.isMacOS || _disposed || _nativePointerEnabled == enabled)
+      return;
+    _nativePointerEnabled = enabled;
+    unawaited(
+      _call<void>('window.pointer', {'enabled': enabled}).catchError((
+        Object error,
+      ) {
+        _nativePointerEnabled = null;
+        debugPrint('Native video pointer routing could not be updated: $error');
+      }),
+    );
   }
 
   Future<void> windowPreferences(Map<String, String> values) async {

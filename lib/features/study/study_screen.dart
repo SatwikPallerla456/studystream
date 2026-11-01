@@ -10,6 +10,8 @@ import '../../data/providers/app_providers.dart';
 import '../../shared/widgets/content_state.dart';
 import '../../shared/widgets/study_animated_list.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
+import '../../shared/widgets/app_top_bar.dart';
 
 enum _StudyKind { all, timed, pages, general }
 
@@ -42,31 +44,32 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
   Widget _paged(Widget child, bool more, (double, String)? next) => Column(
     children: [
       Expanded(child: child),
-      Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          Text('Page ${_previousPages.length + 1}'),
-          TextButton(
-            onPressed: _previousPages.isEmpty
-                ? null
-                : () => setState(() {
-                    _pageCursor = _previousPages.removeLast();
-                    _contextCache.clear();
-                  }),
-            child: const Text('Previous'),
-          ),
-          TextButton(
-            onPressed: !more || next == null
-                ? null
-                : () => setState(() {
-                    _previousPages.add(_pageCursor);
-                    _pageCursor = next;
-                    _contextCache.clear();
-                  }),
-            child: const Text('Next'),
-          ),
-        ],
-      ),
+      if (more || _previousPages.isNotEmpty)
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Text('Page ${_previousPages.length + 1}'),
+            TextButton(
+              onPressed: _previousPages.isEmpty
+                  ? null
+                  : () => setState(() {
+                      _pageCursor = _previousPages.removeLast();
+                      _contextCache.clear();
+                    }),
+              child: const Text('Previous'),
+            ),
+            TextButton(
+              onPressed: !more || next == null
+                  ? null
+                  : () => setState(() {
+                      _previousPages.add(_pageCursor);
+                      _pageCursor = next;
+                      _contextCache.clear();
+                    }),
+              child: const Text('Next'),
+            ),
+          ],
+        ),
     ],
   );
   (double, String) _noteCursor(Note row) => (
@@ -343,7 +346,12 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Scaffold(
+    appBar: const AppTopBar(title: 'Notes & bookmarks', showBack: true),
+    body: _content(context),
+  );
+
+  Widget _content(BuildContext context) {
     final database = ref.watch(appDatabaseProvider);
     return StreamBuilder<List<Library>>(
       stream: database.watchLibraries(),
@@ -352,30 +360,28 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
         return StudyPage(
           maxWidth: 1180,
           scrollable: false,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const StudyPageHeader(title: 'Notes & bookmarks'),
+          child: TangerineWorkbenchLayout(
+            header: [
+              const Text(
+                'Return to an idea in its original title, page or moment.',
+              ),
               const SizedBox(height: AppSpace.lg),
-              SizedBox(
-                width: double.infinity,
-                child: SegmentedButton<int>(
-                  segments: const [
-                    ButtonSegment(
-                      value: 0,
-                      icon: Icon(Icons.notes_rounded),
-                      label: Text('Notes'),
-                    ),
-                    ButtonSegment(
-                      value: 1,
-                      icon: Icon(Icons.bookmarks_outlined),
-                      label: Text('Bookmarks'),
-                    ),
-                  ],
-                  selected: {_tab},
-                  onSelectionChanged: (value) =>
-                      _filterChanged(() => _tab = value.first),
-                ),
+              TangerineSegments<int>(
+                label: 'Study entries',
+                value: _tab,
+                choices: const [
+                  TangerineChoice(
+                    value: 0,
+                    label: 'Notes',
+                    icon: Icons.notes_rounded,
+                  ),
+                  TangerineChoice(
+                    value: 1,
+                    label: 'Bookmarks',
+                    icon: Icons.bookmarks_outlined,
+                  ),
+                ],
+                onChanged: (value) => _filterChanged(() => _tab = value),
               ),
               const SizedBox(height: AppSpace.md),
               StudySearchField(
@@ -402,39 +408,34 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                 onSort: (value) => _filterChanged(() => _sort = value),
               ),
               const SizedBox(height: AppSpace.md),
-              Expanded(
-                child: _tab == 0
-                    ? StreamBuilder<List<Note>>(
-                        stream: database.watchNotes(
-                          libraryId: _libraryId,
-                          itemId: _itemId,
-                          sectionId: _sectionId,
-                          search: _searchController.text,
-                          kind: _kind.name,
-                          sort: _sort.name,
-                          after: _pageCursor,
-                        ),
-                        builder: (context, snapshot) =>
-                            _notes(database, snapshot, libraries: libraries),
-                      )
-                    : StreamBuilder<List<Bookmark>>(
-                        stream: database.watchBookmarks(
-                          libraryId: _libraryId,
-                          itemId: _itemId,
-                          sectionId: _sectionId,
-                          search: _searchController.text,
-                          kind: _kind.name,
-                          sort: _sort.name,
-                          after: _pageCursor,
-                        ),
-                        builder: (context, snapshot) => _bookmarks(
-                          database,
-                          snapshot,
-                          libraries: libraries,
-                        ),
-                      ),
-              ),
             ],
+            body: _tab == 0
+                ? StreamBuilder<List<Note>>(
+                    stream: database.watchNotes(
+                      libraryId: _libraryId,
+                      itemId: _itemId,
+                      sectionId: _sectionId,
+                      search: _searchController.text,
+                      kind: _kind.name,
+                      sort: _sort.name,
+                      after: _pageCursor,
+                    ),
+                    builder: (context, snapshot) =>
+                        _notes(database, snapshot, libraries: libraries),
+                  )
+                : StreamBuilder<List<Bookmark>>(
+                    stream: database.watchBookmarks(
+                      libraryId: _libraryId,
+                      itemId: _itemId,
+                      sectionId: _sectionId,
+                      search: _searchController.text,
+                      kind: _kind.name,
+                      sort: _sort.name,
+                      after: _pageCursor,
+                    ),
+                    builder: (context, snapshot) =>
+                        _bookmarks(database, snapshot, libraries: libraries),
+                  ),
           ),
         );
       },
@@ -637,144 +638,116 @@ class _StudyFilters extends StatelessWidget {
   final ValueChanged<_StudySort> onSort;
 
   @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 760;
-        final width = compact ? constraints.maxWidth : 210.0;
-        return SingleChildScrollView(
-          scrollDirection: compact ? Axis.horizontal : Axis.vertical,
-          child: Wrap(
-            spacing: AppSpace.xs,
-            runSpacing: AppSpace.xs,
-            children: [
-              SizedBox(
-                width: width,
-                child: DropdownButtonFormField<String>(
-                  initialValue: libraryId ?? '__all__',
-                  isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'Library'),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '__all__',
-                      child: Text('All libraries'),
-                    ),
-                    for (final library in libraries)
-                      DropdownMenuItem(
-                        value: library.id,
-                        child: Text(
-                          cleanDisplayTitle(library.title),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) =>
-                      onLibrary(value == '__all__' ? null : value),
-                ),
-              ),
-              SizedBox(
-                width: width,
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.folder_outlined),
-                  label: Text(
-                    sectionId == null ? 'All sections' : 'Selected section',
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final width = constraints.maxWidth >= 520
+          ? (constraints.maxWidth - 12) / 2
+          : constraints.maxWidth;
+      return TangerineActionGroup(
+        title: 'Filter & sort',
+        icon: Icons.filter_list_rounded,
+        children: [
+          SizedBox(
+            width: width,
+            child: TangerineChoicePicker<String?>(
+              label: 'Library',
+              value: libraryId,
+              choices: [
+                const TangerineChoice(value: null, label: 'All libraries'),
+                for (final library in libraries)
+                  TangerineChoice(
+                    value: library.id,
+                    label: cleanDisplayTitle(library.title),
                   ),
-                  onPressed: libraryId == null
-                      ? null
-                      : () async {
-                          final pick = await showDialog<String>(
-                            context: context,
-                            builder: (_) => _StudyScopePicker(
-                              database: database,
-                              libraryId: libraryId!,
-                              sections: true,
-                            ),
-                          );
-                          if (pick != null)
-                            onSection(pick.isEmpty ? null : pick);
-                        },
-                ),
-              ),
-              SizedBox(
-                width: width,
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.search),
-                  label: Text(itemId == null ? 'All titles' : 'Selected title'),
-                  onPressed: libraryId == null
-                      ? null
-                      : () async {
-                          final pick = await showDialog<String>(
-                            context: context,
-                            builder: (_) => _StudyScopePicker(
-                              database: database,
-                              libraryId: libraryId!,
-                              sectionId: sectionId,
-                            ),
-                          );
-                          if (pick != null) onItem(pick.isEmpty ? null : pick);
-                        },
-                ),
-              ),
-              SizedBox(
-                width: width,
-                child: DropdownButtonFormField<_StudyKind>(
-                  isExpanded: true,
-                  initialValue: kind,
-                  decoration: const InputDecoration(labelText: 'Location type'),
-                  items: const [
-                    DropdownMenuItem(
-                      value: _StudyKind.all,
-                      child: Text('All locations'),
-                    ),
-                    DropdownMenuItem(
-                      value: _StudyKind.timed,
-                      child: Text('Media moments'),
-                    ),
-                    DropdownMenuItem(
-                      value: _StudyKind.pages,
-                      child: Text('Document pages'),
-                    ),
-                    DropdownMenuItem(
-                      value: _StudyKind.general,
-                      child: Text('General'),
-                    ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) onKind(value);
-                  },
-                ),
-              ),
-              SizedBox(
-                width: width,
-                child: DropdownButtonFormField<_StudySort>(
-                  isExpanded: true,
-                  initialValue: sort,
-                  decoration: const InputDecoration(labelText: 'Sort by'),
-                  items: const [
-                    DropdownMenuItem(
-                      value: _StudySort.updated,
-                      child: Text('Recently updated'),
-                    ),
-                    DropdownMenuItem(
-                      value: _StudySort.created,
-                      child: Text('Recently created'),
-                    ),
-                    DropdownMenuItem(
-                      value: _StudySort.location,
-                      child: Text('Location'),
-                    ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) onSort(value);
-                  },
-                ),
-              ),
-            ],
+              ],
+              onChanged: onLibrary,
+            ),
           ),
-        );
-      },
-    );
-  }
+          SizedBox(
+            width: width,
+            child: TangerineChoicePicker<_StudyKind>(
+              label: 'Location type',
+              value: kind,
+              choices: const [
+                TangerineChoice(value: _StudyKind.all, label: 'All locations'),
+                TangerineChoice(
+                  value: _StudyKind.timed,
+                  label: 'Media moments',
+                ),
+                TangerineChoice(
+                  value: _StudyKind.pages,
+                  label: 'Document pages',
+                ),
+                TangerineChoice(value: _StudyKind.general, label: 'General'),
+              ],
+              onChanged: onKind,
+            ),
+          ),
+          SizedBox(
+            width: width,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.folder_outlined),
+              label: Text(
+                sectionId == null ? 'All sections' : 'Selected section',
+              ),
+              onPressed: libraryId == null
+                  ? null
+                  : () async {
+                      final pick = await showDialog<String>(
+                        context: context,
+                        builder: (_) => _StudyScopePicker(
+                          database: database,
+                          libraryId: libraryId!,
+                          sections: true,
+                        ),
+                      );
+                      if (pick != null) onSection(pick.isEmpty ? null : pick);
+                    },
+            ),
+          ),
+          SizedBox(
+            width: width,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.search),
+              label: Text(itemId == null ? 'All titles' : 'Selected title'),
+              onPressed: libraryId == null
+                  ? null
+                  : () async {
+                      final pick = await showDialog<String>(
+                        context: context,
+                        builder: (_) => _StudyScopePicker(
+                          database: database,
+                          libraryId: libraryId!,
+                          sectionId: sectionId,
+                        ),
+                      );
+                      if (pick != null) onItem(pick.isEmpty ? null : pick);
+                    },
+            ),
+          ),
+          SizedBox(
+            width: width,
+            child: TangerineChoicePicker<_StudySort>(
+              label: 'Sort by',
+              value: sort,
+              choices: const [
+                TangerineChoice(
+                  value: _StudySort.updated,
+                  label: 'Recently updated',
+                ),
+                TangerineChoice(
+                  value: _StudySort.created,
+                  label: 'Recently created',
+                ),
+                TangerineChoice(value: _StudySort.location, label: 'Location'),
+              ],
+              onChanged: onSort,
+            ),
+          ),
+        ],
+      );
+    },
+  );
 }
 
 class _StudyEntryRow extends StatelessWidget {
@@ -806,113 +779,117 @@ class _StudyEntryRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(AppSpace.sm),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: tone == StudyStatusTone.warning
-                  ? context.studyColors.warningContainer
-                  : context.studyColors.infoContainer,
-              borderRadius: BorderRadius.circular(AppRadius.sm),
+    return InkWell(
+      onTap: onOpen,
+      borderRadius: BorderRadius.circular(AppRadius.sm),
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpace.sm),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: tone == StudyStatusTone.warning
+                    ? context.studyColors.warningContainer
+                    : context.studyColors.infoContainer,
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
+              alignment: Alignment.center,
+              child: Icon(
+                icon,
+                color: tone == StudyStatusTone.warning
+                    ? context.studyColors.warning
+                    : context.studyColors.info,
+              ),
             ),
-            alignment: Alignment.center,
-            child: Icon(
-              icon,
-              color: tone == StudyStatusTone.warning
-                  ? context.studyColors.warning
-                  : context.studyColors.info,
-            ),
-          ),
-          const SizedBox(width: AppSpace.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                StudyStatusBadge(label: typeLabel, icon: icon, tone: tone),
-                const SizedBox(height: AppSpace.xs),
-                Text(
-                  title,
-                  maxLines: 4,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                if (description?.trim().isNotEmpty == true) ...[
-                  const SizedBox(height: AppSpace.xxs),
+            const SizedBox(width: AppSpace.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  StudyStatusBadge(label: typeLabel, icon: icon, tone: tone),
+                  const SizedBox(height: AppSpace.xs),
                   Text(
-                    description!,
-                    maxLines: 2,
+                    title,
+                    maxLines: 4,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  if (description?.trim().isNotEmpty == true) ...[
+                    const SizedBox(height: AppSpace.xxs),
+                    Text(
+                      description!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ],
+                  const SizedBox(height: AppSpace.xs),
+                  FutureBuilder<_EntryContext>(
+                    future: contextFuture,
+                    builder: (context, snapshot) {
+                      final value = snapshot.data;
+                      if (value == null) {
+                        return const StudySkeleton(width: 300, height: 13);
+                      }
+                      return StudyMeta(
+                        items: [
+                          cleanDisplayTitle(value.libraryTitle),
+                          cleanDisplayTitle(value.sectionTitle),
+                          cleanDisplayTitle(value.itemTitle),
+                          location,
+                          'Updated ${_relativeTime(updatedAt)}',
+                        ],
+                        maxLines: 2,
+                      );
+                    },
                   ),
                 ],
-                const SizedBox(height: AppSpace.xs),
-                FutureBuilder<_EntryContext>(
-                  future: contextFuture,
-                  builder: (context, snapshot) {
-                    final value = snapshot.data;
-                    if (value == null) {
-                      return const StudySkeleton(width: 300, height: 13);
-                    }
-                    return StudyMeta(
-                      items: [
-                        cleanDisplayTitle(value.libraryTitle),
-                        cleanDisplayTitle(value.sectionTitle),
-                        cleanDisplayTitle(value.itemTitle),
-                        location,
-                        'Updated ${_relativeTime(updatedAt)}',
-                      ],
-                      maxLines: 2,
-                    );
-                  },
+              ),
+            ),
+            const SizedBox(width: AppSpace.xs),
+            PopupMenuButton<String>(
+              tooltip: '$typeLabel actions',
+              onSelected: (value) {
+                if (value == 'open') onOpen?.call();
+                if (value == 'edit') onEdit();
+                if (value == 'delete') onDelete();
+              },
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: 'open',
+                  enabled: onOpen != null,
+                  child: const ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.open_in_new_rounded),
+                    title: Text('Jump to content'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'edit',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.edit_outlined),
+                    title: Text('Edit'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'delete',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.delete_outline_rounded),
+                    title: Text('Delete'),
+                  ),
                 ),
               ],
             ),
-          ),
-          const SizedBox(width: AppSpace.xs),
-          PopupMenuButton<String>(
-            tooltip: '$typeLabel actions',
-            onSelected: (value) {
-              if (value == 'open') onOpen?.call();
-              if (value == 'edit') onEdit();
-              if (value == 'delete') onDelete();
-            },
-            itemBuilder: (_) => [
-              PopupMenuItem(
-                value: 'open',
-                enabled: onOpen != null,
-                child: const ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.open_in_new_rounded),
-                  title: Text('Jump to content'),
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'edit',
-                child: ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.edit_outlined),
-                  title: Text('Edit'),
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'delete',
-                child: ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.delete_outline_rounded),
-                  title: Text('Delete'),
-                ),
-              ),
-            ],
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

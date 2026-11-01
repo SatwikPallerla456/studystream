@@ -16,6 +16,7 @@ import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import 'catalog_editor_screen.dart';
 import 'media_versions_section.dart';
 import 'technical_media_panel.dart';
@@ -67,6 +68,7 @@ class MediaDetailsScreen extends ConsumerStatefulWidget {
 class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
   late Future<_Details?> _details;
   bool _saving = false;
+  final _filePanelStorage = PageStorageBucket();
   @override
   void initState() {
     super.initState();
@@ -170,7 +172,10 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
             ),
           ),
         );
-        if (mounted) setState(() => _details = _load());
+        if (mounted)
+          setState(() {
+            _details = _load();
+          });
         return;
       }
       var route =
@@ -190,7 +195,10 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
       }
       if (!mounted) return;
       await context.push(route);
-      if (mounted) setState(() => _details = _load());
+      if (mounted)
+        setState(() {
+          _details = _load();
+        });
     } on Object {
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
@@ -242,6 +250,10 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
             details.metadata['author'] ??
             details.metadata['artist'] ??
             details.metadata['credits'];
+        final creditsOnly =
+            details.metadata['author'] == null &&
+            details.metadata['artist'] == null &&
+            creator is String;
         return StudyPage(
           key: PageStorageKey('details-${item.id}'),
           child: Column(
@@ -280,7 +292,9 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                               : 'Local',
                         ].join(' · '),
                       ),
-                      if (creator is String && creator.isNotEmpty) ...[
+                      if (creator is String &&
+                          creator.isNotEmpty &&
+                          !creditsOnly) ...[
                         const SizedBox(height: AppSpace.sm),
                         Text(creator),
                       ],
@@ -318,6 +332,76 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                                   : MediaVisuals.action(item),
                             ),
                           ),
+                          if (details.experience.notes)
+                            TextButton.icon(
+                              onPressed: () => showLessonToolsSheet(
+                                context: context,
+                                database: ref.read(appDatabaseProvider),
+                                item: item,
+                                title: details.experience.course
+                                    ? 'Study tools'
+                                    : 'Notes & bookmarks',
+                                currentPage: details.reading?.resumePage,
+                                currentPositionSeconds:
+                                    details.playback?.resumePositionSeconds,
+                              ),
+                              icon: const Icon(Icons.edit_note),
+                              label: Text(details.experience.notesLabel),
+                            ),
+                          OutlinedButton.icon(
+                            onPressed: _saving
+                                ? null
+                                : () => _change(
+                                    () => MediaCatalogRepository(
+                                      ref.read(appDatabaseProvider),
+                                    ).setFavorite(item, !details.favorite),
+                                  ),
+                            icon: Icon(
+                              details.favorite
+                                  ? Icons.favorite
+                                  : Icons.favorite_border,
+                            ),
+                            label: Text(
+                              details.favorite ? 'Favorited' : 'Favorite',
+                            ),
+                          ),
+                          if (details.experience.completion)
+                            TextButton.icon(
+                              onPressed: _saving
+                                  ? null
+                                  : () => _change(
+                                      () => details.multipart
+                                          ? CatalogPlayback(
+                                              ref.read(appDatabaseProvider),
+                                            ).setTitleCompletion(
+                                              item,
+                                              !details.completed,
+                                            )
+                                          : ref
+                                                .read(appDatabaseProvider)
+                                                .setItemCompletion(
+                                                  item: item,
+                                                  completed: !details.completed,
+                                                ),
+                                    ),
+                              icon: Icon(
+                                details.completed
+                                    ? Icons.check_circle
+                                    : Icons.check_circle_outline,
+                              ),
+                              label: Text(
+                                details.experience.completionLabel(
+                                  details.completed,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: AppSpace.sm),
+                      TangerineActionGroup(
+                        title: 'Organize & edit',
+                        icon: Icons.tune_rounded,
+                        children: [
                           if (DesktopPlaybackWindows.available &&
                               {'audio', 'video'}.contains(item.itemType))
                             TextButton.icon(
@@ -374,39 +458,6 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                             icon: const Icon(Icons.manage_search),
                             label: const Text('Edit details'),
                           ),
-                          if (details.experience.notes)
-                            TextButton.icon(
-                              onPressed: () => showLessonToolsSheet(
-                                context: context,
-                                database: ref.read(appDatabaseProvider),
-                                item: item,
-                                title: details.experience.course
-                                    ? 'Study tools'
-                                    : 'Notes & bookmarks',
-                                currentPage: details.reading?.resumePage,
-                                currentPositionSeconds:
-                                    details.playback?.resumePositionSeconds,
-                              ),
-                              icon: const Icon(Icons.edit_note),
-                              label: Text(details.experience.notesLabel),
-                            ),
-                          OutlinedButton.icon(
-                            onPressed: _saving
-                                ? null
-                                : () => _change(
-                                    () => MediaCatalogRepository(
-                                      ref.read(appDatabaseProvider),
-                                    ).setFavorite(item, !details.favorite),
-                                  ),
-                            icon: Icon(
-                              details.favorite
-                                  ? Icons.favorite
-                                  : Icons.favorite_border,
-                            ),
-                            label: Text(
-                              details.favorite ? 'Favorited' : 'Favorite',
-                            ),
-                          ),
                           TextButton.icon(
                             onPressed: _saving
                                 ? null
@@ -418,61 +469,38 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                                   : 'Edit tags (${details.tags.length})',
                             ),
                           ),
-                          if (details.experience.completion) ...[
-                            TextButton.icon(
-                              onPressed: _saving
-                                  ? null
-                                  : () => _change(
-                                      () => CatalogPlayback(
-                                        ref.read(appDatabaseProvider),
-                                      ).resetTitleProgress(item),
-                                    ),
-                              icon: const Icon(Icons.restart_alt),
-                              label: const Text('Restart progress'),
-                            ),
-                            TextButton(
-                              onPressed: _saving
-                                  ? null
-                                  : () => _change(
-                                      () => CatalogPlayback(
-                                        ref.read(appDatabaseProvider),
-                                      ).useAutomaticTitleCompletion(item),
-                                    ),
-                              child: const Text('Use automatic completion'),
-                            ),
-                          ],
-                          if (details.experience.completion)
-                            TextButton.icon(
-                              onPressed: _saving
-                                  ? null
-                                  : () => _change(
-                                      () => details.multipart
-                                          ? CatalogPlayback(
-                                              ref.read(appDatabaseProvider),
-                                            ).setTitleCompletion(
-                                              item,
-                                              !details.completed,
-                                            )
-                                          : ref
-                                                .read(appDatabaseProvider)
-                                                .setItemCompletion(
-                                                  item: item,
-                                                  completed: !details.completed,
-                                                ),
-                                    ),
-                              icon: Icon(
-                                details.completed
-                                    ? Icons.check_circle
-                                    : Icons.check_circle_outline,
-                              ),
-                              label: Text(
-                                details.experience.completionLabel(
-                                  details.completed,
-                                ),
-                              ),
-                            ),
                         ],
                       ),
+                      if (details.experience.completion)
+                        TangerineActionGroup(
+                          title: 'Progress options',
+                          icon: Icons.history_rounded,
+                          children: [
+                            if (details.experience.completion) ...[
+                              TextButton.icon(
+                                onPressed: _saving
+                                    ? null
+                                    : () => _change(
+                                        () => CatalogPlayback(
+                                          ref.read(appDatabaseProvider),
+                                        ).resetTitleProgress(item),
+                                      ),
+                                icon: const Icon(Icons.restart_alt),
+                                label: const Text('Restart progress'),
+                              ),
+                              TextButton(
+                                onPressed: _saving
+                                    ? null
+                                    : () => _change(
+                                        () => CatalogPlayback(
+                                          ref.read(appDatabaseProvider),
+                                        ).useAutomaticTitleCompletion(item),
+                                      ),
+                                child: const Text('Use automatic completion'),
+                              ),
+                            ],
+                          ],
+                        ),
                     ],
                   );
                   final art = SizedBox(
@@ -518,6 +546,33 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                     ],
                   ),
                 ),
+              if (creditsOnly && (creator as String).isNotEmpty) ...[
+                ExpansionTile(
+                  key: PageStorageKey('detail-credits-${item.id}'),
+                  expansionAnimationStyle: AnimationStyle(
+                    duration: AppMotion.resolve(context, AppMotion.emphasized),
+                    reverseDuration: AppMotion.resolve(
+                      context,
+                      AppMotion.standard,
+                    ),
+                    curve: AppMotion.settle,
+                  ),
+                  tilePadding: EdgeInsets.zero,
+                  shape: const Border(),
+                  collapsedShape: const Border(),
+                  title: const Text('Cast & credits'),
+                  children: [
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: SelectionArea(child: Text(creator as String)),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpace.md),
+              ],
               if ((details.metadata['synopsis'] as String? ?? '')
                   .trim()
                   .isNotEmpty) ...[
@@ -553,6 +608,15 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                 const SizedBox(height: AppSpace.md),
               ],
               ExpansionTile(
+                key: PageStorageKey('detail-files-${item.id}'),
+                expansionAnimationStyle: AnimationStyle(
+                  duration: AppMotion.resolve(context, AppMotion.emphasized),
+                  reverseDuration: AppMotion.resolve(
+                    context,
+                    AppMotion.standard,
+                  ),
+                  curve: AppMotion.settle,
+                ),
                 tilePadding: EdgeInsets.zero,
                 initiallyExpanded: details.multipart,
                 title: Text(
@@ -566,37 +630,52 @@ class _MediaDetailsScreenState extends ConsumerState<MediaDetailsScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 children: [
-                  if (!details.experience.photo)
-                    MediaVersionsSection(
-                      item: item,
-                      onChanged: () => setState(() => _details = _load()),
+                  PageStorage(
+                    bucket: _filePanelStorage,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (!details.experience.photo)
+                          MediaVersionsSection(
+                            item: item,
+                            onChanged: () => setState(() {
+                              _details = _load();
+                            }),
+                          ),
+                        if (details.experience.photo)
+                          SelectableText(item.filename),
+                        if ({
+                          'audio',
+                          'video',
+                          'image',
+                          'pdf',
+                          'epub',
+                          'cbz',
+                        }.contains(item.itemType))
+                          TechnicalMediaPanel(
+                            key: ValueKey(item.id),
+                            item: item,
+                          ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Text(
+                            [
+                              if (item.durationSeconds != null)
+                                '${(item.durationSeconds! / 60).toStringAsFixed(1)} minutes',
+                              if (item.pageCount != null)
+                                '${item.pageCount} pages',
+                              if (item.fileSize != null)
+                                '${(item.fileSize! / (1024 * 1024)).toStringAsFixed(1)} MiB',
+                            ].join(' · '),
+                          ),
+                        ),
+                        Text(
+                          details.metadata['matchState'] == 'matched'
+                              ? 'Catalog metadata'
+                              : 'Local metadata',
+                        ),
+                      ],
                     ),
-                  if (details.experience.photo) SelectableText(item.filename),
-                  if ({
-                    'audio',
-                    'video',
-                    'image',
-                    'pdf',
-                    'epub',
-                    'cbz',
-                  }.contains(item.itemType))
-                    TechnicalMediaPanel(key: ValueKey(item.id), item: item),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: Text(
-                      [
-                        if (item.durationSeconds != null)
-                          '${(item.durationSeconds! / 60).toStringAsFixed(1)} minutes',
-                        if (item.pageCount != null) '${item.pageCount} pages',
-                        if (item.fileSize != null)
-                          '${(item.fileSize! / (1024 * 1024)).toStringAsFixed(1)} MiB',
-                      ].join(' · '),
-                    ),
-                  ),
-                  Text(
-                    details.metadata['matchState'] == 'matched'
-                        ? 'Catalog metadata'
-                        : 'Local metadata',
                   ),
                 ],
               ),

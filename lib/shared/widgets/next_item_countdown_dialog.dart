@@ -141,14 +141,16 @@ class _NextItemCountdownDialogState extends State<NextItemCountdownDialog> {
               widget.nextType == 'done' ? 'Library complete' : 'Up next',
               style: Theme.of(context).textTheme.headlineSmall,
             ),
-            const SizedBox(height: AppSpace.sm),
-            Text(
-              widget.nextTitle,
-              textAlign: TextAlign.center,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
+            if (widget.nextType != 'done') ...[
+              const SizedBox(height: AppSpace.sm),
+              Text(
+                widget.nextTitle,
+                textAlign: TextAlign.center,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ],
             const SizedBox(height: AppSpace.xs),
             StudyStatusBadge(
               label: widget.nextType == 'done'

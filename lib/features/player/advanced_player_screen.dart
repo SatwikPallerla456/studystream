@@ -13,6 +13,7 @@ import '../../data/playback/playback_engine.dart';
 import '../../domain/services/advanced_player_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
 import '../../shared/widgets/study_ui.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import 'custom_player_strip.dart';
 import 'native_output_tools.dart';
 
@@ -299,7 +300,7 @@ class _AdvancedPlayerState extends ConsumerState<AdvancedPlayerScreen> {
 
   Widget _field(String label, TextEditingController c, {bool secret = false}) =>
       Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.symmetric(vertical: 4),
         child: TextField(
           controller: c,
           obscureText: secret,
@@ -319,17 +320,34 @@ class _AdvancedPlayerState extends ConsumerState<AdvancedPlayerScreen> {
   );
   Widget _section(String title, List<Widget> children) => Padding(
     padding: const EdgeInsets.only(bottom: 24),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(title, style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 10),
-        ...children,
-      ],
+    child: TangerinePreferenceSection(
+      title: title,
+      description: '',
+      icon: switch (title) {
+        'Network stream' => Icons.wifi,
+        'Capture' => Icons.videocam_outlined,
+        'Disc' => Icons.album_outlined,
+        'OpenSubtitles' => Icons.closed_caption_outlined,
+        _ => Icons.tune,
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < children.length; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            children[i],
+          ],
+        ],
+      ),
     ),
   );
-  Widget _list(List<Widget> children) =>
-      ListView(padding: const EdgeInsets.all(20), children: children);
+  Widget _list(List<Widget> children) => Align(
+    alignment: Alignment.topCenter,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 920),
+      child: ListView(padding: const EdgeInsets.all(24), children: children),
+    ),
+  );
   @override
   Widget build(BuildContext context) => DefaultTabController(
     length: 4,
@@ -770,7 +788,7 @@ class _AdvancedPlayerState extends ConsumerState<AdvancedPlayerScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                tooltip: 'Move up',
+                tooltip: 'Move ${_order[i]} up',
                 onPressed: _busy || i == 0
                     ? null
                     : () {
@@ -782,7 +800,7 @@ class _AdvancedPlayerState extends ConsumerState<AdvancedPlayerScreen> {
                 icon: const Icon(Icons.arrow_upward),
               ),
               IconButton(
-                tooltip: 'Move down',
+                tooltip: 'Move ${_order[i]} down',
                 onPressed: _busy || i == _order.length - 1
                     ? null
                     : () {
@@ -794,7 +812,7 @@ class _AdvancedPlayerState extends ConsumerState<AdvancedPlayerScreen> {
                 icon: const Icon(Icons.arrow_downward),
               ),
               IconButton(
-                tooltip: 'Remove group',
+                tooltip: 'Remove ${_order[i]} group',
                 onPressed: _busy || _order[i] == 'Transport'
                     ? null
                     : () => setState(() => _order.removeAt(i)),

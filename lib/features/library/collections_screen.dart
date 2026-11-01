@@ -7,6 +7,7 @@ import '../../data/db/app_database.dart';
 import '../../data/providers/app_providers.dart';
 import '../../domain/catalog/media_catalog_repository.dart';
 import '../../shared/widgets/app_top_bar.dart';
+import '../../shared/widgets/tangerine_controls.dart';
 import '../../shared/widgets/cinematic_media.dart';
 import 'collection_details_screen.dart';
 import '../../domain/catalog/catalog_discovery_repository.dart';
@@ -71,7 +72,10 @@ class _CollectionsState extends ConsumerState<CollectionsScreen> {
       record: record,
       initial: widget.item,
     );
-    if (mounted) setState(() => _rows = _load());
+    if (mounted)
+      setState(() {
+        _rows = _load();
+      });
   }
 
   @override
@@ -103,15 +107,22 @@ class _CollectionsState extends ConsumerState<CollectionsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    widget.libraryId == null
-                        ? 'Open a named library to create a collection or ordered album.'
-                        : 'Create a collection from files in this library.',
+                    'Make room for your favorites',
+                    style: Theme.of(context).textTheme.headlineMedium,
                   ),
-                  const SizedBox(height: 16),
-                  FilledButton.icon(
-                    onPressed: () => _edit(),
-                    icon: const Icon(Icons.add),
-                    label: const Text('New collection'),
+                  const SizedBox(height: 12),
+                  Text(
+                    widget.libraryId == null
+                        ? 'Bring titles together or arrange an ordered album. Choose a named library to begin.'
+                        : 'Bring titles from this library together, in the order you choose.',
+                  ),
+                  const SizedBox(height: 24),
+                  TangerineInteraction(
+                    child: FilledButton.icon(
+                      onPressed: () => _edit(),
+                      icon: const Icon(Icons.add),
+                      label: const Text('New collection'),
+                    ),
                   ),
                 ],
               ),
@@ -122,7 +133,7 @@ class _CollectionsState extends ConsumerState<CollectionsScreen> {
                   return ListTile(
                     title: Text(record.data['title'] as String),
                     subtitle: Text(
-                      '${(record.data['items'] as List).length} items · ${record.kind} · ${row.data['library_title']}',
+                      '${(record.data['items'] as List).length} ${(record.data['items'] as List).length == 1 ? 'item' : 'items'} · ${record.kind} · ${row.data['library_title']}',
                     ),
                     trailing: widget.item == null
                         ? IconButton(
@@ -166,7 +177,9 @@ class _CollectionsState extends ConsumerState<CollectionsScreen> {
                                         type: record.kind,
                                       );
                                       if (mounted) {
-                                        setState(() => _rows = _load());
+                                        setState(() {
+                                          _rows = _load();
+                                        });
                                         ScaffoldMessenger.of(
                                           context,
                                         ).showSnackBar(
@@ -204,7 +217,10 @@ class _CollectionsState extends ConsumerState<CollectionsScreen> {
                           ),
                         ),
                       );
-                      if (mounted) setState(() => _rows = _load());
+                      if (mounted)
+                        setState(() {
+                          _rows = _load();
+                        });
                     },
                   );
                 },
@@ -326,6 +342,7 @@ class _CollectionEditorState extends ConsumerState<_CollectionEditor> {
   }
 
   Future<void> _save({bool remove = false}) async {
+    if (_busy) return;
     setState(() => _busy = true);
     try {
       final catalog = MediaCatalogRepository(ref.read(appDatabaseProvider));
@@ -373,154 +390,229 @@ class _CollectionEditorState extends ConsumerState<_CollectionEditor> {
       title: widget.record == null ? 'New collection' : 'Edit collection',
       showBack: true,
     ),
-    body: ListView(
-      padding: const EdgeInsets.all(24),
-      children: [
-        if (_error != null) Text(_error!),
-        TextField(
-          controller: _title,
-          maxLength: 200,
-          decoration: const InputDecoration(labelText: 'Name'),
-          onChanged: (_) => setState(() {}),
-        ),
-        DropdownButtonFormField<String>(
-          initialValue: _type,
-          decoration: const InputDecoration(labelText: 'Collection type'),
-          items: const [
-            DropdownMenuItem(value: 'collection', child: Text('Collection')),
-            DropdownMenuItem(value: 'album', child: Text('Ordered album')),
-          ],
-          onChanged: widget.record != null
-              ? null
-              : (value) => setState(() => _type = value!),
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: _query,
-          decoration: const InputDecoration(
-            labelText: 'Search files in this library',
-            prefixIcon: Icon(Icons.search),
-          ),
-          onChanged: (_) {
-            _generation++;
-            _searchTimer?.cancel();
-            setState(() {
-              _matches = [];
-              _matchPage = null;
-              _history.clear();
-              _after = null;
-            });
-            _searchTimer = Timer(const Duration(milliseconds: 240), () {
-              if (mounted) _search();
-            });
-          },
-        ),
-        for (final item in _matches)
-          ListTile(
-            title: Text(item.userTitle ?? item.title),
-            trailing: IconButton(
-              icon: Icon(_ids.contains(item.id) ? Icons.check : Icons.add),
-              onPressed: _ids.contains(item.id) || _ids.length >= 1000
-                  ? null
-                  : () => setState(() {
-                      _ids.add(item.id);
-                      _members[item.id] = item;
-                    }),
-            ),
-          ),
-        if (_history.isNotEmpty || _matchPage?.more == true)
-          Wrap(
-            children: [
-              TextButton(
-                onPressed: _history.isEmpty
-                    ? null
-                    : () {
-                        _after = _history.removeLast();
-                        _search(reset: false);
-                      },
-                child: const Text('Previous matches'),
-              ),
-              TextButton(
-                onPressed: _matchPage?.more != true
-                    ? null
-                    : () {
-                        _history.add(_after);
-                        _after = _matchPage?.cursor;
-                        _search(reset: false);
-                      },
-                child: const Text('More matches'),
-              ),
-            ],
-          ),
-        const Divider(),
-        Row(
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860),
+        child: ListView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: const EdgeInsets.all(24),
           children: [
-            Text('${_ids.length} members · page ${_memberPage + 1}'),
-            TextButton(
-              onPressed: _memberPage == 0
+            Text(
+              'A place for related titles',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Choose a name, then find files in this library and arrange your members.',
+            ),
+            const SizedBox(height: 24),
+            if (_busy) const LinearProgressIndicator(),
+            if (_error != null)
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  _error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            TextField(
+              enabled: !_busy,
+              controller: _title,
+              maxLength: 200,
+              decoration: const InputDecoration(labelText: 'Name'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            TangerineSegments<String>(
+              value: _type,
+              label: 'Collection type',
+              choices: const [
+                TangerineChoice(
+                  value: 'collection',
+                  label: 'Collection',
+                  icon: Icons.collections_bookmark_outlined,
+                ),
+                TangerineChoice(
+                  value: 'album',
+                  label: 'Ordered album',
+                  icon: Icons.photo_library_outlined,
+                ),
+              ],
+              onChanged: widget.record != null || _busy
                   ? null
-                  : () => setState(() {
-                      _memberPage--;
+                  : (value) => setState(() => _type = value),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Find your members',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              enabled: !_busy,
+              controller: _query,
+              decoration: const InputDecoration(
+                labelText: 'Search files in this library',
+                prefixIcon: Icon(Icons.search),
+              ),
+              onChanged: (_) {
+                _generation++;
+                _searchTimer?.cancel();
+                setState(() {
+                  _matches = [];
+                  _matchPage = null;
+                  _history.clear();
+                  _after = null;
+                });
+                _searchTimer = Timer(const Duration(milliseconds: 240), () {
+                  if (mounted) _search();
+                });
+              },
+            ),
+            for (final item in _matches)
+              ListTile(
+                title: Text(item.userTitle ?? item.title),
+                trailing: IconButton(
+                  tooltip: _ids.contains(item.id)
+                      ? 'Already a member'
+                      : 'Add member',
+                  icon: Icon(_ids.contains(item.id) ? Icons.check : Icons.add),
+                  onPressed:
+                      _busy || _ids.contains(item.id) || _ids.length >= 1000
+                      ? null
+                      : () => setState(() {
+                          _ids.add(item.id);
+                          _members[item.id] = item;
+                        }),
+                ),
+              ),
+            if (_history.isNotEmpty || _matchPage?.more == true)
+              Wrap(
+                children: [
+                  TextButton(
+                    onPressed: _history.isEmpty
+                        ? null
+                        : () {
+                            _after = _history.removeLast();
+                            _search(reset: false);
+                          },
+                    child: const Text('Previous matches'),
+                  ),
+                  TextButton(
+                    onPressed: _matchPage?.more != true
+                        ? null
+                        : () {
+                            _history.add(_after);
+                            _after = _matchPage?.cursor;
+                            _search(reset: false);
+                          },
+                    child: const Text('More matches'),
+                  ),
+                ],
+              ),
+            const SizedBox(height: 28),
+            Text('Your members', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            if (_ids.isEmpty)
+              const Text(
+                'Search above to add your first title. Original files and their history stay in your library.',
+              )
+            else
+              const Text('Drag members to arrange their order.'),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    '${_ids.length} ${_ids.length == 1 ? 'member' : 'members'}${_ids.isEmpty ? '' : ' · page ${_memberPage + 1}'}',
+                  ),
+                ),
+                if (_ids.length > 64 || _memberPage > 0) ...[
+                  TextButton(
+                    onPressed: _memberPage == 0
+                        ? null
+                        : () => setState(() {
+                            _memberPage--;
+                            _memberLoad = _loadMembers();
+                          }),
+                    child: const Text('Previous'),
+                  ),
+                  TextButton(
+                    onPressed: (_memberPage + 1) * 64 >= _ids.length
+                        ? null
+                        : () => setState(() {
+                            _memberPage++;
+                            _memberLoad = _loadMembers();
+                          }),
+                    child: const Text('Next'),
+                  ),
+                ],
+              ],
+            ),
+            ReorderableListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: (_ids.length - _memberPage * 64).clamp(0, 64),
+              onReorder: (a, b) => setState(() {
+                a = _memberIndex(a);
+                b = _memberIndex(b);
+                if (b > a) b--;
+                _ids.insert(b, _ids.removeAt(a));
+              }),
+              itemBuilder: (context, index) => FutureBuilder<void>(
+                key: ValueKey(_ids[_memberIndex(index)]),
+                future: _memberLoad,
+                builder: (context, snapshot) => ListTile(
+                  title: Text(
+                    _members[_ids[_memberIndex(index)]]?.userTitle ??
+                        _members[_ids[_memberIndex(index)]]?.title ??
+                        'Unavailable member',
+                  ),
+                  onTap: _members[_ids[_memberIndex(index)]] == null
+                      ? null
+                      : () => context.push(
+                          MediaVisuals.route(
+                            _members[_ids[_memberIndex(index)]]!,
+                          ),
+                        ),
+                  trailing: IconButton(
+                    tooltip: 'Remove member',
+                    icon: const Icon(Icons.remove_circle_outline),
+                    onPressed: () => setState(() {
+                      _ids.removeAt(_memberIndex(index));
                       _memberLoad = _loadMembers();
                     }),
-              child: const Text('Previous'),
+                  ),
+                ),
+              ),
             ),
-            TextButton(
-              onPressed: (_memberPage + 1) * 64 >= _ids.length
-                  ? null
-                  : () => setState(() {
-                      _memberPage++;
-                      _memberLoad = _loadMembers();
-                    }),
-              child: const Text('Next'),
+            const SizedBox(height: 24),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TangerineInteraction(
+                enabled: !_busy && _title.text.trim().isNotEmpty,
+                child: FilledButton.icon(
+                  onPressed: _busy || _title.text.trim().isEmpty
+                      ? null
+                      : () => _save(),
+                  icon: const Icon(Icons.check),
+                  label: Text(_busy ? 'Saving…' : 'Save collection'),
+                ),
+              ),
             ),
+            if (widget.record != null)
+              TextButton(
+                onPressed: _busy ? null : () => _save(remove: true),
+                child: const Text('Delete collection'),
+              ),
           ],
         ),
-        ReorderableListView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: (_ids.length - _memberPage * 64).clamp(0, 64),
-          onReorder: (a, b) => setState(() {
-            a = _memberIndex(a);
-            b = _memberIndex(b);
-            if (b > a) b--;
-            _ids.insert(b, _ids.removeAt(a));
-          }),
-          itemBuilder: (context, index) => FutureBuilder<void>(
-            key: ValueKey(_ids[_memberIndex(index)]),
-            future: _memberLoad,
-            builder: (context, snapshot) => ListTile(
-              title: Text(
-                _members[_ids[_memberIndex(index)]]?.userTitle ??
-                    _members[_ids[_memberIndex(index)]]?.title ??
-                    'Unavailable member',
-              ),
-              onTap: _members[_ids[_memberIndex(index)]] == null
-                  ? null
-                  : () => context.push(
-                      MediaVisuals.route(_members[_ids[_memberIndex(index)]]!),
-                    ),
-              trailing: IconButton(
-                tooltip: 'Remove member',
-                icon: const Icon(Icons.remove_circle_outline),
-                onPressed: () => setState(() {
-                  _ids.removeAt(_memberIndex(index));
-                  _memberLoad = _loadMembers();
-                }),
-              ),
-            ),
-          ),
-        ),
-        FilledButton(
-          onPressed: _busy || _title.text.trim().isEmpty ? null : () => _save(),
-          child: const Text('Save collection'),
-        ),
-        if (widget.record != null)
-          TextButton(
-            onPressed: _busy ? null : () => _save(remove: true),
-            child: const Text('Delete collection'),
-          ),
-      ],
+      ),
     ),
   );
 }
