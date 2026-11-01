@@ -2,7 +2,7 @@ name: Windows installer
 on:
   push:
     branches: [codex/studystream-reliability]
-    paths: ['.github/workflows/windows-release.yml', 'packaging/windows.iss']
+    paths: ['.github/workflows/windows-release.yml', 'packaging/windows.iss', 'lib/**', 'packages/**', 'windows/**', 'pubspec.*']
   workflow_dispatch:
 permissions:
   contents: read

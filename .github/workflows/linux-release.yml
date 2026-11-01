@@ -2,7 +2,7 @@ name: Linux installer
 on:
   push:
     branches: [codex/studystream-reliability]
-    paths: ['.github/workflows/linux-release.yml', 'scripts/package-linux.sh']
+    paths: ['.github/workflows/linux-release.yml', 'scripts/package-linux.sh', 'lib/**', 'packages/**', 'linux/**', 'pubspec.*']
   workflow_dispatch:
     inputs:
       version:

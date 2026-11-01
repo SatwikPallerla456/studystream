@@ -187,7 +187,7 @@ class _MusicAtmosphereState extends ConsumerState<MusicAtmosphere>
                 reduced ? _palette : _currentPalette,
                 session.energy * strength,
                 session.beat * strength,
-                rough,
+                rough * strength,
                 () => animated ? _flow.value : 0,
                 _flow,
               ),

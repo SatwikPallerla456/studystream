@@ -84,6 +84,7 @@ void main() {
       final reducedLoud = await pixels();
       session.energy = 0;
       session.beat = 0;
+      session.grit = 0;
       session.notifyListeners();
       await tester.pump();
       expect(await pixels(), orderedEquals(reducedLoud));
