@@ -73,6 +73,12 @@ set_target_properties(${BINARY_NAME}
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
+# Ayatana 0.6 keeps this tray API but marks it deprecated. Preserve its warning
+# without promoting a third-party compatibility warning into a build failure.
+if(TARGET tray_manager_plugin)
+  target_compile_options(tray_manager_plugin PRIVATE -Wno-error=deprecated-declarations)
+endif()
+
 
 # The pinned forge package still exports its pre-fork native target/header names.
 # Bridge those names without editing Flutter-generated files or the pub cache.
