@@ -12,6 +12,7 @@ import '../../domain/music/music_models.dart';
 import '../../domain/music/music_repository.dart';
 import '../../domain/services/player_library_repository.dart';
 import '../../shared/widgets/item_artwork.dart';
+import '../../shared/widgets/timed_word_text.dart';
 import '../../shared/widgets/lesson_tools_sheet.dart';
 import 'music_art.dart';
 import 'music_provider.dart';
@@ -103,7 +104,7 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                 SwitchListTile(
                   value: timed,
                   onChanged: (v) => set(() => timed = v),
-                  title: const Text('Synchronized LRC timestamps'),
+                  title: const Text('Timed lyrics · LRC, ELRC or TTML'),
                 ),
                 TextField(
                   controller: lyric,
@@ -111,7 +112,7 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                   maxLength: 65536,
                   decoration: InputDecoration(
                     hintText: timed
-                        ? '[00:12.50] A line of lyrics'
+                        ? '[00:12.50]<00:12.50>Word <00:13.00>timing<00:14.00> (or paste TTML)'
                         : 'Paste lyrics you are allowed to use',
                   ),
                 ),
@@ -135,6 +136,11 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
     lyric.dispose();
     if (accepted == true)
       await _run(() async {
+        if (timed && text.trim().isNotEmpty && LyricLine.parse(text).isEmpty) {
+          throw const FormatException(
+            'No timed lyrics were found. Use LRC, ELRC or TTML, or turn off timed lyrics.',
+          );
+        }
         await MusicRepository(ref.read(appDatabaseProvider)).saveExtras(
           track.item,
           {timed ? 'lrc' : 'lyrics': text},
@@ -149,7 +155,7 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
     if (track == null) return;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['lrc', 'txt', 'cue'],
+      allowedExtensions: ['lrc', 'elrc', 'ttml', 'dfxp', 'xml', 'txt', 'cue'],
     );
     final path = result?.files.single.path;
     if (path == null) return;
@@ -167,9 +173,16 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                 ).map((t) => t.toJson()).toList(),
               ),
             }
-          : path.toLowerCase().endsWith('.lrc')
+          : RegExp(
+              r'\.(lrc|elrc|ttml|dfxp|xml)$',
+              caseSensitive: false,
+            ).hasMatch(path)
           ? {'lrc': text}
           : {'lyrics': text};
+      if (changes['lrc'] is String &&
+          LyricLine.parse(changes['lrc']!).isEmpty) {
+        throw const FormatException('No timed lyrics were found in this file.');
+      }
       if (changes['cue'] is String &&
           session.player!.state.duration > Duration.zero &&
           CueTrack.decode(changes['cue']!).any(
@@ -650,11 +663,12 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                                     ),
                                   ),
                                 ),
-                                child: Text(
-                                  session.lyrics[i].text.isEmpty
+                                child: TimedWordText(
+                                  text: session.lyrics[i].text.isEmpty
                                       ? '♪'
                                       : session.lyrics[i].text,
-                                  textAlign: TextAlign.center,
+                                  spans: session.lyrics[i].spans,
+                                  position: position.inMilliseconds,
                                   style: TextStyle(
                                     fontSize: i == active ? 25 : 18,
                                     fontWeight: i == active
@@ -670,7 +684,7 @@ class _MusicPlayerState extends ConsumerState<MusicPlayerScreen>
                         ] else
                           SelectableText(
                             track.extras['lyrics'] as String? ??
-                                'Add lyrics or import an LRC file to follow along.',
+                                'Import LRC, ELRC or TTML lyrics to follow along, including word timing.',
                             style: const TextStyle(
                               color: Colors.white70,
                               height: 1.8,

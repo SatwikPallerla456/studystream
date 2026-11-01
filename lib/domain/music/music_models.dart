@@ -1,50 +1,32 @@
 import 'dart:convert';
+import '../media/timed_text.dart';
 import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
 class LyricLine {
-  const LyricLine(this.milliseconds, this.text);
+  const LyricLine(
+    this.milliseconds,
+    this.text, {
+    this.endMilliseconds,
+    this.spans = const [],
+  });
   final int milliseconds;
+  final int? endMilliseconds;
   final String text;
+  final List<TimedTextSpan> spans;
   static List<LyricLine> parse(String raw) {
-    if (raw.length > 65536) throw const FormatException('Lyrics exceed 64 KiB');
-    final rows = <LyricLine>[];
-    var offset = 0;
-    for (final line in const LineSplitter().convert(raw)) {
-      final shift = RegExp(
-        r'^\[offset:([+-]?\d+)\]',
-        caseSensitive: false,
-      ).firstMatch(line);
-      if (shift != null) offset = int.parse(shift[1]!).clamp(-60000, 60000);
-    }
-    final time = RegExp(r'\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]');
-    for (final line in const LineSplitter().convert(raw)) {
-      final matches = time.allMatches(line).toList();
-      if (matches.isEmpty) continue;
-      final text = line.substring(matches.last.end).trim();
-      for (final match in matches) {
-        final seconds = int.parse(match[2]!);
-        if (seconds >= 60)
-          throw const FormatException('Invalid lyric timestamp');
-        final fraction = (match[3] ?? '').padRight(3, '0');
-        rows.add(
-          LyricLine(
-            math.max(
-              0,
-              int.parse(match[1]!) * 60000 +
-                  seconds * 1000 +
-                  (int.tryParse(fraction) ?? 0) +
-                  offset,
-            ),
-            text,
-          ),
-        );
-        if (rows.length > 3000)
-          throw const FormatException('Lyrics have over 3,000 lines');
-      }
-    }
-    rows.sort((a, b) => a.milliseconds.compareTo(b.milliseconds));
-    return rows;
+    final cues = TimedText.parse(raw, maxBytes: 65536);
+    if (cues.length > 3000)
+      throw const FormatException('Lyrics have over 3,000 lines');
+    return [
+      for (final cue in cues)
+        LyricLine(
+          cue.start,
+          cue.text,
+          endMilliseconds: cue.end,
+          spans: cue.spans,
+        ),
+    ];
   }
 }
 

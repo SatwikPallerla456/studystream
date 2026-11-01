@@ -16,6 +16,7 @@ import 'native_playback_tools.dart';
 import 'advanced_video_workbench.dart';
 import 'video_session_tools.dart';
 import 'video_subtitles.dart';
+import '../../domain/media/timed_text.dart';
 import '../../domain/services/video_playback_workspace.dart';
 import 'native_output_tools.dart';
 import 'advanced_player_screen.dart';
@@ -482,13 +483,15 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         }
       }
       final subtitle = await _database.getSetting('subtitle.${item.id}');
-      if (subtitle != null && await File(subtitle).exists()) {
+      if (subtitle != null &&
+          _videoTools.subtitles.primary == null &&
+          await File(subtitle).exists()) {
         try {
           await SubtitleSidecars.validate(
             item.filePath.startsWith('remote:') ? item.filename : item.filePath,
             subtitle,
           );
-          await player.setSubtitleTrack(SubtitleTrack.uri(subtitle));
+          await _attachExternalSubtitle(player, subtitle);
         } on FormatException {
           // A stale/mismatched companion must not prevent the title opening.
         } on FileSystemException {
@@ -1055,13 +1058,52 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
     final picked = await FilePicker.platform.pickFiles(
       dialogTitle: 'Choose a subtitle file',
       type: FileType.custom,
-      allowedExtensions: const ['srt', 'vtt', 'ass', 'ssa', 'idx'],
+      allowedExtensions: const [
+        'srt',
+        'vtt',
+        'ass',
+        'ssa',
+        'idx',
+        'ttml',
+        'dfxp',
+        'xml',
+        'elrc',
+        'lrc',
+      ],
       allowMultiple: false,
       withData: false,
     );
     final path = picked?.files.single.path;
     if (path == null) return;
     await _loadSubtitle(path);
+  }
+
+  Future<void> _attachExternalSubtitle(
+    PlaybackEngine player,
+    String path, {
+    bool persist = false,
+  }) async {
+    if (TimedText.isEnhancedPath(path)) {
+      final document = await VideoSubtitleDocument.open(path);
+      await player.setSubtitleTrack(SubtitleTrack.no());
+      if (!mounted) return;
+      _videoTools.subtitles.primary = document;
+      _videoTools.subtitles.enabled = true;
+      if (persist) {
+        await _videoTools.save(primaryFile: path);
+      } else {
+        _videoTools.subtitles.changed();
+      }
+    } else {
+      await player.setSubtitleTrack(
+        SubtitleTrack.uri(path, title: File(path).uri.pathSegments.last),
+      );
+      if (persist && mounted) {
+        _videoTools.subtitles.primary = null;
+        _videoTools.subtitles.secondary = null;
+        await _videoTools.save(clearPrimary: true, clearSecondary: true);
+      }
+    }
   }
 
   Future<void> _loadSubtitle(String path) async {
@@ -1073,9 +1115,7 @@ class _MediaPlayerScreenState extends ConsumerState<MediaPlayerScreen>
         path,
       );
       if (!mounted || !identical(player, _player)) return;
-      await player.setSubtitleTrack(
-        SubtitleTrack.uri(path, title: File(path).uri.pathSegments.last),
-      );
+      await _attachExternalSubtitle(player, path, persist: true);
       await _database.setSetting('subtitle.${item.id}', path);
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(

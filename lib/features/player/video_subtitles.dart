@@ -1,12 +1,21 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import '../../data/playback/playback_engine.dart';
+import '../../domain/media/timed_text.dart';
+import '../../shared/widgets/timed_word_text.dart';
 
 class VideoSubtitleCue {
-  const VideoSubtitleCue(this.start, this.end, this.text);
+  const VideoSubtitleCue(
+    this.start,
+    this.end,
+    this.text, {
+    this.spans = const [],
+  });
   final int start, end;
   final String text;
+  final List<TimedTextSpan> spans;
 }
 
 class VideoSubtitleDocument {
@@ -24,12 +33,29 @@ class VideoSubtitleDocument {
     final file = File(path);
     if (await file.length() > 2 * 1024 * 1024)
       throw const FormatException('Choose subtitles smaller than 2 MiB.');
-    return parse(await file.readAsString());
+    final text = await file.readAsString();
+    return Isolate.run(() => VideoSubtitleDocument.parse(text));
   }
 
   static VideoSubtitleDocument parse(String text) {
     if (utf8.encode(text).length > 2 * 1024 * 1024)
       throw const FormatException('Subtitle file exceeds 2 MiB.');
+    if (TimedText.isXml(text) || !text.contains('-->')) {
+      final parsed = TimedText.parse(text);
+      if (parsed.isEmpty)
+        throw const FormatException('No timed TTML/LRC/ELRC text was found.');
+      return VideoSubtitleDocument([
+        for (final cue in parsed)
+          if (cue.text.trim().isNotEmpty &&
+              (cue.end == null || cue.end! > cue.start))
+            VideoSubtitleCue(
+              cue.start,
+              cue.end ?? TimedText.maxTime,
+              cue.text,
+              spans: cue.spans,
+            ),
+      ]);
+    }
     int? stamp(String value) {
       final match = RegExp(
         r'^(?:(\d{1,3}):)?(\d{2}):(\d{2})[.,](\d{3})$',
@@ -76,7 +102,7 @@ class VideoSubtitleDocument {
     return VideoSubtitleDocument(rows);
   }
 
-  String textAt(int position) {
+  List<VideoSubtitleCue> cuesAt(int position) {
     var low = 0, high = cues.length;
     while (low < high) {
       final mid = (low + high) ~/ 2;
@@ -86,16 +112,18 @@ class VideoSubtitleDocument {
         high = mid;
       }
     }
-    final visible = <String>[];
+    final visible = <VideoSubtitleCue>[];
     for (
       var i = low - 1;
       i >= 0 && _ends[i] > position && visible.length < 4;
       i--
     ) {
-      if (cues[i].end > position) visible.insert(0, cues[i].text);
+      if (cues[i].end > position) visible.insert(0, cues[i]);
     }
-    return visible.join('\n');
+    return visible;
   }
+
+  String textAt(int position) => cuesAt(position).map((c) => c.text).join('\n');
 
   String srt() {
     String time(int ms) =>
@@ -141,14 +169,21 @@ class VideoSubtitleLayer extends StatelessWidget {
               final time = (snapshot.data ?? Duration.zero).inMilliseconds;
               final p = presentation;
               final a = p.enabled
-                  ? p.primary?.textAt(time - p.delay) ?? ''
-                  : '';
+                  ? p.primary?.cuesAt(time - p.delay) ?? <VideoSubtitleCue>[]
+                  : <VideoSubtitleCue>[];
               final b = p.enabled
-                  ? p.secondary?.textAt(time - p.secondaryDelay) ?? ''
-                  : '';
-              Widget line(String text, double size, int color) => Text(
-                text,
-                textAlign: TextAlign.center,
+                  ? p.secondary?.cuesAt(time - p.secondaryDelay) ??
+                        <VideoSubtitleCue>[]
+                  : <VideoSubtitleCue>[];
+              Widget line(
+                VideoSubtitleCue cue,
+                double size,
+                int color,
+                int delay,
+              ) => TimedWordText(
+                text: cue.text,
+                spans: cue.spans,
+                position: time - delay,
                 style: TextStyle(
                   fontSize: size,
                   color: Color(color),
@@ -181,9 +216,15 @@ class VideoSubtitleLayer extends StatelessWidget {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                if (a.isNotEmpty) line(a, p.size, p.color),
-                                if (b.isNotEmpty)
-                                  line(b, p.secondarySize, p.secondaryColor),
+                                for (final cue in a)
+                                  line(cue, p.size, p.color, p.delay),
+                                for (final cue in b)
+                                  line(
+                                    cue,
+                                    p.secondarySize,
+                                    p.secondaryColor,
+                                    p.secondaryDelay,
+                                  ),
                               ],
                             ),
                           ),

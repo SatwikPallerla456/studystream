@@ -550,7 +550,7 @@ class _AdvancedVideoState extends State<AdvancedVideoWorkbench> {
       );
     final selection = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['srt', 'vtt'],
+      allowedExtensions: ['srt', 'vtt', 'ttml', 'dfxp', 'xml', 'elrc', 'lrc'],
       allowMultiple: false,
     );
     final path = selection?.files.single.path;
@@ -572,7 +572,9 @@ class _AdvancedVideoState extends State<AdvancedVideoWorkbench> {
   Future<void> _translate() async {
     final document = widget.tools.subtitles.primary;
     if (document == null)
-      throw const FormatException('Choose a primary SRT/WebVTT file first.');
+      throw const FormatException(
+        'Choose a primary SRT/WebVTT/TTML/ELRC file first.',
+      );
     final endpoint = TextEditingController(
       text:
           await widget.database.getSetting('player.video.translation.url') ??
@@ -708,7 +710,7 @@ class _AdvancedVideoState extends State<AdvancedVideoWorkbench> {
     );
     return _list([
       const Text(
-        'Two external timed text files provide dual-language captions. Embedded/image-based subtitles continue through the native track picker. Turn off embedded captions when using this overlay.',
+        'Two external SRT, VTT, TTML or ELRC files provide dual-language captions. Embedded/image-based subtitles continue through the native track picker. Turn off embedded captions when using this overlay.',
       ),
       SwitchListTile(
         title: const Text('External subtitle overlay'),
@@ -722,8 +724,14 @@ class _AdvancedVideoState extends State<AdvancedVideoWorkbench> {
       Wrap(
         spacing: 8,
         children: [
-          _button('Load primary SRT / VTT', () => _subtitleFile(false)),
-          _button('Load secondary SRT / VTT', () => _subtitleFile(true)),
+          _button(
+            'Load primary SRT / VTT / TTML / ELRC',
+            () => _subtitleFile(false),
+          ),
+          _button(
+            'Load secondary SRT / VTT / TTML / ELRC',
+            () => _subtitleFile(true),
+          ),
           _button(
             'Translate primary into secondary',
             _translate,

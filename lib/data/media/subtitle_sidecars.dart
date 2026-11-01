@@ -4,7 +4,18 @@ import '../../domain/catalog/catalog_hints.dart';
 
 /// Local companions only. Remote library paths are never enumerated on a client.
 abstract final class SubtitleSidecars {
-  static const extensions = {'srt', 'vtt', 'ass', 'ssa', 'idx'};
+  static const extensions = {
+    'srt',
+    'vtt',
+    'ass',
+    'ssa',
+    'idx',
+    'ttml',
+    'dfxp',
+    'xml',
+    'elrc',
+    'lrc',
+  };
   static final _marker = RegExp(
     r'\{edition-[^{}]+\}|\[edition-[^\[\]]+\]',
     caseSensitive: false,
