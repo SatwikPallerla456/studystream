@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ubuntu 24.04 x64 installer. Run after flutter build linux --release.
+# Debian 13 x64 installer. Run after flutter build linux --release.
 set -euo pipefail
 version="${1:?Pass the release version}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+~-][a-zA-Z0-9.]+)?$ ]] || { echo 'Invalid package version' >&2; exit 1; }
@@ -29,10 +29,10 @@ Section: video
 Priority: optional
 Architecture: amd64
 Maintainer: Tangerine <noreply@github.com>
-Depends: libgtk-3-0t64, libstdc++6, libsecret-1-0, libnotify4, libayatana-appindicator3-1, libvlc5, vlc-plugin-base, vlc-plugin-video-output, libmpv2, libepoxy0, libwpewebkit-1.0-3, libwpebackend-fdo-1.0-1, libwpe-1.0-1, libwayland-server0
+Depends: libgtk-3-0t64, libstdc++6, libsecret-1-0, libnotify4, libayatana-appindicator3-1, libvlc5, vlc-plugin-base, vlc-plugin-video-output, libmpv2, libepoxy0, libwpewebkit-2.0-1, libwpebackend-fdo-1.0-1, libwpe-1.0-1, libwayland-server0
 Description: Tangerine media library, player and reader
  Local media libraries, music playback, reading and learning tools.
- Built for Ubuntu 24.04 LTS on x86-64.
+ Built for Debian 13 LTS on x86-64.
 CONTROL
 chmod 0755 "$stage/DEBIAN"
 find "$stage" -type d -exec chmod 0755 {} +
