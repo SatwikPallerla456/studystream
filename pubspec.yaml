@@ -62,6 +62,8 @@ dependencies:
   flutter_svg: ^2.3.0
 
 dependency_overrides:
+  flutter_inappwebview_forge_linux:
+    path: packages/flutter_inappwebview_forge_linux
   # Repository-owned Swift compatibility fixes; see the package PATCHES.md.
   flutter_inappwebview_forge_macos:
     path: packages/flutter_inappwebview_forge_macos

@@ -348,12 +348,11 @@ packages:
     source: hosted
     version: "2.1.35"
   flutter_inappwebview_forge_linux:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
-      name: flutter_inappwebview_forge_linux
-      sha256: de194cca1d85cbddccb4c02bef935578acfdeae2c23ba68a07701e323195b05d
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/flutter_inappwebview_forge_linux"
+      relative: true
+    source: path
     version: "1.0.8"
   flutter_inappwebview_forge_macos:
     dependency: "direct overridden"
